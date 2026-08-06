@@ -60,9 +60,11 @@ def public_merchant_ref(merchant: dict[str, Any] | None) -> dict[str, Any] | Non
         return None
     safe = _strip_private(merchant, _PRIVATE_MERCHANT_FIELDS)
     # Always include id, name; tags as list
+    # 弱引用语义（独立 schema）：影子 merchants 表无对应行时 join 字段为
+    # None——public ref 输出空串而非 null（与 shopping-cli 的分叉点）。
     result: dict[str, Any] = {
-        "id": safe.get("id", ""),
-        "name": safe.get("name", ""),
+        "id": safe.get("id", "") or "",
+        "name": safe.get("name", "") or "",
     }
     if safe.get("city"):
         result["city"] = safe["city"]
