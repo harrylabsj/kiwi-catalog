@@ -15,6 +15,7 @@ dev = ["ruff", "mypy"]
 
 [project.scripts]
 kiwi-catalog-api = "kiwi_catalog.scripts.kiwi_catalog_api:main"
+kiwi-catalog = "kiwi_catalog.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kiwi_catalog*"]
