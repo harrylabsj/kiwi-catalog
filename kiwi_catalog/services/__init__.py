@@ -1,0 +1,1 @@
+"""kiwi-catalog package."""
