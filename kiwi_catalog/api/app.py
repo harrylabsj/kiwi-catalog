@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog import VERSION
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
@@ -263,10 +264,225 @@ def handle_request(
         return 500, {"ok": False, "error": "internal server error"}
 
 
+
+
+# ── FastAPI dual-stack (phase 3 follow-up) ─────────────────────────────────
+# FastAPI 可用时 create_catalog_app 返回 FastAPI app（13 条 catalog 路由，
+# 与 fallback ASGI 共用 wrapper）；不可用时回退 fallback。
+
+try:
+    from fastapi import FastAPI
+    from fastapi import Header as _Header
+except ImportError:
+    FastAPI = None  # type: ignore[assignment,misc]
+    _Header = None  # type: ignore[assignment,misc]
+
+
+def _auth_header_default() -> Any:
+    if _Header is None:
+        return ""
+    return _Header(default="")
+
+
+def _idempotency_key_header_default() -> Any:
+    if _Header is None:
+        return ""
+    return _Header(default="", alias="Idempotency-Key")
+
+
+AUTHORIZATION_HEADER = _auth_header_default()
+IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
+
+
+def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
+    """Register the 13 catalog routes on a FastAPI app.
+
+    Exception mapping mirrors the fallback handle_request (403/404/409/429/
+    400) so both stacks behave identically on the wire.
+    """
+    from fastapi.responses import JSONResponse
+    from kiwi_catalog.api import auth as api_auth
+
+    def _error_response(status: int, exc: Exception) -> JSONResponse:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
+
+    @app.exception_handler(AuthError)
+    def _auth_error(_request: Any, exc: AuthError) -> JSONResponse:
+        return _error_response(403, exc)
+
+    @app.exception_handler(PermissionDenied)
+    def _permission_error(_request: Any, exc: PermissionDenied) -> JSONResponse:
+        return _error_response(403, exc)
+
+    @app.exception_handler(NotFoundError)
+    def _not_found_error(_request: Any, exc: NotFoundError) -> JSONResponse:
+        return _error_response(404, exc)
+
+    @app.exception_handler(ConflictError)
+    def _conflict_error(_request: Any, exc: ConflictError) -> JSONResponse:
+        return _error_response(409, exc)
+
+    @app.exception_handler(IdempotencyConflict)
+    def _idempotency_error(_request: Any, exc: IdempotencyConflict) -> JSONResponse:
+        return _error_response(409, exc)
+
+    @app.exception_handler(RateLimitError)
+    def _rate_limit_error(_request: Any, exc: RateLimitError) -> JSONResponse:
+        return _error_response(429, exc)
+
+    @app.exception_handler(ValidationError)
+    def _validation_error(_request: Any, exc: ValidationError) -> JSONResponse:
+        return _error_response(400, exc)
+
+    @app.exception_handler(ShoppingCliError)
+    def _shopping_error(_request: Any, exc: ShoppingCliError) -> JSONResponse:
+        return _error_response(400, exc)
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return _health(db_path)
+
+    @app.get("/v1/agent-catalog/agents")
+    def list_catalog_agents(limit: str = "", cursor: str = "") -> dict[str, Any]:
+        return _list_catalog_agents(db_path, {}, {"limit": limit, "cursor": cursor})
+
+    @app.get("/v1/agent-catalog/agents/search")
+    def search_agent_catalog(
+        q: str = "",
+        category: str = "",
+        skill: str = "",
+        capability: str = "",
+        protocol: str = "",
+        hosting_mode: str = "",
+        verification_status: str = "",
+        verified_after: str = "",
+        limit: str = "",
+        cursor: str = "",
+    ) -> dict[str, Any]:
+        return _search_agent_catalog(
+            db_path,
+            {},
+            {
+                "q": q,
+                "category": category,
+                "skill": skill,
+                "capability": capability,
+                "protocol": protocol,
+                "hosting_mode": hosting_mode,
+                "verification_status": verification_status,
+                "verified_after": verified_after,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
+
+    @app.get("/v1/agent-catalog/agents/{catalog_agent_id}")
+    def get_catalog_agent(catalog_agent_id: str) -> dict[str, Any]:
+        return _get_catalog_agent(db_path, catalog_agent_id)
+
+    @app.get("/v1/agent-catalog/merchants/{merchant_id}/agents")
+    def list_merchant_catalog_agents(
+        merchant_id: str, limit: str = "", cursor: str = ""
+    ) -> dict[str, Any]:
+        return _list_merchant_catalog_agents(
+            db_path, merchant_id, {}, {"limit": limit, "cursor": cursor}
+        )
+
+    @app.post("/v1/agent-catalog/agents/register")
+    def register_catalog_agent(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _register_catalog_agent(
+            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/refresh")
+    def refresh_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _refresh_catalog_agent(
+            db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/verify")
+    def verify_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _verify_catalog_agent(
+            db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/claim")
+    def claim_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _claim_catalog_agent(
+            db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/suspend")
+    def suspend_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _suspend_catalog_agent(
+            db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/reinstate")
+    def reinstate_catalog_agent(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _reinstate_catalog_agent(
+            db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.get("/v1/hosted/agents/{catalog_agent_id}/agent-card.json")
+    def hosted_agent_card_route(catalog_agent_id: str) -> Any:
+        return _hosted_agent_card_document(db_path, catalog_agent_id)
+
+    @app.get("/v1/hosted/agents/{catalog_agent_id}/ucp")
+    def hosted_ucp_profile_route(catalog_agent_id: str) -> Any:
+        return _hosted_ucp_profile_document(db_path, catalog_agent_id)
+
+
 def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
-    """kiwi-catalog standalone service (fallback ASGI)."""
-    return MarketplaceASGIApp(
-        db_path,
-        route_provider=lambda: list(_ROUTE_TABLE),
-        route_resolver=lambda method, path: resolve_route(method, path),
+    """kiwi-catalog standalone service (FastAPI dual-stack).
+
+    FastAPI 可用时返回 FastAPI app（13 条 catalog 路由）；否则回退 fallback
+    ASGI（同一 wrapper 与路由表）。  FastAPI 端点与 fallback 共用 handler，
+    auth/idempotency header 经 payload_with_auth 合并进 payload。
+    """
+    if FastAPI is None:
+        return MarketplaceASGIApp(
+            db_path,
+            route_provider=lambda: list(_ROUTE_TABLE),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+
+    app = FastAPI(
+        title="kiwi-catalog API",
+        version=VERSION,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
+    app.state.db_path = str(db_path)
+    _register_fastapi_routes(app, db_path)
+    return app
