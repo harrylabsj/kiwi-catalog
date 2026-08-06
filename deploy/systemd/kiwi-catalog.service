@@ -1,0 +1,29 @@
+# kiwi-catalog systemd unit (阶段 4 部署, VM 形态)
+# 安装: sudo cp deploy/systemd/kiwi-catalog.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now kiwi-catalog
+# 环境变量按部署环境设置（/etc/kiwi-catalog/env 或 unit 内 EnvironmentFile）。
+
+[Unit]
+Description=kiwi-catalog standalone Agent Catalog service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kiwi-catalog
+Group=kiwi-catalog
+WorkingDirectory=/opt/kiwi-catalog
+EnvironmentFile=-/etc/kiwi-catalog/env
+ExecStart=/opt/kiwi-catalog/.venv/bin/kiwi-catalog-api --db /var/lib/kiwi-catalog/catalog.sqlite --host 0.0.0.0 --port 8600
+Restart=on-failure
+RestartSec=3
+
+# 安全硬化
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/kiwi-catalog
+
+[Install]
+WantedBy=multi-user.target
