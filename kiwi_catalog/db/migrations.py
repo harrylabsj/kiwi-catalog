@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -371,6 +371,78 @@ def migration_009_shadow_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+_COMMERCE_LISTINGS_DDL = [
+    """
+    create table if not exists commerce_listings (
+        id integer primary key autoincrement,
+        listing_id text not null unique,
+        listing_type text not null
+            check(listing_type in ('product','capability')),
+        owner_agent_id text not null,
+        merchant_id text not null,
+        source_product_ref text,
+        publisher_listing_key text,
+        source_revision text not null default '',
+        title text not null,
+        summary text not null default '',
+        category text not null,
+        brand text not null default '',
+        attributes_json text not null default '{}',
+        regions_json text not null default '[]',
+        tags_json text not null default '[]',
+        commercial_hints_json text not null default '{}',
+        handoff_destination_types_json text not null default '[]',
+        listing_digest text not null,
+        publication_state text not null default 'ACTIVE'
+            check(publication_state in ('ACTIVE','WITHDRAWN','SUSPENDED')),
+        listing_freshness_state text not null default 'FRESH'
+            check(listing_freshness_state in ('FRESH','STALE')),
+        published_at text not null,
+        updated_at text not null,
+        fresh_until text not null,
+        created_at text not null
+    )
+    """,
+    """
+    create index if not exists idx_commerce_listings_owner
+        on commerce_listings(owner_agent_id)
+    """,
+    """
+    create index if not exists idx_commerce_listings_type_category
+        on commerce_listings(listing_type, category)
+    """,
+    """
+    create index if not exists idx_commerce_listings_publication_freshness
+        on commerce_listings(publication_state, listing_freshness_state)
+    """,
+    """
+    create index if not exists idx_commerce_listings_updated
+        on commerce_listings(updated_at, id)
+    """,
+    """
+    create unique index if not exists idx_commerce_listings_product_ref_unique
+        on commerce_listings(owner_agent_id, listing_type, source_product_ref)
+        where source_product_ref is not null
+    """,
+    """
+    create unique index if not exists idx_commerce_listings_publisher_key_unique
+        on commerce_listings(owner_agent_id, listing_type, publisher_listing_key)
+        where publisher_listing_key is not null
+    """,
+]
+
+
+def migration_010_commerce_listings(conn: sqlite3.Connection) -> None:
+    """Listing 域（产品文档 kiwi-catalog v0.4；升级计划 §3）。
+
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（tests/test_shadow_tables.py
+    锁定 fresh 路径与迁移路径等价）。listing_freshness_state 是 Listing 域
+    独立状态（FRESH/STALE 大写），与 catalog_agents.freshness_state 分离。
+    """
+    for statement in _COMMERCE_LISTINGS_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -381,6 +453,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "merchant_single_agent", migration_007_merchant_single_agent),
     Migration(8, "three_state_domains", migration_008_three_state_domains),
     Migration(9, "shadow_tables", migration_009_shadow_tables),
+    Migration(10, "commerce_listings", migration_010_commerce_listings),
 )
 
 

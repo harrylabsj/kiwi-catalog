@@ -16,6 +16,7 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.serializers import catalog_agent_record, catalog_search_result
 from kiwi_catalog.agent_catalog.sqlite_repository import (
+    append_catalog_audit,
     enforce_catalog_register_domain_limit,
     get_catalog_agent_with_merchant,
     list_capabilities,
@@ -573,6 +574,7 @@ def _moderation_action(
     endpoint: str,
     action: str,
     reason: str = "",
+    after_work: Any = None,
 ) -> dict[str, Any]:
     """Shared v3.0 moderation write path: suspend / reinstate.
 
@@ -607,6 +609,11 @@ def _moderation_action(
             require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
             service = _verification_service(db_path, conn)
             result = getattr(service, action)(catalog_agent_id, actor="admin", reason=reason)
+            if after_work is not None:
+                # 同事务窗口内的治理联动（v0.4 DoD #12）：agent suspend 与其
+                # owned Listings 标记原子提交，要么都成功要么都回滚；幂等
+                # replay 提前 return 不会重复执行（联动本身幂等）。
+                after_work(conn, catalog_agent_id)
             response: dict[str, Any] = {
                 "ok": True,
                 "catalog_agent_id": catalog_agent_id,
@@ -648,6 +655,20 @@ def suspend_catalog_agent(
     catalog row but is excluded from verification promotion; the only way
     back is an explicit admin reinstate.
     """
+    def _suspend_owned_listings(conn: Any, agent_id: str) -> None:
+        """治理联动（v0.4 DoD #12 标记半边）：owned ACTIVE Listings → SUSPENDED。
+
+        与 agent suspend 同一事务原子提交；search join 排除半边在
+        listings/search.py（两件事都做，评审 P2-11 定死）。
+        """
+        from kiwi_catalog.listings.policy import suspend_owned_listings
+
+        count = suspend_owned_listings(conn, agent_id)
+        if count:
+            append_catalog_audit(
+                conn, agent_id, "admin", "listings_suspended", {"count": count}
+            )
+
     return _moderation_action(
         db_path,
         catalog_agent_id,
@@ -655,6 +676,7 @@ def suspend_catalog_agent(
         endpoint=SUSPEND_ENDPOINT,
         action="suspend",
         reason=_payload_reason(payload),
+        after_work=_suspend_owned_listings,
     )
 
 

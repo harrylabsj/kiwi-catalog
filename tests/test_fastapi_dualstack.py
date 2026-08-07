@@ -79,6 +79,31 @@ class FastApiDualStackTest(unittest.TestCase):
         # FastAPI 追加 /openapi.json 等内置路由——只断言 catalog 路由被覆盖。
         self.assertTrue(fallback_paths <= fastapi_paths)
 
+    def test_listings_routes_in_both_stacks(self) -> None:
+        """6 条 listing 路由双栈覆盖（v0.4）；/v1/listings/search 不被 {listing_id} 吞掉。"""
+        from fastapi.testclient import TestClient
+
+        listing_paths = {
+            "/v1/listings/search",
+            "/v1/listings/{listing_id}",
+            "/v1/agents/{catalog_agent_id}/listings",
+            "/v1/listings/publish",
+            "/v1/listings/{listing_id}/withdraw",
+            "/v1/listings/{listing_id}/reinstate",
+        }
+        self.assertTrue(listing_paths <= {entry.path_template for entry in app_module._ROUTE_TABLE})
+        with TestClient(self.app) as client:
+            # search 静态段优先于参数段：不把 "search" 当 listing_id（404 而不是 400）
+            resp = client.get("/v1/listings/search")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertEqual(resp.json()["results"], [])
+            # 未知 listing_id → 404（参数段正确解析）
+            resp = client.get("/v1/listings/lst_doesnotexist")
+            self.assertEqual(resp.status_code, 404, resp.text)
+            # FastAPI 默认参数传空字符串：数值/布尔过滤视为未提供（不 400）
+            resp = client.get("/v1/listings/search")
+            self.assertEqual(resp.status_code, 200, resp.text)
+
 
 if __name__ == "__main__":
     unittest.main()

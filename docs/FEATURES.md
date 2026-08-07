@@ -1,13 +1,15 @@
 # kiwi-catalog 功能文档
 
-> 状态：对应 `main` 分支当前实现（2026-08-07，66 passed / 5 skipped）。
+> 状态：对应 `main` 分支当前实现（2026-08-07，118 passed / 6 skipped；
+> v0.4 Product-first Commerce Discovery 已落地）。
 > 本文描述**已实现**的功能面，不含设计文档中规划但未落地的部分
-> （如 PG/Redis 多实例限流、验证阶梯的第三方互操作证据）。
+> （如 PG/Redis 多实例限流、验证阶梯的第三方互操作证据、FTS/vector 搜索）。
 
 kiwi-catalog 是 Kiwi A2A 商业协商网络的 **Agent Catalog 服务**——从
 shopping-cli 抽离的独立部署目录（切割分水岭：**不含托管协商与 marketplace
-域**）。它回答一个问题：*「网络里有哪些可协商的 commerce agent，它们的状态
-如何，是否可信」*。
+域**）。它回答两个问题：*「网络里有哪些可协商的 commerce agent，它们的
+状态如何，是否可信」*（Agent 域），以及 *「谁可能有我要的商品/能力」
+*（v0.4 Listing 域，Product-first Commerce Discovery）*。
 
 ---
 
@@ -19,6 +21,8 @@ shopping-cli 抽离的独立部署目录（切割分水岭：**不含托管协�
 | 验证 | `POST /v1/agents/{id}/verify` / `refresh` | §6 五阶验证阶梯 + 三正交状态域 + 持久验证队列 |
 | 发现/搜索 | `GET /v1/agents/search` | 多维度硬过滤 + 确定性排序 + cursor 分页 |
 | 治理 | `suspend` / `reinstate` / `claim` | admin 处置、owner 认领、审计事件、双维度限流 |
+| Listing（v0.4） | `POST /v1/listings/publish` + `/v1/listings/search` | ProductListing/CapabilityListing 发布、搜索、下架、恢复（public-only discovery projection） |
+| Listing 治理联动 | agent `suspend` | owned Listings 同事务置 SUSPENDED + 搜索 join 排除（DoD #12） |
 | 观测 | `GET /health` + CLI `stats` / `doctor` | §24 runtime metrics |
 
 ## 2. API 面
@@ -51,6 +55,12 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | POST | `/v1/agents/{id}/refresh` / `verify` / `claim` | v1 面对应动作 |
 | GET | `/v1/hosted/agents/{id}/agent-card.json` | hosted 发布面：Agent Card |
 | GET | `/v1/hosted/agents/{id}/ucp` | hosted 发布面：UCP profile |
+| GET | `/v1/listings/search` | Listing 搜索（v0.4：JSON1 结构化过滤 + agent join 排除 + 确定性排序 + cursor） |
+| GET | `/v1/listings/{id}` | 单个 Listing（public-only 投影） |
+| GET | `/v1/agents/{id}/listings` | publisher 自查（支持 `?freshness_state=STALE` 过期项） |
+| POST | `/v1/listings/publish` | 发布/upsert Listing（owner token + 五步幂等 + digest 去重锚点） |
+| POST | `/v1/listings/{id}/withdraw` | publisher 主动下架 |
+| POST | `/v1/listings/{id}/reinstate` | SUSPENDED → ACTIVE（publisher/governance） |
 
 ### 2.3 v1 面（`/v1/agents/*`）与 legacy 面（`/v1/agent-catalog/*`）
 
@@ -132,7 +142,7 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 
 ## 5. 数据模型
 
-13 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v9，
+14 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v10，
 两路径产出同一表集合，有测试锁定）：
 
 - **catalog 域**：catalog_agents（含三域列 + handoff_destination_types）、
@@ -141,6 +151,8 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 - **治理域**：agent_catalog_register_limits、agent_catalog_write_idempotency、
   agent_catalog_write_rate_limits、a2a_inbound_idempotency、
   verification_queue_tasks、agent_trust_observations；
+- **listing 域（v10）**：commerce_listings（listing 类型/owner 绑定/upsert
+  key 双轨/JSON 投影列/发布与新鲜度状态；partial unique 兜底行级幂等）；
 - **影子域**：merchants（public 字段）、audit_events、meta。
 
 要点：
@@ -173,9 +185,13 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 ## 8. 测试与已知边界
 
-- 66 passed / 5 skipped（FastAPI 条件 skip）；覆盖：三态域迁移与折叠、
+- 118 passed / 6 skipped（FastAPI 条件 skip）；覆盖：三态域迁移与折叠、
   幂等/限流、SSRF fetcher、影子表、仓库抽象防接口漂移、验证队列执行模型、
-  迁移路径与 fresh SCHEMA 一致。
+  迁移路径与 fresh SCHEMA 一致、Listing 域（publish 契约/幂等 upsert/
+  搜索/新鲜度惰性翻转/agent 治理联动/dualstack 路由）。
 - **未实现/接缝**：PG+Redis 多实例限流（P3/P5）；验证阶梯的第三方互操作
   证据（wire 级）；`agent_trust_observations` 的写入方（表已建，消费在
-  后续版本）；`reported_external_conversion` 类外部成交指标不在本服务范围。
+  后续版本）；`reported_external_conversion` 类外部成交指标不在本服务范围；
+  FTS/vector/语义搜索（v0.4 §8 MAY）；`/v1/listings/bulk-publish` 与
+  listing_public_snapshots 历史快照表（v0.4 §14 optional）；refresh webhook
+  （catalog → publisher 主动通知，v0.4 §15.1 MAY）。

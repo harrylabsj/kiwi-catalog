@@ -17,6 +17,8 @@ import inspect
 import unittest
 
 from kiwi_catalog.agent_catalog import repository, sqlite_repository
+from kiwi_catalog.listings import repository as listing_repository
+from kiwi_catalog.listings import sqlite_repository as listing_sqlite_repository
 
 # Protocol 方法名 → SQLite 现状实现函数名（catalog 域）。
 _CATALOG_MAPPING: dict[str, str] = {
@@ -86,6 +88,52 @@ class CatalogRepositoryMappingTest(unittest.TestCase):
         )
         self.assertEqual(
             uncovered, [], "sqlite_repository functions missing from the CatalogRepository mapping"
+        )
+
+
+# ── Listing 域独立映射（评审 P2：不得并入 _CATALOG_MAPPING——agent_catalog
+# 契约不污染；独立包 + 独立双向检查）。──────────────────────────────────────
+
+_LISTING_MAPPING: dict[str, str] = {
+    "get_listing": "get_listing",
+    "get_listing_by_upsert_key": "get_listing_by_upsert_key",
+    "insert_listing": "insert_listing",
+    "update_listing": "update_listing",
+    "set_publication_state": "set_publication_state",
+    "expire_stale_listings": "expire_stale_listings",
+    "list_listings_by_owner": "list_listings_by_owner",
+}
+
+# listing sqlite_repository 的辅助函数（行转换）+ db.session re-export 工具，
+# 反向检查豁免。
+_LISTING_NON_PERSISTENCE_FUNCTIONS = frozenset(
+    {"_row_to_listing", "decode_json", "encode_json", "now_iso"}
+)
+
+# search.py 是独立模块（结构化过滤+排序），其公开函数不归 repository 契约
+#（handler 直接调用；映射检查只覆盖 repository 面）。
+
+
+class ListingRepositoryMappingTest(unittest.TestCase):
+    def test_every_listing_protocol_method_has_sqlite_implementation(self) -> None:
+        missing = sorted(
+            set(_LISTING_MAPPING) - _protocol_methods(listing_repository.ListingRepository)
+        )
+        self.assertEqual(missing, [])
+        for protocol_method, impl_name in _LISTING_MAPPING.items():
+            self.assertTrue(
+                callable(getattr(listing_sqlite_repository, impl_name, None)),
+                f"{impl_name!r} (impl of {protocol_method!r}) not found in listings sqlite_repository",
+            )
+
+    def test_every_sqlite_listing_function_is_covered(self) -> None:
+        uncovered = sorted(
+            _public_functions(listing_sqlite_repository)
+            - set(_LISTING_MAPPING.values())
+            - _LISTING_NON_PERSISTENCE_FUNCTIONS
+        )
+        self.assertEqual(
+            uncovered, [], "listings sqlite_repository functions missing from the ListingRepository mapping"
         )
 
 

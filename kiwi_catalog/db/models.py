@@ -204,6 +204,77 @@ create table if not exists meta (
         value text not null default ''
     )
     """,
+    # v10 — commerce listings（产品文档 kiwi-catalog v0.4 §4/§5/§14；升级计划 §3）
+    # listing_freshness_state 对应升级计划的 freshness_state 列，wire 层与
+    # agent 域 freshness_state 拼写区分（评审 P2-7；M1 listing-record.schema.json）。
+    # 幂等 upsert key：ProductListing→source_product_ref（必填）、
+    # CapabilityListing→publisher_listing_key（publisher 稳定 external key；
+    # 缺省按 id 幂等=每次 publish 新建行）。两个 partial unique index 兜底
+    # 行级唯一（NULL 行不参与，弱引用无 FK 约定）。
+    """
+create table if not exists commerce_listings (
+        id integer primary key autoincrement,
+        listing_id text not null unique,
+        listing_type text not null
+            check(listing_type in ('product','capability')),
+        owner_agent_id text not null,
+        merchant_id text not null,
+        source_product_ref text,
+        publisher_listing_key text,
+        source_revision text not null default '',
+        title text not null,
+        summary text not null default '',
+        category text not null,
+        brand text not null default '',
+        attributes_json text not null default '{}',
+        regions_json text not null default '[]',
+        tags_json text not null default '[]',
+        commercial_hints_json text not null default '{}',
+        handoff_destination_types_json text not null default '[]',
+        listing_digest text not null,
+        publication_state text not null default 'ACTIVE'
+            check(publication_state in ('ACTIVE','WITHDRAWN','SUSPENDED')),
+        listing_freshness_state text not null default 'FRESH'
+            check(listing_freshness_state in ('FRESH','STALE')),
+        published_at text not null,
+        updated_at text not null,
+        fresh_until text not null,
+        created_at text not null
+    )
+
+    """,
+    """
+create index if not exists idx_commerce_listings_owner
+        on commerce_listings(owner_agent_id)
+
+    """,
+    """
+create index if not exists idx_commerce_listings_type_category
+        on commerce_listings(listing_type, category)
+
+    """,
+    """
+create index if not exists idx_commerce_listings_publication_freshness
+        on commerce_listings(publication_state, listing_freshness_state)
+
+    """,
+    """
+create index if not exists idx_commerce_listings_updated
+        on commerce_listings(updated_at, id)
+
+    """,
+    """
+create unique index if not exists idx_commerce_listings_product_ref_unique
+        on commerce_listings(owner_agent_id, listing_type, source_product_ref)
+        where source_product_ref is not null
+
+    """,
+    """
+create unique index if not exists idx_commerce_listings_publisher_key_unique
+        on commerce_listings(owner_agent_id, listing_type, publisher_listing_key)
+        where publisher_listing_key is not null
+
+    """,
 ]
 
 

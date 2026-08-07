@@ -23,6 +23,7 @@ from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
+from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
@@ -171,6 +172,47 @@ RouteEntry(
             db_path, catalog_agent_id
         ),
     ),
+# ── /v1/listings（v0.4 新 API：Product-first Commerce Discovery）────────────
+# 顺序约束：/v1/listings/search 必须先于 /v1/listings/{listing_id}
+#（_match_path 顺序匹配；与 /v1/agents/search 先例一致）。
+RouteEntry(
+        {"GET"},
+        "/v1/listings/search",
+        lambda db_path, payload, query, **kw: _v1_search_listings(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/listings/{listing_id}",
+        lambda db_path, payload, query, listing_id: _v1_get_listing(
+            db_path, listing_id=listing_id
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/listings",
+        lambda db_path, payload, query, catalog_agent_id: _v1_list_agent_listings(
+            db_path, catalog_agent_id, query or {}
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/listings/publish",
+        lambda db_path, payload, query, **kw: _v1_publish_listing(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/listings/{listing_id}/withdraw",
+        lambda db_path, payload, query, listing_id: _v1_withdraw_listing(
+            db_path, listing_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/listings/{listing_id}/reinstate",
+        lambda db_path, payload, query, listing_id: _v1_reinstate_listing(
+            db_path, listing_id, payload
+        ),
+    ),
 )
 
 def _match_path(template: str, path: str) -> dict[str, str] | None:
@@ -263,6 +305,33 @@ def _v1_verify_agent(db_path, catalog_agent_id, payload=None, query=None):
 
 def _v1_claim_agent(db_path, catalog_agent_id, payload=None, query=None):
     return agent_catalog_handlers.v1_claim_agent(db_path, catalog_agent_id, payload or {})
+
+
+# ── /v1/listings wrapper（v0.4）────────────────────────────────────────────
+
+
+def _v1_search_listings(db_path, payload, query):
+    return listings_handlers.v1_search_listings(db_path, query or {})
+
+
+def _v1_get_listing(db_path, listing_id, payload=None, query=None):
+    return listings_handlers.v1_get_listing(db_path, listing_id)
+
+
+def _v1_list_agent_listings(db_path, catalog_agent_id, query):
+    return listings_handlers.v1_list_agent_listings(db_path, catalog_agent_id, query)
+
+
+def _v1_publish_listing(db_path, payload):
+    return listings_handlers.v1_publish_listing(db_path, payload)
+
+
+def _v1_withdraw_listing(db_path, listing_id, payload=None, query=None):
+    return listings_handlers.v1_withdraw_listing(db_path, listing_id, payload or {})
+
+
+def _v1_reinstate_listing(db_path, listing_id, payload=None, query=None):
+    return listings_handlers.v1_reinstate_listing(db_path, listing_id, payload or {})
 
 
 def resolve_route(
@@ -610,6 +679,90 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/hosted/agents/{catalog_agent_id}/ucp")
     def hosted_ucp_profile_route(catalog_agent_id: str) -> Any:
         return _hosted_ucp_profile_document(db_path, catalog_agent_id)
+
+    @app.get("/v1/listings/search")
+    def v1_search_listings(
+        q: str = "",
+        listing_type: str = "",
+        category: str = "",
+        brand: str = "",
+        region: str = "",
+        tag: str = "",
+        min_moq: str = "",
+        max_moq: str = "",
+        supports_bulk_quote: str = "",
+        supports_customization: str = "",
+        freshness_state: str = "",
+        handoff_destination_type: str = "",
+        limit: str = "",
+        cursor: str = "",
+    ) -> dict[str, Any]:
+        return _v1_search_listings(
+            db_path,
+            {},
+            {
+                "q": q,
+                "listing_type": listing_type,
+                "category": category,
+                "brand": brand,
+                "region": region,
+                "tag": tag,
+                "min_moq": min_moq,
+                "max_moq": max_moq,
+                "supports_bulk_quote": supports_bulk_quote,
+                "supports_customization": supports_customization,
+                "freshness_state": freshness_state,
+                "handoff_destination_type": handoff_destination_type,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
+
+    @app.get("/v1/listings/{listing_id}")
+    def v1_get_listing(listing_id: str) -> dict[str, Any]:
+        return _v1_get_listing(db_path, listing_id)
+
+    @app.get("/v1/agents/{catalog_agent_id}/listings")
+    def v1_list_agent_listings(
+        catalog_agent_id: str, freshness_state: str = "", limit: str = "", cursor: str = ""
+    ) -> dict[str, Any]:
+        return _v1_list_agent_listings(
+            db_path,
+            catalog_agent_id,
+            {"freshness_state": freshness_state, "limit": limit, "cursor": cursor},
+        )
+
+    @app.post("/v1/listings/publish")
+    def v1_publish_listing(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_publish_listing(
+            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/listings/{listing_id}/withdraw")
+    def v1_withdraw_listing(
+        listing_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_withdraw_listing(
+            db_path, listing_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/listings/{listing_id}/reinstate")
+    def v1_reinstate_listing(
+        listing_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_reinstate_listing(
+            db_path, listing_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
 
 
 def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
