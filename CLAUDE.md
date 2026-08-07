@@ -18,6 +18,8 @@ shadow tables），是 kiwi 仓（`<WORKSPACE>/kiwi`）AgentDiscovery 的消费�
   折叠 `verification.status`）必须保留——kiwi 仓 `ShoppingCliCatalogSource`/
   `registerCatalogAgent` 依赖它。折叠优先级：
   rejected > suspended > unreachable > stale > verification_level。
+- **license**：Apache-2.0（LICENSE 随包，与 kiwi/shopping-cli 一致）；新代码
+  文件必须带 Apache-2.0 license header（与 kiwi 仓文件头约定一致）。
 
 ## 架构
 

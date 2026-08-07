@@ -51,3 +51,8 @@ kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+## License
+
+[Apache License 2.0](LICENSE) — wire 契约（权威在 kiwi 仓）与实现同许可
+（与 Kiwi、shopping-cli 一致）。
