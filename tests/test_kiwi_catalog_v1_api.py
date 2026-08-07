@@ -150,6 +150,19 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         self.assertEqual(payload["agent"]["catalog_agent_id"], cagt_id)
         self.assertNotIn("floor_price_minor", payload["agent"])  # #8 private-only
 
+    def test_legacy_route_consumes_v1_registered_agent(self) -> None:
+        """#4 authority 转移消费端可用性：v1 register → legacy /v1/agent-catalog
+        搜索命中，折叠 verification.status 与 v1 三态域一致（独立服务承载
+        Agent Catalog 后，legacy 消费端照常工作）。"""
+        registered = self._register()
+        status, payload = _call_http(self.app, "GET", "/v1/agent-catalog/agents/search")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["results"]), 1)
+        result = payload["results"][0]
+        self.assertEqual(result["catalog_agent_id"], registered["agent"]["catalog_agent_id"])
+        self.assertEqual(result["verification"]["status"], "discovered")  # 三态域折叠
+        self.assertEqual(result["contract"], {"name": "candidate-agent", "version": "1.0"})
+
     def test_unknown_agent_404(self) -> None:
         status, _ = _call_http(self.app, "GET", "/v1/agents/does_not_exist")
         self.assertEqual(status, 404)
