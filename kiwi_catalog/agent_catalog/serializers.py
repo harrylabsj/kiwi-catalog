@@ -281,8 +281,12 @@ def catalog_agent_record(
     （additionalProperties: false —— 未知/私有字段进不来，完成定义 #8）。
     三正交状态域原样输出（不折叠）；handoff_destination_types 为精确
     KTH destination_type 词表（单一来源，禁止 supports_* 平行词表）。
+
+    ⚠️ 不经过 _strip_private：record 是显式白名单构造（只读所需公开字段），
+    且 created_at/updated_at 是契约必填字段——复用 legacy 剥离会把它们剥掉
+    （legacy DTO 无时间戳所以无感；部署冒烟经 TS 契约校验抓到）。
     """
-    safe = _strip_private(catalog_agent, _PRIVATE_CATALOG_FIELDS)
+    safe = catalog_agent
     record: dict[str, Any] = {
         "catalog_agent_id": safe.get("catalog_agent_id", ""),
         "principal_type": "merchant",
