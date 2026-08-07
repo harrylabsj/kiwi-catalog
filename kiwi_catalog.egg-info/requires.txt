@@ -1,0 +1,8 @@
+
+[api]
+uvicorn
+fastapi
+
+[dev]
+ruff
+mypy

@@ -10,9 +10,9 @@ COPY kiwi_catalog ./kiwi_catalog
 
 RUN pip install --no-cache-dir .[api]
 
-ENV KIWI_CATALOG_ADMIN_TOKEN="" \
-    KIWI_CATALOG_OWNER_TOKEN_SECRET="" \
-    KIWI_CATALOG_DB=/data/catalog.sqlite
+# 敏感配置不落镜像层——运行时经 docker run -e 注入：
+#   -e KIWI_CATALOG_ADMIN_TOKEN=<admin> -e KIWI_CATALOG_OWNER_TOKEN_SECRET=<secret>
+# db 路径固定 /data/catalog.sqlite（VOLUME /data）。
 
 VOLUME ["/data"]
 EXPOSE 8600

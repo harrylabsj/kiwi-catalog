@@ -1,0 +1,3 @@
+[console_scripts]
+kiwi-catalog = kiwi_catalog.cli:main
+kiwi-catalog-api = kiwi_catalog.scripts.kiwi_catalog_api:main
