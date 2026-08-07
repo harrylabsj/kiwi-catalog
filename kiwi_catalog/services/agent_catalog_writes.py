@@ -58,6 +58,21 @@ from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 # administrative_state；legacy 折叠值同义）。
 _RE_REGISTERABLE_ADMIN = frozenset({"rejected", "suspended"})
 
+
+def _ensure_merchant_shadow(conn: Any, merchant_id: str, display_name: str) -> None:
+    """注册时自维护 merchants 影子行（搜索 join 投影的 merchant 展示名）。
+
+    影子表语义：catalog 侧弱引用投影。INSERT OR IGNORE——首次注册创建，
+    不覆盖外部已同步的 merchants 业务字段（city/service_area 等）。
+    """
+    from kiwi_catalog.db.session import now_iso
+
+    now = now_iso()
+    conn.execute(
+        "insert or ignore into merchants(id, name, created_at, updated_at) values (?, ?, ?, ?)",
+        (merchant_id, display_name or merchant_id, now, now),
+    )
+
 # hosting_mode canonical（v0.3）→ legacy 存储值（catalog_agents CHECK 只收
 # legacy 4 值；wire schema 两种都收，存储归一化后消费方不受影响）。
 _CANONICAL_HOSTING_MODE: dict[str, str] = {
@@ -169,6 +184,10 @@ def register_catalog_agent(
         verification_status="discovered",
         hosting_mode=normalize_hosting_mode(hosting_mode) or "direct",
     )
+    # merchants 影子行自维护（D4 修复）：搜索结果的 merchant 投影依赖它；
+    # 无影子行时 projection 为空串、schema 校验失败（minLength 1）。
+    if merchant_id:
+        _ensure_merchant_shadow(conn, merchant_id, display_name or canonical)
     # v0.3 public 扩展字段（全部 public-only，完成定义 #8）：
     # handoff_destination_types 必须是 KTH destination_type 词表成员
     # （单一来源，禁止 supports_* 平行词表）。

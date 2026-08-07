@@ -104,7 +104,8 @@ class ListingsSearchTest(unittest.TestCase):
         # merchants 影子表行（外部同步的真实语义；搜索 merchant join 依赖它）
         with db_session(self.db_path) as conn:
             conn.execute(
-                "insert into merchants(id, name, created_at, updated_at) values (?, ?, 't', 't')",
+                "insert or ignore into merchants(id, name, created_at, updated_at)"
+                " values (?, ?, 't', 't')",
                 (MERCHANT_ID, "Acme Merchant"),
             )
 
@@ -293,6 +294,17 @@ class ListingsSearchTest(unittest.TestCase):
         self.assertEqual(payload["results"][0]["listing"]["listing_id"], published["listing"]["listing_id"])
 
     # ── search result contract (v0.4 §9 / CD #24) ───────────────────────────
+
+
+    def test_register_creates_merchant_shadow_for_search_join(self) -> None:
+        """D4 修复：注册带 merchant_id 时自维护 merchants 影子行——
+        搜索结果的 merchant 投影非空（schema minLength 1 校验要求）。"""
+        # setUp 已注册 agent（注册路径现在会创建影子行）——不手动插行
+        self._publish()
+        _, payload = _call_http(self.app, "GET", "/v1/listings/search")
+        result = payload["results"][0]
+        self.assertEqual(result["merchant"]["merchant_id"], MERCHANT_ID)
+        self.assertTrue(result["merchant"]["display_name"])
 
     def test_search_result_shape_has_authority_and_confirm_flags(self) -> None:
         self._seed()
