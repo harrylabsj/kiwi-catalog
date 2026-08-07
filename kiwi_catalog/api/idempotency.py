@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
-from kiwi_catalog.api.auth import payload_token, payload_with_auth
+from kiwi_catalog.api.auth import payload_token
 from kiwi_catalog.core.errors import IdempotencyConflict, RateLimitError, ValidationError
 from kiwi_catalog.core.tokens import token_digest
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso

@@ -193,7 +193,7 @@ def derived_metrics(snapshot: dict[str, Any] | None = None) -> dict[str, float]:
     Returns::
 
         {
-            "profile_fetch_error_rate": ok/(ok+error) or 0.0,
+            "profile_fetch_error_rate": error/(ok+error) or 0.0,
             "catalog_to_connection_conversion": connected/discovery or 0.0,
         }
 

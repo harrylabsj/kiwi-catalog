@@ -33,34 +33,6 @@ CONTRACT_HOSTING_MODES: frozenset[str] = frozenset({
     "unknown",
 })
 
-# Legacy DB storage values (see the hosting_mode check constraint in
-# db/models.py / db/migrations.py) and their §22 canonical forms.  The DB keeps
-# storing the legacy values in v1.x — no migration — so the contract normalises
-# through :func:`to_contract_hosting_mode`.
-_LEGACY_HOSTING_MODE_MAP: dict[str, str] = {
-    "direct": "direct_only",
-    "hosted": "hosted_only",
-    "hybrid": "hybrid",
-    "unknown": "unknown",
-}
-
-
-def to_contract_hosting_mode(stored_mode: str) -> str:
-    """Map a stored ``hosting_mode`` value to the §22 canonical enum.
-
-    Legacy DB values (``direct``/``hosted``) map to their §22 counterparts
-    (``direct_only``/``hosted_only``).  ``hybrid``/``unknown`` pass through.
-    Unrecognised or empty values fail closed to ``unknown`` — a candidate
-    never fabricates a hosting mode it does not actually store.
-
-    This is the explicit mapping required by v2.3-T1: the contract enum is
-    §22-aligned while the DB continues to store the legacy set, so consumers
-    that require canonical values normalise via this function.
-    """
-    key = str(stored_mode or "").strip().lower()
-    return _LEGACY_HOSTING_MODE_MAP.get(key, "unknown")
-
-
 # ── CandidateAgent JSON Schema (draft-07 subset) ─────────────────────────────
 # Required/additionalProperties are tightened to what the public serializers
 # actually emit (shopping_cli/agent_catalog/serializers.py).  Every field is a
@@ -69,8 +41,7 @@ def to_contract_hosting_mode(stored_mode: str) -> str:
 # Note on hosting.mode: the enum accepts BOTH the §22 canonical values and the
 # legacy stored values (``direct``/``hosted``) so the schema validates today's
 # real serializer output unchanged.  New producers SHOULD emit the canonical
-# form (see :func:`to_contract_hosting_mode`); a future 2.0 contract may drop
-# the legacy aliases.
+# form; a future 2.0 contract may drop the legacy aliases.
 
 CANDIDATE_AGENT_SCHEMA: dict[str, Any] = {
     "$schema": "http://json-schema.org/draft-07/schema#",

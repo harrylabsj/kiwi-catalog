@@ -99,16 +99,10 @@ class TrustPolicy:
         if self.policy_version < 1:
             raise ValueError("policy_version must be >= 1")
 
-        if self.require_https and "http" in self.allowed_schemes and "https" in self.allowed_schemes:
-            # When require_https is on, http must not be in allowed_schemes.
-            # We tolerate the case where allowed_schemes has been overridden
-            # to *only* http (e.g. for local dev with explicit opt-in) because
-            # the caller explicitly chose that set.
-            pass  # validation is best-effort; the fetcher enforces at call time
-
-        # Use object.__setattr__ because the dataclass is frozen.
-        # Normalise version tuples so callers can pass lists.
-        object.__setattr__(self, "__dict__", self.__dict__.copy())
+        # allowlist/scheme 的交叉一致性由 fetcher 在请求时强制（fail-closed）；
+        # 此处不做"best-effort"空校验。frozen 保持真实：此前
+        # object.__setattr__(self, "__dict__", ...) 让冻结契约失效
+        #（外部可经 __dict__ 直接改写策略字段）。
 
     # ── Factory helpers ───────────────────────────────────────────────────
 

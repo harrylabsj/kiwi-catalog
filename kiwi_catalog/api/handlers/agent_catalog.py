@@ -183,8 +183,13 @@ def _identity_verifier() -> Any:
 def _catalog_write_rate_limit_per_minute() -> int:
     from kiwi_catalog.services.buyer_bootstrap import rate_limit_per_minute
 
+    # 本库 env 名优先，提取遗留的 SHOPPING_ 名兼容回退。
+    raw = (
+        os.environ.get("KIWI_CATALOG_WRITE_RATE_LIMIT_PER_MINUTE")
+        or os.environ.get("SHOPPING_AGENT_CATALOG_WRITE_RATE_LIMIT_PER_MINUTE")
+    )
     return rate_limit_per_minute(
-        os.environ.get("SHOPPING_AGENT_CATALOG_WRITE_RATE_LIMIT_PER_MINUTE"),
+        raw,
         default=60,
         maximum=MAX_SQLITE_INTEGER,
     )

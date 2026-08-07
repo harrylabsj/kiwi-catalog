@@ -16,8 +16,14 @@ MAX_JSON_NODES = 10000
 
 
 def max_request_body_bytes() -> int:
+    # 本库 env 名优先，提取遗留的 SHOPPING_ 名兼容回退。
+    raw = (
+        os.environ.get("KIWI_CATALOG_MAX_REQUEST_BODY_BYTES")
+        or os.environ.get("SHOPPING_MAX_REQUEST_BODY_BYTES")
+        or DEFAULT_MAX_REQUEST_BODY_BYTES
+    )
     try:
-        value = int(str(os.environ.get("SHOPPING_MAX_REQUEST_BODY_BYTES") or DEFAULT_MAX_REQUEST_BODY_BYTES))
+        value = int(str(raw))
     except ValueError:
         return DEFAULT_MAX_REQUEST_BODY_BYTES
     return min(max(value, 1024), 16 * 1024 * 1024)

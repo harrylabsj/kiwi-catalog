@@ -265,15 +265,6 @@ def _v1_claim_agent(db_path, catalog_agent_id, payload=None, query=None):
     return agent_catalog_handlers.v1_claim_agent(db_path, catalog_agent_id, payload or {})
 
 
-def _is_status_body_pair(result: Any) -> bool:
-    return (
-        isinstance(result, tuple)
-        and len(result) == 2
-        and isinstance(result[0], int)
-        and not isinstance(result[0], bool)
-    )
-
-
 def resolve_route(
     method: str, path: str, routes: tuple[RouteEntry, ...] | list[Any] | None = None
 ) -> tuple[bool, bool]:
@@ -308,9 +299,10 @@ def handle_request(
                 continue
             path_matched = True
             if method.upper() in route.methods:
+                # handler 统一返回响应体 dict（13 条路由皆然）；旧
+                # _is_status_body_pair 分支（handler 返回 (status, body) 对）
+                # 无任何路由使用，已删。
                 result = route.handler(db_path, payload, query, **path_params)
-                if _is_status_body_pair(result):
-                    return result
                 return 200, result
         if path_matched:
             raise MethodNotAllowedError(f"Method not allowed for {method} {path}")

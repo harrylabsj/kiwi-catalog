@@ -1434,7 +1434,27 @@ class VerificationQueue:
             try:
                 if task is None:
                     break
-                result = self._run_task_with_timeout(task)
+                try:
+                    result = self._run_task_with_timeout(task)
+                except Exception as exc:  # noqa: BLE001 —— 单任务失败不得杀 worker
+                    #（并发预算减一且无恢复）；报告 failed 结果并继续循环。
+                    result = VerificationTaskResult(
+                        task_id=task.task_id,
+                        catalog_agent_id=task.catalog_agent_id,
+                        kind=task.kind,
+                        status="failed",
+                        verification_status="",
+                        error=f"worker error: {type(exc).__name__}: {exc}",
+                        enqueued_at=task.enqueued_at,
+                        started_at=0.0,
+                        finished_at=self._now(),
+                    )
+                    try:
+                        self._persist_finish(
+                            task.task_id, status="failed", error=result.error
+                        )
+                    except Exception:  # noqa: BLE001 —— ledger 写失败不杀 worker
+                        pass
                 with self._results_cv:
                     self._results[task.task_id] = result
                     self._results_cv.notify_all()
@@ -1446,7 +1466,10 @@ class VerificationQueue:
         """Run *task* under the per-task deadline, reporting timeouts."""
         started_at = self._now()
         self._persist_running(task.task_id, started_at)
-        box: dict[str, Any] = {"started_at": started_at}
+        # "cancelled" 事件是 supervisor 通知 runaway 线程的取消信号：超时后
+        # 线程不得再写 ledger（否则会把 supervisor 已落的 timeout 改写成
+        # completed，与调用方拿到的结果矛盾）。
+        box: dict[str, Any] = {"started_at": started_at, "cancelled": threading.Event()}
         runner = threading.Thread(
             target=self._execute_task,
             args=(task, box),
@@ -1457,8 +1480,9 @@ class VerificationQueue:
         runner.join(self._config.task_timeout_seconds)
         if runner.is_alive():
             # The task exceeded its deadline.  The supervisor frees its slot
-            # and reports a timeout; the runaway daemon thread is left to die
-            # on its own — its connection is never reused.
+            # and reports a timeout; signal the runaway daemon thread to
+            # abandon (no ledger writes, no result publication).
+            box["cancelled"].set()
             result = VerificationTaskResult(
                 task_id=task.task_id,
                 catalog_agent_id=task.catalog_agent_id,
@@ -1472,13 +1496,37 @@ class VerificationQueue:
             )
             self._persist_finish(task.task_id, status="timeout", error=result.error)
             return result
-        return box["result"]
+        # box["result"] 缺失 = 执行线程在落结果前异常退出（如 ledger 写失败）：
+        # 兜底 failed 结果，绝不 KeyError 杀 worker（并发预算减一且无恢复）。
+        result = box.get("result")
+        if result is None:
+            result = VerificationTaskResult(
+                task_id=task.task_id,
+                catalog_agent_id=task.catalog_agent_id,
+                kind=task.kind,
+                status="failed",
+                verification_status="",
+                error="task ended without a result (persistence/execution error)",
+                enqueued_at=task.enqueued_at,
+                started_at=started_at,
+                finished_at=self._now(),
+            )
+            try:
+                self._persist_finish(
+                    task.task_id, status="failed", error=result.error
+                )
+            except Exception:  # noqa: BLE001 —— ledger 写失败不杀 worker
+                pass
+        return result
 
     def _execute_task(self, task: VerificationTask, box: dict[str, Any]) -> None:
         started_at = float(box["started_at"])
+        cancelled: threading.Event = box["cancelled"]
         try:
             service = self._service_factory()
         except Exception as exc:  # noqa: BLE001 — reported to the caller
+            if cancelled.is_set():
+                return  # supervisor 已落 timeout；runaway 不得改写 ledger
             box["result"] = VerificationTaskResult(
                 task_id=task.task_id,
                 catalog_agent_id=task.catalog_agent_id,
@@ -1490,11 +1538,14 @@ class VerificationQueue:
                 started_at=started_at,
                 finished_at=self._now(),
             )
-            self._persist_finish(
-                task.task_id,
-                status="failed",
-                error=f"service factory failed: {exc}",
-            )
+            try:
+                self._persist_finish(
+                    task.task_id,
+                    status="failed",
+                    error=f"service factory failed: {exc}",
+                )
+            except Exception:  # noqa: BLE001 —— ledger 写失败不杀线程（恢复路径兜底）
+                pass
             return
         try:
             if task.kind == "refresh":
@@ -1513,6 +1564,8 @@ class VerificationQueue:
             if commit is not None:
                 commit()
         except Exception as exc:  # noqa: BLE001 — reported to the caller
+            if cancelled.is_set():
+                return  # supervisor 已落 timeout；runaway 不得改写 ledger
             box["result"] = VerificationTaskResult(
                 task_id=task.task_id,
                 catalog_agent_id=task.catalog_agent_id,
@@ -1524,11 +1577,14 @@ class VerificationQueue:
                 started_at=started_at,
                 finished_at=self._now(),
             )
-            self._persist_finish(
-                task.task_id,
-                status="failed",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            try:
+                self._persist_finish(
+                    task.task_id,
+                    status="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:  # noqa: BLE001 —— ledger 写失败不杀线程（恢复路径兜底）
+                pass
             return
         finally:
             close = getattr(service, "close", None)
@@ -1537,6 +1593,8 @@ class VerificationQueue:
                     close()
                 except Exception:  # noqa: BLE001 — cleanup must not mask results
                     pass
+        if cancelled.is_set():
+            return  # supervisor 已落 timeout；runaway 不得改写 ledger
         box["result"] = VerificationTaskResult(
             task_id=task.task_id,
             catalog_agent_id=task.catalog_agent_id,
@@ -1548,12 +1606,15 @@ class VerificationQueue:
             finished_at=self._now(),
             result=res,
         )
-        self._persist_finish(
-            task.task_id,
-            status="completed",
-            verification_status=res.status,
-            result=res,
-        )
+        try:
+            self._persist_finish(
+                task.task_id,
+                status="completed",
+                verification_status=res.status,
+                result=res,
+            )
+        except Exception:  # noqa: BLE001 —— ledger 写失败不杀线程（恢复路径兜底）
+            pass
 
 
 def make_verification_worker(

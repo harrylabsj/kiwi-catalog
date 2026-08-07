@@ -20,12 +20,15 @@ from kiwi_catalog.db.session import db_session
 def hosted_base_url() -> str:
     """Resolve the shared-host base URL for hosted A2A publication.
 
-    Precedence: ``SHOPPING_HOSTED_A2A_BASE_URL`` →
-    ``SHOPPING_PUBLIC_BASE_URL`` → ``http://localhost`` (local dev default).
+    Precedence: ``KIWI_CATALOG_HOSTED_A2A_BASE_URL`` →
+    ``KIWI_CATALOG_PUBLIC_BASE_URL`` → ``http://localhost`` (local dev default).
+    Legacy ``SHOPPING_*`` names still honored for extracted deployments.
     The builders validate the resolved value (http/https, no userinfo).
     """
     raw = (
-        os.environ.get("SHOPPING_HOSTED_A2A_BASE_URL")
+        os.environ.get("KIWI_CATALOG_HOSTED_A2A_BASE_URL")
+        or os.environ.get("KIWI_CATALOG_PUBLIC_BASE_URL")
+        or os.environ.get("SHOPPING_HOSTED_A2A_BASE_URL")
         or os.environ.get("SHOPPING_PUBLIC_BASE_URL")
         or ""
     )

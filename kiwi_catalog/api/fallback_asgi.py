@@ -20,7 +20,7 @@ RouteResolver = Callable[[str, str], tuple[bool, bool]]
 
 
 class MarketplaceASGIApp:
-    title = "shopping-cli Marketplace API"
+    title = "kiwi-catalog Agent Catalog API"
 
     def __init__(
         self,
