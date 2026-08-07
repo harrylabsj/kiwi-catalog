@@ -12,6 +12,7 @@ shopping-cli repo until the repos diverge intentionally.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -334,7 +335,9 @@ def handle_request(
         return 400, {"ok": False, "error": str(exc)}
     except ShoppingCliError as exc:
         return 400, {"ok": False, "error": str(exc)}
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 —— 500 必须带日志（此前完全静默，DB 类
+        # 错误（如 schema 漂移/遗留表引用）无法定位。
+        logging.getLogger(__name__).exception("unhandled request error: %r", exc)
         return 500, {"ok": False, "error": "internal server error"}
 
 

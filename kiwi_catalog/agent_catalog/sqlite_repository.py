@@ -146,6 +146,16 @@ def _update_catalog_agent(
         "last_seen_at",
         "last_verified_at",
     }
+    # legacy 单状态 → 三正交域派生（v0.3 §7）：任何写 verification_status 的
+    # 路径都必须同步三域（_insert/set_verification_status 同规）。否则治理处置
+    # 的 agent（suspended/rejected）经 re-register 的更新分支会以 "discovered"
+    # 复活在公开列表，且 verify 抛 InvalidStateTransitionError 永久失败。
+    # 调用方显式传三域时（setdefault）尊重显式值。
+    if fields.get("verification_status") is not None:
+        _level, _fresh, _admin = _domains_for_legacy_status(fields["verification_status"])
+        fields.setdefault("verification_level", _level)
+        fields.setdefault("freshness_state", _fresh)
+        fields.setdefault("administrative_state", _admin)
     updates: list[str] = []
     values: list[Any] = []
     for col, val in fields.items():
@@ -391,16 +401,14 @@ def search_catalog_agents(
         like_q = f"%{q}%"
         params.extend([like_q, like_q, like_q])
 
-    # category: match against merchant tags or products.category via subquery
+    # category: match against merchant tags（独立 schema 无 products 表——
+    # 从 shopping-cli 提取时的遗留引用已在 v0.3 修复：products.category 子查询
+    # 会 500（no such table: products），只保留 merchants.tags_json 匹配）。
     if category:
         clauses.append(
-            """(
-            exists (select 1 from merchants m2 where m2.id = ca.merchant_id and m2.tags_json like ?)
-            or
-            exists (select 1 from products p where p.merchant_id = ca.merchant_id and p.category = ? and p.active = 1)
-            )"""
+            "exists (select 1 from merchants m2 where m2.id = ca.merchant_id and m2.tags_json like ?)"
         )
-        params.extend([f"%{category}%", category])
+        params.append(f"%{category}%")
 
     # capability: match against agent_capabilities
     if capability:

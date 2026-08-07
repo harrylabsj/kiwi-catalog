@@ -156,5 +156,59 @@ class AuditShadowTableTest(unittest.TestCase):
         self.assertIn("catalog_agent_registered", events)
 
 
+    def test_migration_path_creates_full_schema(self) -> None:
+        """迁移路径（旧库升级）与 fresh SCHEMA 产出同一表集合（P2 回归）。
+
+        migration_004 曾为空函数（旧库缺 agent_trust_observations 表）；
+        FK 约束也已统一为弱引用（models.py 设计）。
+        """
+        tmp = tempfile.mkdtemp()
+        db = Path(tmp) / "legacy.sqlite"
+        conn = sqlite3.connect(db)
+        # 模拟旧库：只跑迁移链（不经 open_connection 的 fresh SCHEMA）。
+        from kiwi_catalog.db.migrations import MIGRATIONS, schema_user_version, _set_schema_user_version
+
+        for migration in MIGRATIONS:
+            migration.apply(conn)
+        _set_schema_user_version(conn, len(MIGRATIONS))
+        conn.commit()
+        conn.close()
+
+        fresh = Path(tmp) / "fresh.sqlite"
+        fresh_conn = open_connection(fresh)
+        conn = sqlite3.connect(db)
+        try:
+            migrated_tables = {
+                row[0]
+                for row in conn.execute(
+                    "select name from sqlite_master where type='table'"
+                ).fetchall()
+            }
+            fresh_tables = {
+                row[0]
+                for row in fresh_conn.execute(
+                    "select name from sqlite_master where type='table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+            fresh_conn.close()
+        self.assertEqual(
+            migrated_tables,
+            fresh_tables,
+            "迁移路径与 fresh SCHEMA 的表集合不一致",
+        )
+        self.assertIn("agent_trust_observations", migrated_tables)
+        # 弱引用统一：两条路径都没有 FK 约束。
+        self.assertEqual(
+            len(
+                sqlite3.connect(db)
+                .execute("pragma foreign_key_list(catalog_agents)")
+                .fetchall(),
+            ),
+            0,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -60,9 +60,7 @@ _AGENT_CATALOG_DDL = [
         last_seen_at text not null,
         last_verified_at text not null default '',
         created_at text not null,
-        updated_at text not null,
-        foreign key (merchant_id) references merchants(id),
-        foreign key (hosted_runtime_agent_id) references agents(id)
+        updated_at text not null
     )
     """,
     """
@@ -76,8 +74,7 @@ _AGENT_CATALOG_DDL = [
         preference integer not null default 0,
         auth_summary_json text not null default '{}',
         status text not null default 'active',
-        last_checked_at text not null default '',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+        last_checked_at text not null default ''
     )
     """,
     """
@@ -91,9 +88,7 @@ _AGENT_CATALOG_DDL = [
         schema_url text not null default '',
         spec_url text not null default '',
         last_verified_at text not null default '',
-        primary key (catalog_agent_id, namespace, capability_id),
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
+        primary key (catalog_agent_id, namespace, capability_id)    )
     """,
     """
     create table if not exists agent_skills (
@@ -104,9 +99,7 @@ _AGENT_CATALOG_DDL = [
         tags_json text not null default '[]',
         input_modes_json text not null default '[]',
         output_modes_json text not null default '[]',
-        primary key (catalog_agent_id, skill_id),
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
+        primary key (catalog_agent_id, skill_id)    )
     """,
     """
     create table if not exists agent_profile_snapshots (
@@ -120,9 +113,7 @@ _AGENT_CATALOG_DDL = [
         raw_json text not null default '{}',
         fetched_at text not null default '',
         fresh_until text not null default '',
-        validation_status text not null default 'pending',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
-    )
+        validation_status text not null default 'pending'    )
     """,
     """
     create table if not exists agent_verifications (
@@ -132,8 +123,7 @@ _AGENT_CATALOG_DDL = [
         result text not null default '',
         evidence_json text not null default '{}',
         checked_at text not null default '',
-        expires_at text not null default '',
-        foreign key (catalog_agent_id) references catalog_agents(catalog_agent_id)
+        expires_at text not null default ''
     )
     """,
 ]
@@ -221,7 +211,29 @@ def migration_003_agent_catalog_write_idempotency(conn: sqlite3.Connection) -> N
 
 
 def migration_004_agent_trust_observations(conn: sqlite3.Connection) -> None:
-    """§5.7 private-only agent_trust_observations table."""
+    """§5.7 private-only agent_trust_observations table.
+
+    DDL 与 db/models.py 的 SCHEMA 逐字一致——此前为空函数，旧库走迁移路径
+    升级后缺少该表（fresh DB 走 SCHEMA 有，同一 schema 两种行为）。
+    """
+    conn.execute(
+        """
+        create table if not exists agent_trust_observations (
+            observation_id integer primary key autoincrement,
+            catalog_agent_id text not null,
+            kind text not null
+                check(kind in (
+                    'protocol_compliance','timeout_rate','schema_error_rate',
+                    'successful_exchange','local_asserted_dispute'
+                )),
+            value real not null,
+            source text not null default '',
+            evidence_ref text not null default '',
+            observed_at text not null,
+            expires_at text not null default ''
+        )
+        """
+    )
 
 
 
@@ -314,6 +326,51 @@ def migration_008_three_state_domains(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_009_shadow_tables(conn: sqlite3.Connection) -> None:
+    """影子表（merchants / audit_events / meta）补齐。
+
+    独立 schema 的弱引用影子表在 fresh SCHEMA（models.py）里创建，但迁移链
+    提取时遗漏——旧库（user_version < 9）升级后 audit/merchants 缺失，审计
+    事件无处落。DDL 与 models.py 逐字一致（弱引用、无 FK）。
+    """
+    conn.execute(
+        """
+        create table if not exists merchants (
+            id text primary key,
+            name text not null,
+            city text not null default '',
+            service_area text not null default '',
+            contact text not null default '',
+            hours text not null default '',
+            automation_boundaries text not null default '',
+            tags_json text not null default '[]',
+            created_at text not null,
+            updated_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists audit_events (
+            id integer primary key autoincrement,
+            conversation_id text not null default '',
+            actor text not null,
+            event text not null,
+            details_json text not null default '{}',
+            created_at text not null
+        )
+        """
+    )
+    conn.execute(
+        """
+        create table if not exists meta (
+            key text primary key,
+            value text not null default ''
+        )
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -323,6 +380,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "verification_queue_tasks", migration_006_verification_queue_tasks),
     Migration(7, "merchant_single_agent", migration_007_merchant_single_agent),
     Migration(8, "three_state_domains", migration_008_three_state_domains),
+    Migration(9, "shadow_tables", migration_009_shadow_tables),
 )
 
 

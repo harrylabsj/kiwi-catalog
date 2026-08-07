@@ -9,6 +9,7 @@ audit, and the §6.2 claim proof.
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,7 @@ def _verification_queue(db_path: str | Path) -> Any:
         if queue is None:
             from kiwi_catalog.services.agent_verification import (
                 VerificationQueueConfig,
+                VerificationQueueFullError,
                 make_verification_worker,
             )
 
@@ -275,8 +277,16 @@ def _enqueue_verification(db_path: str | Path, catalog_agent_id: str, *, kind: s
     return _verification_queue(db_path).enqueue(catalog_agent_id, kind=kind, actor=actor, wait=False)
 
 
-def _verification_response(result: Any, db_path: str | Path | None = None) -> dict[str, Any]:
-    """验证结果信封（legacy 折叠 verification_status + v0.3 三正交域）。"""
+def _verification_response(
+    result: Any,
+    db_path: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict[str, Any]:
+    """验证结果信封（legacy 折叠 verification_status + v0.3 三正交域）。
+
+    三域必须从调用方的事务连接读取（conn 优先）：WAL 模式下新连接读快照
+    看不到未提交的验证写入，跨连接读会返回验证前的旧三域值。
+    """
     response: dict[str, Any] = {
         "ok": True,
         "catalog_agent_id": result.catalog_agent_id,
@@ -296,8 +306,11 @@ def _verification_response(result: Any, db_path: str | Path | None = None) -> di
         "idempotent": False,
     }
     if db_path is not None:
-        with db_session(db_path) as conn:
+        if conn is not None:
             row = require_catalog_agent(conn, str(result.catalog_agent_id))
+        else:
+            with db_session(db_path) as fresh_conn:
+                row = require_catalog_agent(fresh_conn, str(result.catalog_agent_id))
         response["verification_level"] = row["verification_level"]
         response["freshness_state"] = row["freshness_state"]
         response["administrative_state"] = row["administrative_state"]
@@ -387,8 +400,14 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
     # against the still-open write transaction.  The task_id is returned in
     # the response but not cached in the idempotency row (a replay is a
     # fresh outcome, not the same run).
-    enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
-    response["task_id"] = getattr(enqueued, "task_id", "")
+    try:
+        enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
+        response["task_id"] = getattr(enqueued, "task_id", "")
+    except VerificationQueueFullError:
+        # 队列满：注册本身已成功（事务已提交）——返回 400 会让调用方重试，
+        # 幂等重放得到 task_id="" 且验证永不执行。改为显式标注未入队。
+        response["verification_enqueued"] = False
+        response["queue_reason"] = "verification queue full; verify later via the verify endpoint"
     return response
 
 
@@ -475,7 +494,8 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
             actor = _require_catalog_write_auth(conn, agent, payload)
             service = _verification_service(db_path, conn)
             result = service.verify(catalog_agent_id, actor=actor)
-            response = _verification_response(result, db_path)
+            # 复用外层事务连接读三域（验证写入未 commit，跨连接读不到）。
+            response = _verification_response(result, db_path, conn)
             api_idempotency.complete_catalog_write_idempotency(
                 conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash, response
             )

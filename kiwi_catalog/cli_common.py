@@ -132,4 +132,10 @@ def tcp_port(value: str) -> int:
 
 
 def db_path_from_args(args: argparse.Namespace) -> Path:
-    return Path(getattr(args, "agent_db", None) or args.db or args.data or DEFAULT_DB_PATH).expanduser()
+    # getattr 保护：并非所有子命令都定义 --data（缺省路径必须可达）。
+    return Path(
+        getattr(args, "agent_db", None)
+        or getattr(args, "db", None)
+        or getattr(args, "data", None)
+        or DEFAULT_DB_PATH
+    ).expanduser()

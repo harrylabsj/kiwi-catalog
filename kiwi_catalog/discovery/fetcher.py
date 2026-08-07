@@ -526,8 +526,13 @@ class ProfileFetcher:
         try:
             result = self._make_request(url, str(verified_ip), hostname, port, etag, last_modified, fetched_at)
         except urllib.error.HTTPError as exc:
-            # Pass through HTTP errors with their status code
-            body_bytes = exc.read() if hasattr(exc, 'read') else b""
+            # Pass through HTTP errors with their status code.  Error bodies are
+            # read under the same byte limit as success bodies — 恶意源站返回
+            # 超大 4xx 错误体时，无上限的 exc.read() 是请求线程内存 DoS。
+            try:
+                body_bytes = _read_limited(exc, self._policy.max_profile_bytes)
+            except FetchLimitError:
+                body_bytes = b""
             return FetchResult(
                 url=url,
                 status_code=exc.code,

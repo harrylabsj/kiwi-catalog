@@ -62,7 +62,7 @@ from kiwi_catalog.agent_catalog.state_domains import (
     VerificationLevelStateMachine,
 )
 from kiwi_catalog.core.errors import ShoppingCliError, ValidationError
-from kiwi_catalog.db.session import encode_json, now_iso
+from kiwi_catalog.db.session import SQLITE_BUSY_TIMEOUT_MS, encode_json, now_iso
 from kiwi_catalog.discovery._validation import ProfileValidationError
 from kiwi_catalog.discovery.agent_card import AgentCardParser, AgentCardResult
 from kiwi_catalog.discovery.cache import compute_content_hash
@@ -165,6 +165,37 @@ class _Profiles:
     snapshot_ids: tuple[int, ...]
 
 
+class _ReusedSnapshotFetch:
+    """304 Not Modified 的包装：从存储的 raw_json 恢复 parsed（§18 缓存语义）。
+
+    形状对齐 FetchResult 的消费字段（parsed/url/etag/last_modified/etag 等），
+    使下游 parse/快照逻辑无需区分 200 与 304。
+    """
+
+    def __init__(self, fetch: Any, raw_json: str) -> None:
+        self.url = fetch.url
+        self.status_code = fetch.status_code
+        self.etag = fetch.etag
+        self.last_modified = fetch.last_modified
+        self.cache_control = fetch.cache_control
+        self.max_age = fetch.max_age
+        self.fetched_at = fetch.fetched_at
+        try:
+            self.parsed = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise _ProfileFailure(
+                REJECTED, f"stored snapshot raw_json is not valid JSON: {exc}"
+            ) from exc
+
+    @property
+    def is_not_modified(self) -> bool:
+        return True
+
+    @property
+    def is_success(self) -> bool:
+        return True
+
+
 def _outcome_for(target_status: str) -> str:
     return {
         REJECTED: "rejected",
@@ -260,16 +291,18 @@ class VerificationService:
                     "catalog_agent_stale",
                     {"reason": "profile freshness window expired", "actor_reason": reason},
                 )
-        # 重验证从 DISCOVERED 重入阶梯（legacy STALE → 阶梯重入语义一致）。
-        if level != DISCOVERED:
-            self._apply_level(agent, DISCOVERED)
-            level = DISCOVERED
-
         stages: list[StageResult] = []
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
             return self._handle_profile_failure(catalog_agent_id, previous, exc, actor, stages)
+
+        # 抓取成功后才重入阶梯（legacy STALE → 阶梯重入语义一致）。放在抓取
+        # 之后：_handle_profile_failure 按设计"只动 freshness、保留最后已验证
+        # 级别"，级别若在抓取前被清掉，一次网络抖动就丢失已验证级别。
+        if level != DISCOVERED:
+            self._apply_level(agent, DISCOVERED)
+            level = DISCOVERED
 
         # 新快照已落盘 → freshness 复位 FRESH（v0.3 §7.2）。
         self._apply_freshness(agent, FRESH)
@@ -488,7 +521,17 @@ class VerificationService:
                 raise _ProfileFailure(UNREACHABLE, f"profile fetch failed: {exc}") from exc
             if not result.is_success:
                 raise _ProfileFailure(UNREACHABLE, f"{kind} returned HTTP {result.status_code}")
-            fetched[kind] = result
+            # 304 Not Modified：内容未变，复用最新快照的 raw JSON 恢复 parsed
+            # （§18 缓存语义）。此前 parse(None) 抛 ProfileValidationError，任何
+            # 未变化的 profile 在重验证时 profile 阶段必失败、阶梯无法推进。
+            if result.is_not_modified:
+                if latest is None or not latest.get("raw_json"):
+                    raise _ProfileFailure(
+                        REJECTED, f"{kind} returned 304 but no prior snapshot exists"
+                    )
+                fetched[kind] = _ReusedSnapshotFetch(result, latest["raw_json"])
+            else:
+                fetched[kind] = result
 
         # §17.2: schema → semantic → authority → secret quarantine.
         try:
@@ -1079,6 +1122,9 @@ class VerificationQueue:
         if self._db_path is not None:
             self._db_conn = sqlite3.connect(self._db_path, check_same_thread=False)
             self._db_conn.row_factory = sqlite3.Row  # ledger rows are column-accessed
+            # 与 open_connection 的 5s busy timeout 对齐（否则并发写等待行为不一致，
+            # 多 worker 部署下 SQLITE_BUSY 概率性失败）。
+            self._db_conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
 
         self._results: dict[str, VerificationTaskResult] = {}
         self._tasks: dict[str, VerificationTask] = {}

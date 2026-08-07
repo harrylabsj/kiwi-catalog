@@ -17,6 +17,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.agent_catalog.state_domains import InvalidStateTransitionError
@@ -262,6 +263,99 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["agent"]["catalog_agent_id"], self.cagt_id)
+
+    def test_reopen_after_suspend_syncs_three_domains(self) -> None:
+        """suspended → re-register（可恢复终态 §7.3）→ 三域与折叠一致（P1 回归）。
+
+        upsert 更新分支曾直写 legacy verification_status、漏走三域派生，留下
+        admin=suspended + 折叠 discovered 的僵尸状态（公开列表可见但 verify
+        永久 InvalidStateTransitionError）。
+        """
+        from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
+        from kiwi_catalog.services.agent_verification import (
+            UNREACHABLE,
+            VerificationService,
+            _ProfileFailure,
+        )
+
+        with db_session(self.db_path) as conn:
+            set_state_domains(conn, self.cagt_id, administrative_state="suspended")
+        self.assertEqual(self._row()["verification_status"], "suspended")
+
+        status, payload = _call_http(
+            self.app,
+            "POST",
+            "/v1/agents/register",
+            json.dumps({**REGISTER_BODY, "domain": "acme.example"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        row = self._row()
+        # 重新打开：三域一致（discovered/fresh/active），折叠投影同值。
+        self.assertEqual(row["verification_level"], "discovered")
+        self.assertEqual(row["freshness_state"], "fresh")
+        self.assertEqual(row["administrative_state"], "active")
+        self.assertEqual(row["verification_status"], "discovered")
+        # verify 不再被状态机拒绝（profile 抓取失败走正常 unreachable 阶梯）。
+        with db_session(self.db_path) as conn:
+            service = VerificationService(conn)
+            with mock.patch.object(
+                service, "_load_profiles", side_effect=_ProfileFailure(UNREACHABLE, "mock")
+            ):
+                result = service.verify(self.cagt_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "unreachable")
+
+    def test_search_category_matches_merchant_tags_without_products_table(self) -> None:
+        """category 过滤只走 merchants.tags_json（独立 schema 无 products 表，P1 回归）。
+
+        修复前 products 子查询 → sqlite3.OperationalError: no such table → 500。
+        """
+        status, payload = _call_http(
+            self.app, "GET", "/v1/agent-catalog/agents/search?category=食品"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertIn("results", payload)
+
+    def test_verify_response_three_domains_read_from_active_txn(self) -> None:
+        """verify 响应三域从调用方事务连接读取（P1 回归）。
+
+        修复前 _verification_response 开第二个连接读三域——WAL 模式下新连接
+        读快照看不到未提交的验证写入，响应永远返回验证前的旧三域值。
+        """
+        from unittest import mock as _mock
+
+        import kiwi_catalog.api.handlers.agent_catalog as handlers_mod
+        from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
+        from kiwi_catalog.services.agent_verification import VerificationResult
+
+        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = "test-admin"
+        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
+
+        def fake_verify_service(db_path, conn):
+            service = _mock.Mock()
+            service.name = "fake"
+
+            def _verify(catalog_agent_id, actor=None):
+                # 在调用方事务（conn）内推进阶梯——未 commit 前跨连接读不到。
+                set_state_domains(
+                    conn, catalog_agent_id, verification_level="domain_verified"
+                )
+                return VerificationResult(catalog_agent_id, "discovered", "domain_verified", ())
+
+            service.verify = _verify
+            return service
+
+        with _mock.patch.object(handlers_mod, "_verification_service", fake_verify_service):
+            status, payload = _call_http(
+                self.app,
+                "POST",
+                f"/v1/agent-catalog/agents/{self.cagt_id}/verify",
+                json.dumps({"admin_token": "test-admin", "idempotency_key": "v1"}).encode(),
+            )
+        self.assertEqual(status, 200, payload)
+        # 响应三域 = 验证推进后的新值（修复前是验证前的 discovered/active）。
+        self.assertEqual(payload["verification_level"], "domain_verified")
+        self.assertEqual(payload["administrative_state"], "active")
 
 
 if __name__ == "__main__":
