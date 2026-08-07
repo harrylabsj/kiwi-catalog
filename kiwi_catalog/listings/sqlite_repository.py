@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import sqlite3
+import urllib.parse
 from typing import Any
 
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
@@ -286,8 +287,7 @@ def list_listings_by_owner(
         clauses.append("listing_freshness_state = ?")
         values.append(freshness_state)
     if cursor:
-        # cursor 编码 "updated_at|listing_id"（ISO 时间戳含冒号，不能用 ":"）
-        updated_at, listing_id = cursor.split("|", 1)
+        updated_at, listing_id = decode_cursor(cursor)
         clauses.append("(updated_at, id) < (?, (select id from commerce_listings where listing_id = ?))")
         values.extend([updated_at, listing_id])
     rows = conn.execute(
@@ -303,5 +303,25 @@ def list_listings_by_owner(
     next_cursor = ""
     if len(rows) > limit and result:
         last = result[-1]
-        next_cursor = f"{last['updated_at']}|{last['listing_id']}"
+        next_cursor = encode_cursor(str(last["updated_at"]), str(last["listing_id"]))
     return result, next_cursor
+
+
+def encode_cursor(updated_at: str, listing_id: str) -> str:
+    """cursor → query-string 安全编码："updated_at|listing_id"。
+
+    ISO 时间戳的 UTC 偏移含 '+'，query string 经 parse_qs（fallback 与
+    FastAPI 两栈一致）会把 '+' 解码为空格——cursor 必须 percent-encode
+    后再出 wire（历史教训：UTC 化后 cursor 分页被 '+' 打断）。输入侧
+    decode_cursor 恢复。
+    """
+    return urllib.parse.quote(f"{updated_at}|{listing_id}", safe="")
+
+
+def decode_cursor(cursor: str) -> tuple[str, str]:
+    """query-string 安全 cursor → (updated_at, listing_id)；畸形抛 ValueError。
+
+    调用方（handler/search）把 ValueError 转为 4xx——畸形 cursor 不得落到 500。
+    """
+    updated_at, listing_id = urllib.parse.unquote(str(cursor)).split("|", 1)
+    return updated_at, listing_id

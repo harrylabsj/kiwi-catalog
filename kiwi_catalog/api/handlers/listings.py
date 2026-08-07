@@ -42,6 +42,7 @@ from kiwi_catalog.listings.serialization import (
     listing_search_result,
     merchant_projection,
 )
+from kiwi_catalog.listings.service import owner_agent_merchant_id
 
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
@@ -131,21 +132,42 @@ def v1_list_agent_listings(db_path: str | Path, agent_id: str, query: dict[str, 
     """GET /v1/agents/{agent_id}/listings —— publisher 自查（v0.4 §7.2）。
 
     支持 ?freshness_state=STALE 过滤过期项（v0.4 §15.1 闭环的自查半边）。
+
+    授权与 withdraw/reinstate 一致（owner token 或 admin token；admin 豁免）：
+    GET 无 body，token 经 query 传递（?owner_token=… 或 ?admin_token=…）。
+    agent 未绑定 merchant 时不存在可归属 owner——仅 admin 可读，防止任意
+    访客枚举任意 merchant 的 listing 清单与治理状态（SUSPENDED/WITHDRAWN）。
     """
     owner_agent_id = str(agent_id).strip()
     limit = result_limit(query.get("limit"), default=20)
     freshness_state = str(query.get("freshness_state") or "").strip() or None
     if freshness_state is not None and freshness_state not in LISTING_FRESHNESS_STATES:
         raise ValidationError(f"freshness_state must be one of {LISTING_FRESHNESS_STATES}")
+
+    q_token = str(query.get("owner_token") or query.get("admin_token") or "").strip()
+    auth_payload = {"owner_token": q_token, "admin_token": q_token}
     with db_session(db_path) as conn:
+        merchant_id = owner_agent_merchant_id(conn, owner_agent_id)
+        if merchant_id:
+            api_auth.require_owner_token(auth_payload, merchant_id)
+        else:
+            try:
+                api_auth.require_admin_token(auth_payload)
+            except AuthError as exc:
+                raise AuthError(
+                    f"agent {owner_agent_id} has no merchant binding; only admin may read its listings"
+                ) from exc
         repo.expire_stale_listings(conn, now_iso())
-        rows, next_cursor = repo.list_listings_by_owner(
-            conn,
-            owner_agent_id,
-            freshness_state=freshness_state,
-            limit=limit,
-            cursor=str(query.get("cursor") or "").strip() or None,
-        )
+        try:
+            rows, next_cursor = repo.list_listings_by_owner(
+                conn,
+                owner_agent_id,
+                freshness_state=freshness_state,
+                limit=limit,
+                cursor=str(query.get("cursor") or "").strip() or None,
+            )
+        except ValueError as exc:
+            raise ValidationError(f"malformed cursor: {exc}") from exc
         return {
             "ok": True,
             "agent_id": owner_agent_id,
@@ -164,6 +186,12 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     key（source_product_ref / publisher_listing_key）双轨（评审 P1-4/P2-8）。
     """
     canonical = validate_publish_payload(payload)
+    # 认证先行（fail-closed）：未认证 spam 不得消耗限流/幂等预算（历史教训：
+    # 先限流后鉴权让无 token 请求耗尽全体商户共享写预算）。actor_key 按
+    # owner_token 隔离——跨商户幂等键不再冲突（历史教训：匿名桶 409）。
+    actor = _require_owner_token_for_merchant(
+        payload, str(canonical.get("merchant_id") or "")
+    )
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = _listing_request_hash(canonical)
@@ -184,9 +212,6 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         if replayed is not None:
             return replayed
         try:
-            actor = _require_owner_token_for_merchant(
-                payload, str(canonical.get("merchant_id") or "")
-            )
             row, created = _publish_listing_inline(conn, canonical, actor=actor)
             response = {
                 "ok": True,
@@ -225,6 +250,18 @@ def _publish_listing_inline(
 def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/listings/{id}/withdraw —— publisher 主动下架。"""
     listing_id = str(listing_id).strip()
+    # 认证先行（与 publish 一致）：行存在性 + owner token 校验都在限流/幂等
+    # 预算消耗之前，未认证/越权请求 fail-fast。
+    with db_session(db_path) as conn:
+        row = repo.get_listing(conn, listing_id)
+        if row is None:
+            from kiwi_catalog.core.errors import NotFoundError
+
+            raise NotFoundError(f"Unknown listing: {listing_id}")
+        merchant_id = str(row.get("merchant_id") or "")
+        owner_agent_id = str(row.get("owner_agent_id") or "")
+    actor = _require_owner_token_for_merchant(payload, merchant_id)
+
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = _listing_request_hash({"listing_id": listing_id, "action": "withdraw"})
@@ -245,20 +282,12 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
         if replayed is not None:
             return replayed
         try:
-            row = repo.get_listing(conn, listing_id)
-            if row is None:
-                from kiwi_catalog.core.errors import NotFoundError
-
-                raise NotFoundError(f"Unknown listing: {listing_id}")
-            actor = _require_owner_token_for_merchant(
-                payload, str(row.get("merchant_id") or "")
-            )
             from kiwi_catalog.listings.service import withdraw_listing
 
-            withdrawn = withdraw_listing(conn, listing_id, actor=actor, merchant_id=str(row.get("merchant_id") or ""))
+            withdrawn = withdraw_listing(conn, listing_id, actor=actor, merchant_id=merchant_id)
             append_catalog_audit(
                 conn,
-                str(row.get("owner_agent_id") or ""),
+                owner_agent_id,
                 actor,
                 "listing_withdrawn",
                 {"listing_id": listing_id},
@@ -278,6 +307,18 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
 def v1_reinstate_listing(db_path: str | Path, listing_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/listings/{id}/reinstate —— SUSPENDED → ACTIVE（publisher/governance）。"""
     listing_id = str(listing_id).strip()
+    # 认证先行（与 publish/withdraw 一致）：行存在性 + owner token 校验在
+    # 限流/幂等预算消耗之前。
+    with db_session(db_path) as conn:
+        row = repo.get_listing(conn, listing_id)
+        if row is None:
+            from kiwi_catalog.core.errors import NotFoundError
+
+            raise NotFoundError(f"Unknown listing: {listing_id}")
+        merchant_id = str(row.get("merchant_id") or "")
+        owner_agent_id = str(row.get("owner_agent_id") or "")
+    actor = _require_owner_token_for_merchant(payload, merchant_id)
+
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = _listing_request_hash({"listing_id": listing_id, "action": "reinstate"})
@@ -298,22 +339,12 @@ def v1_reinstate_listing(db_path: str | Path, listing_id: str, payload: dict[str
         if replayed is not None:
             return replayed
         try:
-            row = repo.get_listing(conn, listing_id)
-            if row is None:
-                from kiwi_catalog.core.errors import NotFoundError
-
-                raise NotFoundError(f"Unknown listing: {listing_id}")
-            actor = _require_owner_token_for_merchant(
-                payload, str(row.get("merchant_id") or "")
-            )
             from kiwi_catalog.listings.service import reinstate_listing
 
-            reinstated = reinstate_listing(
-                conn, listing_id, actor=actor, merchant_id=str(row.get("merchant_id") or "")
-            )
+            reinstated = reinstate_listing(conn, listing_id, actor=actor, merchant_id=merchant_id)
             append_catalog_audit(
                 conn,
-                str(row.get("owner_agent_id") or ""),
+                owner_agent_id,
                 actor,
                 "listing_reinstated",
                 {"listing_id": listing_id},

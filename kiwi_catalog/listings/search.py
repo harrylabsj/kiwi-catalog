@@ -41,7 +41,11 @@ from kiwi_catalog.listings.domain import (
     LISTING_TYPES,
     MAX_ATTRIBUTE_PATH_DEPTH,
 )
-from kiwi_catalog.listings.sqlite_repository import expire_stale_listings
+from kiwi_catalog.listings.sqlite_repository import (
+    decode_cursor,
+    encode_cursor,
+    expire_stale_listings,
+)
 
 
 class SearchQueryError(ValueError):
@@ -217,9 +221,10 @@ def search_listings(
     )
 
     if cursor:
-        # cursor 编码 "updated_at|listing_id"（| 不在 ISO 时间戳中出现；
-        # ISO 含冒号，不能用 ":" 分隔）
-        updated_at, listing_id = cursor.split("|", 1)
+        try:
+            updated_at, listing_id = decode_cursor(cursor)
+        except ValueError as exc:
+            raise SearchQueryError(f"malformed cursor: {exc}") from exc
         where.append(
             "(updated_at, id) < (?, (select id from commerce_listings where listing_id = ?))"
         )
@@ -243,5 +248,5 @@ def search_listings(
     next_cursor = ""
     if len(rows) > limit and results:
         last = results[-1]
-        next_cursor = f"{last['updated_at']}|{last['listing_id']}"
+        next_cursor = encode_cursor(str(last["updated_at"]), str(last["listing_id"]))
     return results, next_cursor

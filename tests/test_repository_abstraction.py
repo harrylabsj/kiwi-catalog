@@ -121,7 +121,7 @@ _LISTING_MAPPING: dict[str, str] = {
 # listing sqlite_repository 的辅助函数（行转换）+ db.session re-export 工具，
 # 反向检查豁免。
 _LISTING_NON_PERSISTENCE_FUNCTIONS = frozenset(
-    {"_row_to_listing", "decode_json", "encode_json", "now_iso"}
+    {"_row_to_listing", "decode_json", "encode_json", "now_iso", "encode_cursor", "decode_cursor"}
 )
 
 # search.py 是独立模块（结构化过滤+排序），其公开函数不归 repository 契约

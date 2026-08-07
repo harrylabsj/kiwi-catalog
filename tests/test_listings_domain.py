@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta
 
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.listings.contracts import validate_publish_payload
@@ -178,6 +179,30 @@ class PublishContractTest(unittest.TestCase):
             validate_publish_payload(
                 {**PRODUCT_PAYLOAD, "fresh_until": "2027-08-08T00:00:00Z"}  # > 30 days
             )
+
+    def test_fresh_until_and_now_iso_share_utc_format(self) -> None:
+        """时区回归（历史教训）：默认 fresh_until 与 now_iso() 必须同为
+        UTC + 无微秒且精确差 24h——否则过期比较（纯字符串）随服务器时区
+        偏移 TTL（UTC+8 曾把 24h TTL 压到 16h 提前过期）。"""
+        from kiwi_catalog.db.session import now_iso
+        from kiwi_catalog.listings.service import _default_fresh_until
+
+        fresh = _default_fresh_until("product")
+        now = now_iso()
+        self.assertRegex(now, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
+        self.assertRegex(fresh, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
+        self.assertEqual(datetime.fromisoformat(fresh) - datetime.fromisoformat(now), timedelta(hours=24))
+
+    def test_fresh_until_normalization_truncates_microseconds(self) -> None:
+        """publisher 声明的 fresh_until 归一化为 UTC + 无微秒（与 now_iso 同格式）。"""
+        from datetime import datetime, timezone
+
+        future = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=123456)
+        canonical = validate_publish_payload(
+            {**PRODUCT_PAYLOAD, "fresh_until": future.isoformat()}
+        )
+        self.assertTrue(canonical["fresh_until"].endswith("+00:00"))
+        self.assertNotIn(".", canonical["fresh_until"])  # 微秒已截断
 
     def test_fresh_until_accepted_within_ttl(self) -> None:
         canonical = validate_publish_payload(

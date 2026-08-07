@@ -60,13 +60,25 @@ def _default_fresh_until(listing_type: str, published_fresh_until: str | None = 
     if published_fresh_until:
         return published_fresh_until
     hours = DEFAULT_TTL_HOURS.get(listing_type, DEFAULT_TTL_HOURS[PRODUCT])
-    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+    # 与 now_iso() 同格式（UTC + 无微秒）：expire 比较是纯字符串比较，
+    # 微秒/时区不一致会让 TTL 偏移（历史教训）。
+    return (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=hours)).isoformat()
 
 
 def _owner_agent(conn: sqlite3.Connection, owner_agent_id: str) -> dict[str, Any] | None:
     return conn.execute(
         "select * from catalog_agents where catalog_agent_id = ?", (owner_agent_id,)
     ).fetchone()
+
+
+def owner_agent_merchant_id(conn: sqlite3.Connection, owner_agent_id: str) -> str:
+    """owner agent 绑定的 merchant_id（未绑定返回空串；agent 不存在也返回空串）。
+
+    供读面接口（GET /v1/agents/{id}/listings）做 owner 身份解析——绑定关系是
+    该面授权判断的依据。
+    """
+    row = _owner_agent(conn, owner_agent_id)
+    return str(row["merchant_id"] or "") if row is not None else ""
 
 
 def _require_owner_active(

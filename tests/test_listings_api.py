@@ -217,6 +217,66 @@ class ListingsApiTest(unittest.TestCase):
         status, payload = _call_http(self.app, "POST", "/v1/listings/publish", json.dumps(body2).encode())
         self.assertEqual(status, 409, payload)
 
+    def test_idempotency_key_isolated_per_owner(self) -> None:
+        """跨商户幂等键隔离：商户 B 复用商户 A 的 key 发布不同内容不得 409
+        （历史教训：匿名 actor 桶让合法写被其他商户的 key squat 永久打掉）。"""
+        other_merchant = "mrc_OTHER"
+        other_token = owner_token(other_merchant)
+        body = {
+            **REGISTER_BODY,
+            "domain": "other.example",
+            "display_name": "Other Merchant",
+            "merchant_id": other_merchant,
+            "owner_token": other_token,
+        }
+        status, payload = _call_http(self.app, "POST", "/v1/agents/register", json.dumps(body).encode())
+        self.assertEqual(status, 200, payload)
+        other_agent = payload["agent"]["catalog_agent_id"]
+
+        # 商户 A 用 key "shared-key" 发布
+        body_a = {
+            **PRODUCT_PAYLOAD,
+            "owner_agent_id": self.agent_id,
+            "owner_token": self.token,
+            "idempotency_key": "shared-key",
+        }
+        status, _ = _call_http(self.app, "POST", "/v1/listings/publish", json.dumps(body_a).encode())
+        self.assertEqual(status, 200)
+        # 商户 B 同 key、不同内容 → 必须成功（不同 actor 桶）
+        body_b = {
+            **PRODUCT_PAYLOAD,
+            "owner_agent_id": other_agent,
+            "merchant_id": other_merchant,
+            "source_product_ref": "SKU-B",
+            "title": "Other Item",
+            "owner_token": other_token,
+            "idempotency_key": "shared-key",
+        }
+        status, payload = _call_http(self.app, "POST", "/v1/listings/publish", json.dumps(body_b).encode())
+        self.assertEqual(status, 200, payload)
+        # 商户 B 同 key、同内容 → 幂等重放
+        status, replay = _call_http(self.app, "POST", "/v1/listings/publish", json.dumps(body_b).encode())
+        self.assertEqual(status, 200, replay)
+        self.assertTrue(replay["idempotent"])
+
+    def test_unauthenticated_spam_does_not_consume_rate_limit(self) -> None:
+        """认证先于限流：无 token 请求 403 且不消耗写预算（历史教训：匿名桶
+        被未认证 spam 耗尽后全体商户写 429）。"""
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_WRITE_RATE_LIMIT_PER_MINUTE": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/listings/publish",
+                    json.dumps({**PRODUCT_PAYLOAD, "owner_agent_id": self.agent_id}).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            # 预算未被 spam 消耗：合法发布仍成功
+            status, payload = self._publish()
+            self.assertEqual(status, 200, payload)
+
     # ── withdraw / reinstate ────────────────────────────────────────────────
 
     def test_withdraw_and_reinstate_flow(self) -> None:
@@ -347,13 +407,54 @@ class ListingsApiTest(unittest.TestCase):
 
     # ── publisher self-check ────────────────────────────────────────────────
 
-    def test_list_agent_listings_with_freshness_filter(self) -> None:
+    def test_list_agent_listings_requires_owner_token(self) -> None:
+        """自查接口必须认证：无 token 不得枚举任意 agent 的 listing。"""
         self._publish()
         status, payload = _call_http(self.app, "GET", f"/v1/agents/{self.agent_id}/listings")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("owner token required", payload.get("error", ""))
+
+    def test_list_agent_listings_wrong_owner_rejected(self) -> None:
+        self._publish()
+        other = owner_token("other-merchant")
+        status, payload = _call_http(
+            self.app, "GET", f"/v1/agents/{self.agent_id}/listings?owner_token={other}"
+        )
+        self.assertEqual(status, 403, payload)
+        self.assertIn("invalid owner token", payload.get("error", ""))
+
+    def test_list_agent_listings_unbound_agent_admin_only(self) -> None:
+        """未绑定 merchant 的 agent 无 owner 可归属：仅 admin 可读（含治理状态面）。"""
+        body = {
+            **REGISTER_BODY,
+            "domain": "unbound.example",  # 独立 domain：注册接口按 domain 去重
+            "owner_token": self.token,
+        }
+        status, payload = _call_http(
+            self.app, "POST", "/v1/agents/register", json.dumps(body).encode()
+        )
+        self.assertEqual(status, 200, payload)
+        unbound = payload["agent"]["catalog_agent_id"]
+        status, payload = _call_http(self.app, "GET", f"/v1/agents/{unbound}/listings")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("no merchant binding", payload.get("error", ""))
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
+            status, payload = _call_http(
+                self.app, "GET", f"/v1/agents/{unbound}/listings?admin_token=admin-tok"
+            )
+        self.assertEqual(status, 200, payload)
+
+    def test_list_agent_listings_with_freshness_filter(self) -> None:
+        self._publish()
+        status, payload = _call_http(
+            self.app, "GET", f"/v1/agents/{self.agent_id}/listings?owner_token={self.token}"
+        )
         self.assertEqual(status, 200, payload)
         self.assertEqual(len(payload["results"]), 1)
         status, payload = _call_http(
-            self.app, "GET", f"/v1/agents/{self.agent_id}/listings?freshness_state=STALE"
+            self.app,
+            "GET",
+            f"/v1/agents/{self.agent_id}/listings?freshness_state=STALE&owner_token={self.token}",
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["results"], [])

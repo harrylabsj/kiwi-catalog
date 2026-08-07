@@ -159,7 +159,10 @@ def _parse_fresh_until(value: Any) -> str:
         raise ValidationError("fresh_until must be in the future")
     if delta > MAX_PUBLISHED_TTL_SECONDS:
         raise ValidationError("fresh_until exceeds the max published TTL (30 days)")
-    return parsed.astimezone(timezone.utc).isoformat()
+    # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
+    # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
+    # 整秒边界提前 1 秒判过期）。
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -738,12 +738,23 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agents/{catalog_agent_id}/listings")
     def v1_list_agent_listings(
-        catalog_agent_id: str, freshness_state: str = "", limit: str = "", cursor: str = ""
+        catalog_agent_id: str,
+        freshness_state: str = "",
+        limit: str = "",
+        cursor: str = "",
+        owner_token: str = "",
+        admin_token: str = "",
     ) -> dict[str, Any]:
         return _v1_list_agent_listings(
             db_path,
             catalog_agent_id,
-            {"freshness_state": freshness_state, "limit": limit, "cursor": cursor},
+            {
+                "freshness_state": freshness_state,
+                "limit": limit,
+                "cursor": cursor,
+                "owner_token": owner_token,
+                "admin_token": admin_token,
+            },
         )
 
     @app.post("/v1/listings/publish")

@@ -77,7 +77,11 @@ def catalog_write_actor_key(payload: dict[str, Any], canonical_domain: str = "")
     domain, so the constant bucket adds a global bound without becoming an
     SSRF amplification vector.
     """
-    token = payload_token(payload) or payload.get("_auth_token") or ""
+    token = (
+        payload_token(payload)
+        or str(payload.get("owner_token") or "")
+        or str(payload.get("_auth_token") or "")
+    )
     if token:
         return token_digest(str(token))
     return "anon:" + token_digest("catalog-write")

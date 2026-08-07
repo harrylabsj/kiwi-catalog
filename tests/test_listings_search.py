@@ -214,6 +214,12 @@ class ListingsSearchTest(unittest.TestCase):
         status, payload = _call_http(self.app, "GET", "/v1/listings/search?mystery=1")
         self.assertEqual(status, 400, payload)
 
+    def test_malformed_cursor_rejected_400(self) -> None:
+        """畸形 cursor：400 而非 500（fail-closed 信封）。"""
+        status, payload = _call_http(self.app, "GET", "/v1/listings/search?cursor=abc")
+        self.assertEqual(status, 400, payload)
+        self.assertIn("cursor", payload.get("error", ""))
+
     # ── deterministic ranking / cursor ──────────────────────────────────────
 
     def test_cursor_pagination_is_stable(self) -> None:
