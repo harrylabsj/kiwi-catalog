@@ -30,6 +30,18 @@ create table if not exists catalog_agents (
                 'discovered','profile_valid','domain_verified','agent_verified',
                 'commerce_verified','stale','rejected','suspended','unreachable'
             )),
+        verification_level text not null default 'discovered'
+            check(verification_level in (
+                'discovered','profile_valid','domain_verified','agent_verified',
+                'commerce_verified'
+            )),
+        freshness_state text not null default 'fresh'
+            check(freshness_state in ('fresh','stale','unreachable')),
+        administrative_state text not null default 'active'
+            check(administrative_state in ('active','suspended','rejected')),
+        handoff_destination_types text not null default '[]',
+        last_refresh_attempt_at text not null default '',
+        last_refresh_result text not null default '',
         hosting_mode text not null default 'unknown'
             check(hosting_mode in ('direct','hosted','hybrid','unknown')),
         first_seen_at text not null,
@@ -38,7 +50,7 @@ create table if not exists catalog_agents (
         created_at text not null,
         updated_at text not null
     )
-    
+
     """,
     """
 create table if not exists agent_endpoints (

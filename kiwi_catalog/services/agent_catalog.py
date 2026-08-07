@@ -115,6 +115,10 @@ def search_catalog_agents(
     hosting_mode: str = "",
     verification_status: str = "",
     verified_after: str = "",
+    verification_level: str = "",
+    freshness_state: str = "",
+    administrative_state: str = "",
+    handoff_destination_types: str = "",
     limit: int = 20,
     cursor: str = "",
 ) -> dict[str, Any]:
@@ -122,7 +126,9 @@ def search_catalog_agents(
 
     Every non-empty filter narrows the result set (AND semantics).
     Results follow the §8.2 Search Result Contract — each entry is a
-    Candidate, not a verified live identity.
+    Candidate, not a verified live identity.  三正交状态域过滤（v0.3 §8）：
+    verification_level / freshness_state / administrative_state /
+    handoff_destination_types（KTH destination_type 词表，逗号分隔）。
 
     Returns {"results": [...], "next_cursor": str|None}.
     """
@@ -138,6 +144,10 @@ def search_catalog_agents(
         hosting_mode=str(hosting_mode or "").strip(),
         verification_status=str(verification_status or "").strip(),
         verified_after=str(verified_after or "").strip(),
+        verification_level=str(verification_level or "").strip(),
+        freshness_state=str(freshness_state or "").strip(),
+        administrative_state=str(administrative_state or "").strip(),
+        handoff_destination_types=str(handoff_destination_types or "").strip(),
         limit=limit,
         cursor=str(cursor or "").strip(),
     )

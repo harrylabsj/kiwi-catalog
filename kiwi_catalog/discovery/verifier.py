@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from kiwi_catalog.agent_catalog.state_domains import InvalidStateTransitionError  # noqa: F401 (re-export)
 from kiwi_catalog.core.errors import ShoppingCliError
 from kiwi_catalog.discovery._validation import canonical_domain_of, is_http_url, is_same_authority
 from kiwi_catalog.discovery.agent_card import AgentCardResult
@@ -83,8 +84,7 @@ _ALL_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 
-class InvalidStateTransitionError(ShoppingCliError):
-    """Raised when a verification state transition is not in the §6 table."""
+
 
 
 @dataclass(frozen=True)

@@ -7,10 +7,24 @@ already set to sqlite3.Row by the session layer.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
-from kiwi_catalog.core.errors import NotFoundError
+from kiwi_catalog.agent_catalog.state_domains import (
+    ACTIVE,
+    ADMINISTRATIVE_STATES,
+    DISCOVERED,
+    FRESH,
+    FRESHNESS_STATES,
+    REJECTED,
+    STALE,
+    SUSPENDED,
+    UNREACHABLE,
+    VERIFICATION_LEVELS,
+    fold_verification_status as _fold_verification_status,
+)
+from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
 
 
@@ -44,14 +58,19 @@ def _insert_catalog_agent(
     # parent row exists.
     _mrc = merchant_id or None
     _hri = hosted_runtime_agent_id or None
+    # legacy 单状态 → 三正交域派生（v0.3 §7）：阶梯值归 verification_level，
+    # stale/unreachable 归 freshness，suspended/rejected 归 administrative。
+    _level, _fresh, _admin = _domains_for_legacy_status(verification_status)
     conn.execute(
         """
         insert into catalog_agents(
             catalog_agent_id, merchant_id, hosted_runtime_agent_id,
             display_name, provider_name, canonical_domain, agent_type,
             source_type, lifecycle_status, verification_status, hosting_mode,
+            verification_level, freshness_state, administrative_state,
+            handoff_destination_types, last_refresh_attempt_at, last_refresh_result,
             first_seen_at, last_seen_at, last_verified_at, created_at, updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             catalog_agent_id,
@@ -65,6 +84,12 @@ def _insert_catalog_agent(
             lifecycle_status,
             verification_status,
             hosting_mode,
+            _level,
+            _fresh,
+            _admin,
+            "[]",
+            "",
+            "",
             ts,
             ts,
             ts if verification_status == "commerce_verified" else "",
@@ -73,6 +98,27 @@ def _insert_catalog_agent(
         ),
     )
     return require_catalog_agent(conn, catalog_agent_id)
+
+
+def _domains_for_legacy_status(
+    verification_status: str,
+) -> tuple[str, str, str]:
+    """legacy 单状态 → (verification_level, freshness_state, administrative_state)。
+
+    供 _insert 与 set_verification_status 复用：任何写入折叠列的地方都先
+    映射到三域，保证折叠投影与三域永不漂移。
+    """
+    if verification_status in VERIFICATION_LEVELS:
+        return (verification_status, FRESH, ACTIVE)
+    if verification_status == STALE:
+        return (DISCOVERED, STALE, ACTIVE)
+    if verification_status == UNREACHABLE:
+        return (DISCOVERED, UNREACHABLE, ACTIVE)
+    if verification_status == SUSPENDED:
+        return (DISCOVERED, FRESH, SUSPENDED)
+    if verification_status == REJECTED:
+        return (DISCOVERED, FRESH, REJECTED)
+    return (DISCOVERED, FRESH, ACTIVE)
 
 
 def _update_catalog_agent(
@@ -91,6 +137,12 @@ def _update_catalog_agent(
         "lifecycle_status",
         "verification_status",
         "hosting_mode",
+        "verification_level",
+        "freshness_state",
+        "administrative_state",
+        "handoff_destination_types",
+        "last_refresh_attempt_at",
+        "last_refresh_result",
         "last_seen_at",
         "last_verified_at",
     }
@@ -278,10 +330,18 @@ def search_catalog_agents(
     hosting_mode: str = "",
     verification_status: str = "",
     verified_after: str = "",
+    verification_level: str = "",
+    freshness_state: str = "",
+    administrative_state: str = "",
+    handoff_destination_types: str = "",
     limit: int = 20,
     cursor: str = "",
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Hard-filtered, deterministically-ordered catalog agent search.
+
+    三正交状态域过滤（v0.3 §7/§8）：verification_level / freshness_state /
+    administrative_state 精确匹配各自域；handoff_destination_types 为
+    逗号分隔的 KTH destination_type 词表（精确匹配，JSON 数组成员）。
 
     Returns (results, next_cursor).  next_cursor is None at the last page.
     """
@@ -296,6 +356,28 @@ def search_catalog_agents(
     if verification_status:
         clauses.append("ca.verification_status = ?")
         params.append(verification_status)
+
+    if verification_level:
+        clauses.append("ca.verification_level = ?")
+        params.append(verification_level)
+
+    if freshness_state:
+        clauses.append("ca.freshness_state = ?")
+        params.append(freshness_state)
+
+    if administrative_state:
+        clauses.append("ca.administrative_state = ?")
+        params.append(administrative_state)
+
+    if handoff_destination_types:
+        for dest in handoff_destination_types.split(","):
+            dest = dest.strip()
+            if not dest:
+                continue
+            clauses.append(
+                "exists (select 1 from json_each(ca.handoff_destination_types) where json_each.value = ?)"
+            )
+            params.append(dest)
 
     if verified_after:
         clauses.append("ca.last_verified_at >= ?")
@@ -540,11 +622,69 @@ def set_verification_status(
     *,
     last_verified_at: str | None = None,
 ) -> None:
-    """Update a catalog agent's verification_status (and optionally last_verified_at)."""
-    fields: dict[str, Any] = {"verification_status": verification_status}
+    """Update a catalog agent's verification_status (legacy 单状态语义）。
+
+    写入口统一映射到三正交域（v0.3 §7）：阶梯值 → verification_level，
+    stale/unreachable → freshness_state，suspended/rejected →
+    administrative_state；折叠投影列与三域同步写入，永不漂移。
+    """
+    level, fresh, admin = _domains_for_legacy_status(verification_status)
+    set_state_domains(
+        conn,
+        catalog_agent_id,
+        verification_level=level,
+        freshness_state=fresh,
+        administrative_state=admin,
+        last_verified_at=last_verified_at,
+    )
+
+
+def set_state_domains(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    *,
+    verification_level: str | None = None,
+    freshness_state: str | None = None,
+    administrative_state: str | None = None,
+    handoff_destination_types: list[str] | None = None,
+    last_verified_at: str | None = None,
+    last_refresh_attempt_at: str | None = None,
+    last_refresh_result: str | None = None,
+) -> dict[str, Any]:
+    """三正交状态域 + 折叠投影同步写入（v0.3 §7）。
+
+    任一无参 domain 保持现状；全部校验枚举成员（fail-closed）。迁移合法性
+    由服务层状态机约束，本函数只负责持久化。
+    """
+    current = require_catalog_agent(conn, catalog_agent_id)
+    level = verification_level if verification_level is not None else current["verification_level"]
+    fresh = freshness_state if freshness_state is not None else current["freshness_state"]
+    admin = administrative_state if administrative_state is not None else current["administrative_state"]
+    if level not in VERIFICATION_LEVELS:
+        raise ValidationError(f"invalid verification_level: {level!r}")
+    if fresh not in FRESHNESS_STATES:
+        raise ValidationError(f"invalid freshness_state: {fresh!r}")
+    if admin not in ADMINISTRATIVE_STATES:
+        raise ValidationError(f"invalid administrative_state: {admin!r}")
+    if handoff_destination_types is not None:
+        for value in handoff_destination_types:
+            if not isinstance(value, str) or not value:
+                raise ValidationError(f"invalid handoff_destination_types entry: {value!r}")
+    fields: dict[str, Any] = {
+        "verification_level": level,
+        "freshness_state": fresh,
+        "administrative_state": admin,
+        "verification_status": _fold_verification_status(level, fresh, admin),
+    }
+    if handoff_destination_types is not None:
+        fields["handoff_destination_types"] = json.dumps(handoff_destination_types)
     if last_verified_at is not None:
         fields["last_verified_at"] = last_verified_at
-    _update_catalog_agent(conn, catalog_agent_id, **fields)
+    if last_refresh_attempt_at is not None:
+        fields["last_refresh_attempt_at"] = last_refresh_attempt_at
+    if last_refresh_result is not None:
+        fields["last_refresh_result"] = last_refresh_result
+    return _update_catalog_agent(conn, catalog_agent_id, **fields)
 
 
 def set_catalog_agent_merchant(conn: sqlite3.Connection, catalog_agent_id: str, merchant_id: str) -> None:
@@ -654,6 +794,21 @@ def insert_verification(
     if cursor.lastrowid is None:
         raise RuntimeError("verification insert did not return an id")
     return cursor.lastrowid
+
+
+def latest_verification(
+    conn: sqlite3.Connection,
+    catalog_agent_id: str,
+    verification_type: str,
+) -> dict[str, Any] | None:
+    """最新一条指定类型的验证证据（v0.3 §7.1 级别重算依据）。"""
+    row = conn.execute(
+        "select * from agent_verifications"
+        " where catalog_agent_id = ? and verification_type = ?"
+        " order by checked_at desc, verification_id desc limit 1",
+        (catalog_agent_id, verification_type),
+    ).fetchone()
+    return None if row is None else _row_to_dict(row)
 
 
 def list_verifications(

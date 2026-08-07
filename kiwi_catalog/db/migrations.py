@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -249,6 +249,71 @@ def migration_007_merchant_single_agent(conn: sqlite3.Connection) -> None:
     )
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """SQLite 列存在性检查（幂等 ALTER 的前提）。"""
+    rows = conn.execute(f"pragma table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def migration_008_three_state_domains(conn: sqlite3.Connection) -> None:
+    """三正交状态域（产品文档 kiwi-catalog v0.3 §7）。
+
+    legacy 单列 ``verification_status`` 保留为折叠投影（折叠优先级
+    rejected > suspended > unreachable > stale > verification_level），
+    legacy /v1/agent-catalog/* 消费方与 metrics 继续读它。新列：
+
+    * verification_level —— 证据链级别（5 阶阶梯）；
+    * freshness_state    —— FRESH / STALE / UNREACHABLE；
+    * administrative_state —— ACTIVE / SUSPENDED / REJECTED（终态）；
+    * handoff_destination_types —— KTH destination_type 词表 JSON 数组；
+    * last_refresh_attempt_at / last_refresh_result —— 刷新审计。
+
+    幂等：全新库的列由 models.py SCHEMA 直接创建（本迁移对已存在的列跳过
+    ALTER，避免 duplicate column）；旧库（user_version < 8）在这里补列。
+    回填：legacy 的 stale/unreachable 归 freshness，suspended/rejected 归
+    administrative，阶梯值归 verification_level；折叠结果与旧值一致。
+    回填在 migration 运行窗口内是安全的（user_version 门保证每库只跑一次）。
+    """
+    new_columns: list[tuple[str, str]] = [
+        (
+            "verification_level",
+            "text not null default 'discovered' check(verification_level in ("
+            " 'discovered','profile_valid','domain_verified','agent_verified','commerce_verified'))",
+        ),
+        (
+            "freshness_state",
+            "text not null default 'fresh' check(freshness_state in ('fresh','stale','unreachable'))",
+        ),
+        (
+            "administrative_state",
+            "text not null default 'active' check(administrative_state in ('active','suspended','rejected'))",
+        ),
+        ("handoff_destination_types", "text not null default '[]'"),
+        ("last_refresh_attempt_at", "text not null default ''"),
+        ("last_refresh_result", "text not null default ''"),
+    ]
+    for name, ddl in new_columns:
+        if not _column_exists(conn, "catalog_agents", name):
+            conn.execute(f"alter table catalog_agents add column {name} {ddl}")
+    conn.execute(
+        """
+        update catalog_agents set
+          verification_level = case
+            when verification_status in (
+              'discovered','profile_valid','domain_verified','agent_verified','commerce_verified')
+            then verification_status else 'discovered' end,
+          freshness_state = case
+            when verification_status = 'stale' then 'stale'
+            when verification_status = 'unreachable' then 'unreachable'
+            else 'fresh' end,
+          administrative_state = case
+            when verification_status = 'suspended' then 'suspended'
+            when verification_status = 'rejected' then 'rejected'
+            else 'active' end
+        """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -257,6 +322,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(5, "a2a_inbound_idempotency", migration_005_a2a_inbound_idempotency),
     Migration(6, "verification_queue_tasks", migration_006_verification_queue_tasks),
     Migration(7, "merchant_single_agent", migration_007_merchant_single_agent),
+    Migration(8, "three_state_domains", migration_008_three_state_domains),
 )
 
 

@@ -27,17 +27,35 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     get_catalog_agent_by_domain,
     list_endpoints,
     new_catalog_agent_id,
+    replace_capabilities,
+    replace_skills,
     require_catalog_agent,
     set_catalog_agent_merchant,
+    set_state_domains,
     upsert_catalog_agent,
     upsert_profile_endpoints,
 )
+from kiwi_catalog.agent_catalog.state_domains import HANDOFF_DESTINATION_TYPES
 from kiwi_catalog.core.errors import ConflictError, PermissionDenied, ValidationError
 from kiwi_catalog.services.agent_catalog import get_catalog_agent_write_detail
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 
-# Terminal states a re-registration may recover from (§6 terminal states).
-_RE_REGISTERABLE = frozenset({"rejected", "suspended"})
+# 行政处置终态：可被重新注册恢复（v0.3 §7.3——REJECTED / SUSPENDED 属
+# administrative_state；legacy 折叠值同义）。
+_RE_REGISTERABLE_ADMIN = frozenset({"rejected", "suspended"})
+
+# hosting_mode canonical（v0.3）→ legacy 存储值（catalog_agents CHECK 只收
+# legacy 4 值；wire schema 两种都收，存储归一化后消费方不受影响）。
+_CANONICAL_HOSTING_MODE: dict[str, str] = {
+    "direct_only": "direct",
+    "hosted_only": "hosted",
+}
+
+
+def normalize_hosting_mode(mode: str) -> str:
+    """把 canonical hosting_mode 归一化为 legacy 存储值（非法值原样返回，
+    由 DB CHECK / schema 兜底拒绝）。"""
+    return _CANONICAL_HOSTING_MODE.get(mode, mode)
 
 # Bare-hostname shape: letters/digits/hyphen/dot, at least one dot.
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\.?$")
@@ -86,8 +104,17 @@ def register_catalog_agent(
     ucp_profile_url: str = "",
     merchant_id: str = "",
     actor: str = "cli",
+    display_name: str = "",
+    hosting_mode: str = "",
+    handoff_destination_types: list[str] | None = None,
+    capabilities: list[str] | None = None,
+    skills: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create (or re-open) a DISCOVERED self_registered catalog agent (§10.2).
+
+    v0.3 扩展字段：display_name / hosting_mode / handoff_destination_types
+    （KTH destination_type 词表）/ capabilities（全限定 fqid）/ skills 均
+    public-only（完成定义 #8）。
 
     Returns the public detail (§8.2 contract).  Verification is deliberately
     NOT run here — the API layer enqueues it into the bounded verification
@@ -108,9 +135,9 @@ def register_catalog_agent(
             )
 
     # §17.4 cooldown: the same domain may only be registered once while the
-    # record is live.  Terminal states (rejected / suspended) are re-openable.
+    # record is live.  行政终态（rejected / suspended）可重新注册（v0.3 §7.3）。
     existing = get_catalog_agent_by_domain(conn, canonical)
-    if existing is not None and existing["verification_status"] not in _RE_REGISTERABLE:
+    if existing is not None and existing["administrative_state"] not in _RE_REGISTERABLE_ADMIN:
         raise ConflictError(f"domain {canonical} is already registered")
 
     catalog_agent_id = str(existing["catalog_agent_id"]) if existing else new_catalog_agent_id()
@@ -119,15 +146,49 @@ def register_catalog_agent(
         catalog_agent_id=catalog_agent_id,
         merchant_id=merchant_id,
         hosted_runtime_agent_id="",
-        display_name=canonical,
+        display_name=display_name or canonical,
         provider_name="",
         canonical_domain=canonical,
         agent_type="commerce",
         source_type="self_registered",
         lifecycle_status="active",
         verification_status="discovered",
-        hosting_mode="direct",
+        hosting_mode=normalize_hosting_mode(hosting_mode) or "direct",
     )
+    # v0.3 public 扩展字段（全部 public-only，完成定义 #8）：
+    # handoff_destination_types 必须是 KTH destination_type 词表成员
+    # （单一来源，禁止 supports_* 平行词表）。
+    if handoff_destination_types:
+        invalid = [d for d in handoff_destination_types if d not in HANDOFF_DESTINATION_TYPES]
+        if invalid:
+            raise ValidationError(
+                f"invalid handoff_destination_types (must be KTH destination_type "
+                f"values): {invalid}"
+            )
+        set_state_domains(conn, catalog_agent_id, handoff_destination_types=list(handoff_destination_types))
+    if capabilities:
+        replace_capabilities(
+            conn,
+            catalog_agent_id,
+            [
+                {"namespace": (c.split(":", 1)[0] if ":" in c else ""), "capability_id": (c.split(":", 1)[1] if ":" in c else c)}
+                for c in capabilities
+            ],
+        )
+    if skills:
+        replace_skills(
+            conn,
+            catalog_agent_id,
+            [
+                {
+                    "skill_id": str(s.get("skill_id") or ""),
+                    "name": str(s.get("name") or ""),
+                    "description": str(s.get("description") or ""),
+                    "tags_json": s.get("tags_json", "[]"),
+                }
+                for s in skills
+            ],
+        )
 
     endpoints: list[dict[str, Any]] = []
     if str(agent_card_url or "").strip():

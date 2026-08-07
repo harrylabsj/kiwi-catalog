@@ -46,12 +46,20 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     insert_profile_snapshot,
     insert_verification,
     latest_profile_snapshot,
+    latest_verification,
     list_endpoints,
     replace_capabilities,
     replace_skills,
     require_catalog_agent,
-    set_verification_status,
+    set_state_domains,
     upsert_profile_endpoints,
+)
+from kiwi_catalog.agent_catalog.state_domains import (
+    ACTIVE,
+    FRESH,
+    AdministrativeStateMachine,
+    FreshnessStateMachine,
+    VerificationLevelStateMachine,
 )
 from kiwi_catalog.core.errors import ShoppingCliError, ValidationError
 from kiwi_catalog.db.session import encode_json, now_iso
@@ -200,6 +208,11 @@ class VerificationService:
         self._identity_verifier = identity_verifier or IdentityVerifier(self._fetcher, self._policy)
         self._trust_evaluator = trust_evaluator or TrustEvaluator(self._policy)
         self._state_machine = state_machine or VerificationStateMachine()
+        # v0.3 §7 三正交状态域状态机（legacy VerificationStateMachine 保留
+        # 供 granular 入口校验；域迁移统一走以下三台）。
+        self._level_machine = VerificationLevelStateMachine()
+        self._freshness_machine = FreshnessStateMachine()
+        self._admin_machine = AdministrativeStateMachine()
         self._now = now or time.time
 
     # ── Public ladder entry points ─────────────────────────────────────────
@@ -212,30 +225,34 @@ class VerificationService:
         reason: str = "explicit",
         force: bool = False,
     ) -> VerificationResult:
-        """Run the full §6 ladder for *catalog_agent_id*.
+        """Run the full §6 ladder for *catalog_agent_id*（v0.3 §7 三域语义）。
 
-        An agent that already sits on the ladder with fresh profiles is
-        returned unchanged unless ``force=True``.  Stale/unreachable agents
-        and agents below PROFILE_VALID are re-verified from their entry point.
+        * 行政处置（REJECTED / SUSPENDED）阻止自动管线（fail-closed）；
+        * freshness FRESH + 已在阶梯上 → 除非 ``force`` 原样返回；
+        * freshness STALE / UNREACHABLE → 重验证，级别从 DISCOVERED 重入
+          （与 legacy「STALE → 阶梯重入」语义一致）；
+        * profile 抓取失败只动 freshness（保留最后已验证快照，v0.3 §13#14）；
+        * SSRF / 校验 / 缺端点失败 → 证据失效，按证据重算降级级别（§7.1）。
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        current = agent["verification_status"]
-        previous = current
+        previous = agent["verification_status"]
+        level = agent["verification_level"]
+        freshness = agent["freshness_state"]
+        admin = agent["administrative_state"]
 
-        # §6: REJECTED / SUSPENDED are terminal — no automatic outgoing
-        # transitions.  Re-verification of a terminal agent is a caller error
-        # (fail-closed, before any fetch side effects).
-        if current in TERMINAL_STATES:
+        # §7.3：REJECTED / SUSPENDED 没有自动出向迁移。终态 agent 的重验证
+        # 是调用方错误（fail-closed，任何 fetch 副作用之前）。
+        if admin != ACTIVE:
             raise InvalidStateTransitionError(
-                f"catalog agent {catalog_agent_id} is in terminal verification "
-                f"state {current!r}; it must be re-registered before re-verification"
+                f"catalog agent {catalog_agent_id} is not administratively active "
+                f"(administrative_state={admin!r}); it must be reinstated or re-registered"
             )
 
         # Freshness gate: only re-verify on-demand when the profile is stale,
         # unless the caller explicitly forces a full re-verification.
-        if current in _LADDER_RUNGS:
-            if not (force or self._is_stale(catalog_agent_id)):
-                return VerificationResult(catalog_agent_id, current, current, ())
+        if freshness == FRESH and level in _LADDER_RUNGS:
+            if not force:
+                return VerificationResult(catalog_agent_id, previous, previous, ())
             if self._is_stale(catalog_agent_id):
                 self._write_audit(
                     catalog_agent_id,
@@ -243,23 +260,22 @@ class VerificationService:
                     "catalog_agent_stale",
                     {"reason": "profile freshness window expired", "actor_reason": reason},
                 )
-            # STALE is the §6 re-verification entry point.
-            self._apply_status(agent, STALE)
-            current = STALE
+        # 重验证从 DISCOVERED 重入阶梯（legacy STALE → 阶梯重入语义一致）。
+        if level != DISCOVERED:
+            self._apply_level(agent, DISCOVERED)
+            level = DISCOVERED
 
         stages: list[StageResult] = []
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
-            target = self._state_machine.transition(current, exc.target_status)
-            self._apply_status(agent, target)
-            stages.append(
-                StageResult("profile", _outcome_for(target), target, reason=exc.reason)
-            )
-            return self._finalize(catalog_agent_id, previous, target, stages, actor, exc.target_status)
+            return self._handle_profile_failure(catalog_agent_id, previous, exc, actor, stages)
 
-        profile_target = self._state_machine.transition(current, PROFILE_VALID)
-        self._apply_status(agent, profile_target)
+        # 新快照已落盘 → freshness 复位 FRESH（v0.3 §7.2）。
+        self._apply_freshness(agent, FRESH)
+
+        profile_target = self._level_machine.transition(level, PROFILE_VALID)
+        self._apply_level(agent, profile_target)
         stages.append(
             StageResult("profile", "passed", profile_target, snapshot_ids=profiles.snapshot_ids)
         )
@@ -293,13 +309,15 @@ class VerificationService:
         return self.verify(catalog_agent_id, actor=actor, reason="refresh", force=True)
 
     def mark_stale(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
-        """Demote a ladder agent to STALE (freshness window expired)."""
+        """新鲜度过期：freshness FRESH → STALE（级别不变，v0.3 §7.2）。"""
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         current = agent["verification_status"]
-        if current == STALE:
+        freshness = agent["freshness_state"]
+        if freshness == STALE:
             return VerificationResult(catalog_agent_id, current, current, ())
-        target = self._state_machine.transition(current, STALE)
-        self._apply_status(agent, target)
+        target_state = self._freshness_machine.transition(freshness, STALE)
+        self._apply_freshness(agent, target_state)
+        target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
         self._write_audit(catalog_agent_id, actor, "catalog_agent_stale", {"reason": "profile freshness window expired"})
         return VerificationResult(
             catalog_agent_id,
@@ -309,17 +327,20 @@ class VerificationService:
         )
 
     def suspend(self, catalog_agent_id: str, *, actor: str = "admin", reason: str = "") -> VerificationResult:
-        """Suspend a catalog agent (operator action, v3.0 moderation / P2).
+        """Suspend a catalog agent（行政处置，v0.3 §7.3）。
 
         Idempotent: an already-suspended agent returns unchanged.  The
-        suspension reason is recorded in the §23 audit event.
+        suspension reason is recorded in the §23 audit event.  verification_level
+        与 freshness 均保留——恢复后按证据继续（三域正交）。
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         current = agent["verification_status"]
-        if current == SUSPENDED:
+        admin = agent["administrative_state"]
+        if admin == SUSPENDED:
             return VerificationResult(catalog_agent_id, current, current, ())
-        target = self._state_machine.transition(current, SUSPENDED)
-        self._apply_status(agent, target)
+        target_state = self._admin_machine.transition(admin, SUSPENDED)
+        self._apply_admin(agent, target_state)
+        target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
         self._write_audit(
             catalog_agent_id,
             actor,
@@ -331,28 +352,25 @@ class VerificationService:
         )
 
     def reinstate(self, catalog_agent_id: str, *, actor: str = "admin", reason: str = "") -> VerificationResult:
-        """Reinstate a suspended catalog agent (operator action, v3.0 P2).
+        """Reinstate a suspended catalog agent（行政处置，v0.3 §7.3）。
 
-        The only exit from the SUSPENDED terminal state: the agent is reset
-        to the DISCOVERED entry point and must be re-verified before it can
-        be promoted again — the pre-suspension status is never restored
-        automatically.  ``last_verified_at`` is cleared to reflect the reset.
+        SUSPENDED → ACTIVE；verification_level 与 freshness **保留**（legacy
+        重置为 DISCOVERED 的行为被三域模型取代——证据未失效，级别不应丢失，
+        折叠投影在恢复后回到原级别）。
 
         Fail-closed: agents not in SUSPENDED raise
         InvalidStateTransitionError (reinstate is a SUSPENDED-only action).
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         current = agent["verification_status"]
-        if current != SUSPENDED:
-            # Explicit check, not the state machine: DISCOVERED → DISCOVERED
-            # is a legal self-transition (re-registration entry), so a plain
-            # transition() call would silently accept a non-suspended agent.
+        admin = agent["administrative_state"]
+        if admin != SUSPENDED:
             raise InvalidStateTransitionError(
-                f"reinstate requires SUSPENDED status, got {current!r}"
+                f"reinstate requires SUSPENDED administrative state, got {admin!r}"
             )
-        target = self._state_machine.transition(current, DISCOVERED)
-        self._apply_status(agent, target)
-        set_verification_status(self._conn, catalog_agent_id, DISCOVERED, last_verified_at="")
+        target_state = self._admin_machine.transition(admin, ACTIVE)
+        self._apply_admin(agent, target_state)
+        target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
         self._write_audit(
             catalog_agent_id,
             actor,
@@ -368,66 +386,73 @@ class VerificationService:
     # callers (and tests) can drive a single stage, or demonstrate that a jump
     # such as DISCOVERED -> COMMERCE_VERIFIED raises InvalidStateTransitionError.
 
+    def _granular_profile_failure(
+        self,
+        catalog_agent_id: str,
+        previous: str,
+        exc: _ProfileFailure,
+        actor: str,
+    ) -> VerificationResult:
+        """granular 入口共用的 _ProfileFailure 分流（与 verify() 同语义）。"""
+        stages: list[StageResult] = []
+        return self._handle_profile_failure(catalog_agent_id, previous, exc, actor, stages)
+
     def verify_profile(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        current = agent["verification_status"]
-        self._state_machine.transition(current, PROFILE_VALID)  # raises on illegal jump
+        previous = agent["verification_status"]
+        current = agent["verification_level"]
+        self._level_machine.transition(current, PROFILE_VALID)  # raises on illegal jump
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
-            target = self._state_machine.transition(current, exc.target_status)
-            self._apply_status(agent, target)
-            stage = StageResult("profile", _outcome_for(target), target, reason=exc.reason)
-            return self._finalize(catalog_agent_id, current, target, (stage,), actor, exc.target_status)
-        target = self._state_machine.transition(current, PROFILE_VALID)
-        self._apply_status(agent, target)
+            return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
+        self._apply_freshness(agent, FRESH)
+        target = self._level_machine.transition(current, PROFILE_VALID)
+        self._apply_level(agent, target)
         stage = StageResult("profile", "passed", target, snapshot_ids=profiles.snapshot_ids)
-        return self._finalize(catalog_agent_id, current, target, (stage,), actor, None)
+        return self._finalize(catalog_agent_id, previous, target, (stage,), actor, None)
 
     def verify_domain_control(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        current = agent["verification_status"]
-        self._state_machine.transition(current, DOMAIN_VERIFIED)  # raises on illegal jump
+        previous = agent["verification_status"]
+        current = agent["verification_level"]
+        self._level_machine.transition(current, DOMAIN_VERIFIED)  # raises on illegal jump
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
-            target = self._state_machine.transition(current, exc.target_status)
-            self._apply_status(agent, target)
-            stage = StageResult("profile", _outcome_for(target), target, reason=exc.reason)
-            return self._finalize(catalog_agent_id, current, target, (stage,), actor, exc.target_status)
+            return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
+        self._apply_freshness(agent, FRESH)
         stage = self._stage_domain(catalog_agent_id, current, actor, profiles)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
-        return self._finalize(catalog_agent_id, current, stage.target_status, (stage,), actor, failure_kind)
+        return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
     def verify_agent_identity(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        current = agent["verification_status"]
-        self._state_machine.transition(current, AGENT_VERIFIED)  # raises on illegal jump
+        previous = agent["verification_status"]
+        current = agent["verification_level"]
+        self._level_machine.transition(current, AGENT_VERIFIED)  # raises on illegal jump
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
-            target = self._state_machine.transition(current, exc.target_status)
-            self._apply_status(agent, target)
-            stage = StageResult("profile", _outcome_for(target), target, reason=exc.reason)
-            return self._finalize(catalog_agent_id, current, target, (stage,), actor, exc.target_status)
+            return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
+        self._apply_freshness(agent, FRESH)
         stage = self._stage_identity(catalog_agent_id, current, actor, profiles)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
-        return self._finalize(catalog_agent_id, current, stage.target_status, (stage,), actor, failure_kind)
+        return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
     def verify_commerce(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        current = agent["verification_status"]
-        self._state_machine.transition(current, COMMERCE_VERIFIED)  # raises on illegal jump
+        previous = agent["verification_status"]
+        current = agent["verification_level"]
+        self._level_machine.transition(current, COMMERCE_VERIFIED)  # raises on illegal jump
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
-            target = self._state_machine.transition(current, exc.target_status)
-            self._apply_status(agent, target)
-            stage = StageResult("profile", _outcome_for(target), target, reason=exc.reason)
-            return self._finalize(catalog_agent_id, current, target, (stage,), actor, exc.target_status)
+            return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
+        self._apply_freshness(agent, FRESH)
         stage = self._stage_commerce(catalog_agent_id, current, actor, profiles)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
-        return self._finalize(catalog_agent_id, current, stage.target_status, (stage,), actor, failure_kind)
+        return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
     # ── Profile stage ──────────────────────────────────────────────────────
 
@@ -552,20 +577,24 @@ class VerificationService:
         actor: str,
         profiles: _Profiles,
     ) -> StageResult:
-        """HTTPS domain-control (§6 MVP identity mechanism)."""
+        """HTTPS domain-control (§6 MVP identity mechanism；v0.3 级别语义）。"""
         canonical_domain = profiles.card.canonical_domain
         declared = {
             "agent_card": profiles.urls["agent_card"],
             "ucp_profile": profiles.urls["ucp_profile"],
         }
         evidence = self._identity_verifier.verify_domain_control(canonical_domain, declared=declared)
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
         if evidence.passed:
-            target = self._state_machine.transition(current, DOMAIN_VERIFIED)
+            target = self._level_machine.transition(current, DOMAIN_VERIFIED)
+            self._apply_level(agent, target)
+            outcome = "passed"
         else:
-            target = self._state_machine.transition(current, REJECTED)
-        self._apply_status(require_catalog_agent(self._conn, catalog_agent_id), target)
+            # 证据失效 → 按证据重算降级（v0.3 §7.1；不是行政 REJECTED）。
+            target = self._degrade_level_to_supported(agent)
+            self._apply_level(agent, target)
+            outcome = "rejected"
         vid = self._persist_verification(catalog_agent_id, evidence, target)
-        outcome = "passed" if evidence.passed else "rejected"
         return StageResult(
             "domain_control", outcome, target, reason=evidence.reason, verification_id=vid, evidence=_evidence_payload(evidence, self._policy)
         )
@@ -577,17 +606,20 @@ class VerificationService:
         actor: str,
         profiles: _Profiles,
     ) -> StageResult:
-        """Agent identity threshold (§6 AGENT_VERIFIED)."""
+        """Agent identity threshold (§6 AGENT_VERIFIED；v0.3 级别语义）。"""
         evidence = self._trust_evaluator.evaluate_agent_identity(
             profiles.card, profiles.ucp, profiles.card.canonical_domain
         )
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
         if evidence.passed:
-            target = self._state_machine.transition(current, AGENT_VERIFIED)
+            target = self._level_machine.transition(current, AGENT_VERIFIED)
+            self._apply_level(agent, target)
+            outcome = "passed"
         else:
-            target = self._state_machine.transition(current, REJECTED)
-        self._apply_status(require_catalog_agent(self._conn, catalog_agent_id), target)
+            target = self._degrade_level_to_supported(agent)
+            self._apply_level(agent, target)
+            outcome = "rejected"
         vid = self._persist_verification(catalog_agent_id, evidence, target)
-        outcome = "passed" if evidence.passed else "rejected"
         return StageResult(
             "agent_identity", outcome, target, reason=evidence.reason, verification_id=vid, evidence=_evidence_payload(evidence, self._policy)
         )
@@ -603,9 +635,10 @@ class VerificationService:
         evidence = self._trust_evaluator.evaluate_commerce_capabilities(
             profiles.card, profiles.ucp, profiles.card.canonical_domain
         )
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
         if not evidence.passed:
-            target = self._state_machine.transition(current, REJECTED)
-            self._apply_status(require_catalog_agent(self._conn, catalog_agent_id), target)
+            target = self._degrade_level_to_supported(agent)
+            self._apply_level(agent, target)
             vid = self._persist_verification(catalog_agent_id, evidence, target)
             return StageResult(
                 "commerce_capability", "rejected", target, reason=evidence.reason,
@@ -614,7 +647,6 @@ class VerificationService:
 
         # §5.1: the publish-state invariant gates the final COMMERCE_VERIFIED
         # transition.  A violation means the record cannot be published.
-        agent = require_catalog_agent(self._conn, catalog_agent_id)
         try:
             _validate_hosting_invariant(
                 agent["source_type"],
@@ -622,8 +654,8 @@ class VerificationService:
                 agent["hosted_runtime_agent_id"] or "",
             )
         except ValidationError as exc:
-            target = self._state_machine.transition(current, REJECTED)
-            self._apply_status(require_catalog_agent(self._conn, catalog_agent_id), target)
+            target = self._degrade_level_to_supported(agent)
+            self._apply_level(agent, target)
             failed_evidence = _failed_evidence(
                 evidence.verification_type,
                 f"§5.1 publish invariant failed: {exc}",
@@ -635,12 +667,8 @@ class VerificationService:
                 verification_id=vid, evidence=_evidence_payload(failed_evidence, self._policy),
             )
 
-        target = self._state_machine.transition(current, COMMERCE_VERIFIED)
-        self._apply_status(
-            require_catalog_agent(self._conn, catalog_agent_id),
-            target,
-            last_verified_at=self._now_iso(),
-        )
+        target = self._level_machine.transition(current, COMMERCE_VERIFIED)
+        self._apply_level(agent, target, last_verified_at=self._now_iso())
         vid = self._persist_verification(catalog_agent_id, evidence, target)
         return StageResult(
             "commerce_capability", "passed", target, verification_id=vid, evidence=_evidence_payload(evidence, self._policy)
@@ -663,13 +691,74 @@ class VerificationService:
             expires_at=expires_at,
         )
 
-    def _apply_status(self, agent: dict[str, Any], target: str, *, last_verified_at: str | None = None) -> None:
-        set_verification_status(
+    def _apply_level(self, agent: dict[str, Any], level: str, *, last_verified_at: str | None = None) -> None:
+        set_state_domains(
             self._conn,
             str(agent["catalog_agent_id"]),
-            target,
+            verification_level=level,
             last_verified_at=last_verified_at,
         )
+
+    def _apply_freshness(self, agent: dict[str, Any], state: str) -> None:
+        set_state_domains(self._conn, str(agent["catalog_agent_id"]), freshness_state=state)
+
+    def _apply_admin(self, agent: dict[str, Any], state: str) -> None:
+        set_state_domains(self._conn, str(agent["catalog_agent_id"]), administrative_state=state)
+
+    def _handle_profile_failure(
+        self,
+        catalog_agent_id: str,
+        previous: str,
+        exc: _ProfileFailure,
+        actor: str,
+        stages: Sequence[StageResult],
+    ) -> VerificationResult:
+        """_ProfileFailure 分流（verify() 与 granular 入口共用）。
+
+        * target ∈ {STALE, UNREACHABLE}（抓取失败）→ 只动 freshness，
+          保留最后已验证快照与级别（v0.3 §13#14）；
+        * target == REJECTED（SSRF / 校验 / 缺端点）→ 证据失效，按证据
+          重算降级 verification_level（v0.3 §7.1）。
+        """
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
+        if exc.target_status in (STALE, UNREACHABLE):
+            self._apply_freshness(agent, exc.target_status)
+            target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
+            stages = [*stages, StageResult("profile", _outcome_for(exc.target_status), target, reason=exc.reason)]
+            return self._finalize(catalog_agent_id, previous, target, stages, actor, exc.target_status)
+        degraded = self._degrade_level_to_supported(agent)
+        self._apply_level(agent, degraded)
+        target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
+        stages = [*stages, StageResult("profile", "rejected", target, reason=exc.reason)]
+        return self._finalize(catalog_agent_id, previous, target, stages, actor, REJECTED)
+
+    def _degrade_level_to_supported(self, agent: dict[str, Any]) -> str:
+        """v0.3 §7.1：按最新未过期证据重算「最高仍支持的较低级别」。
+
+        检查当前级以下各级对应的证据类型（domain_control / agent_identity /
+        commerce_capability）；最新一条 passed 且未过期 → 该级；否则 DISCOVERED。
+        历史证据保持可审计，降级不删除既有观察。
+        """
+        agent_id = str(agent["catalog_agent_id"])
+        current = agent["verification_level"]
+        now_ts = self._now()
+        for kind, level in (
+            ("commerce_capability", COMMERCE_VERIFIED),
+            ("agent_identity", AGENT_VERIFIED),
+            ("domain_control", DOMAIN_VERIFIED),
+        ):
+            if not self._level_machine.can_degrade(current, level):
+                continue
+            row = latest_verification(self._conn, agent_id, kind)
+            if row is None or row["result"] != "passed":
+                continue
+            expires_at = str(row.get("expires_at") or "")
+            if expires_at:
+                parsed = self._parse_iso_ts(expires_at)
+                if parsed is None or parsed < now_ts:
+                    continue
+            return level
+        return DISCOVERED
 
     def _finalize(
         self,

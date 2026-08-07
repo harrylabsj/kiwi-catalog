@@ -161,6 +161,14 @@ class CatalogRepository(Protocol):
         """Return all verification rows for a catalog agent."""
         ...
 
+    def latest_verification(
+        self,
+        catalog_agent_id: str,
+        verification_type: str,
+    ) -> dict[str, Any] | None:
+        """Return the newest verification row of a type (v0.3 §7.1 级别重算依据)."""
+        ...
+
     # ── Trust observations (§5.7) ─────────────────────────────────────────
 
     def insert_trust_observation(
@@ -189,6 +197,23 @@ class CatalogRepository(Protocol):
         """Return trust observation counts grouped by kind."""
         ...
 
+    def set_state_domains(
+        self,
+        catalog_agent_id: str,
+        *,
+        verification_level: str | None,
+        freshness_state: str | None,
+        administrative_state: str | None,
+        handoff_destination_types: list[str] | None,
+        last_verified_at: str | None,
+    ) -> dict[str, Any]:
+        """三正交状态域 + 折叠投影同步写入（v0.3 §7）。
+
+        任一无参 domain 保持现状；枚举成员校验 fail-closed；迁移合法性由
+        服务层状态机约束。返回更新后的 catalog_agents 行。
+        """
+        ...
+
     # ── Discovery / search / governance ───────────────────────────────────
 
     def search(
@@ -201,10 +226,18 @@ class CatalogRepository(Protocol):
         hosting_mode: str,
         verification_status: str,
         verified_after: str,
+        verification_level: str,
+        freshness_state: str,
+        administrative_state: str,
+        handoff_destination_types: str,
         limit: int,
         cursor: str,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Search catalog agents with hard filters and deterministic ordering.
+
+        三正交状态域过滤（verification_level / freshness_state /
+        administrative_state）+ handoff_destination_types（KTH 词表，
+        逗号分隔）在 v0.3 加入；legacy 单状态过滤保留。
 
         Returns (results, next_cursor).  next_cursor is None when there are
         no more pages.

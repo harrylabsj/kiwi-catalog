@@ -25,6 +25,10 @@ def search_catalog_agents(
     hosting_mode: str = "",
     verification_status: str = "",
     verified_after: str = "",
+    verification_level: str = "",
+    freshness_state: str = "",
+    administrative_state: str = "",
+    handoff_destination_types: str = "",
     limit: int = 20,
     cursor: str = "",
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -53,6 +57,10 @@ def search_catalog_agents(
         hosting_mode=hosting_mode,
         verification_status=verification_status,
         verified_after=verified_after,
+        verification_level=verification_level,
+        freshness_state=freshness_state,
+        administrative_state=administrative_state,
+        handoff_destination_types=handoff_destination_types,
         limit=limit,
         cursor=cursor,
     )

@@ -266,3 +266,69 @@ def catalog_agent_write_result(
     result["canonical_domain"] = str(catalog_agent.get("canonical_domain") or "")
     result["source_type"] = str(catalog_agent.get("source_type") or "")
     return result
+
+
+def catalog_agent_record(
+    catalog_agent: dict[str, Any],
+    merchant: dict[str, Any] | None = None,
+    capabilities: list[dict[str, Any]] | None = None,
+    endpoints: list[dict[str, Any]] | None = None,
+    skills: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """CatalogAgentRecord —— /v1/agents wire 形状（v0.3 §6/§7）。
+
+    契约：contracts/kiwi-catalog/1.0/agent-record.schema.json
+    （additionalProperties: false —— 未知/私有字段进不来，完成定义 #8）。
+    三正交状态域原样输出（不折叠）；handoff_destination_types 为精确
+    KTH destination_type 词表（单一来源，禁止 supports_* 平行词表）。
+    """
+    safe = _strip_private(catalog_agent, _PRIVATE_CATALOG_FIELDS)
+    record: dict[str, Any] = {
+        "catalog_agent_id": safe.get("catalog_agent_id", ""),
+        "principal_type": "merchant",
+        "display_name": safe.get("display_name") or "",
+        "canonical_domain": safe.get("canonical_domain") or "",
+        "hosting_mode": safe.get("hosting_mode", "unknown"),
+        "verification_level": safe.get("verification_level", "discovered"),
+        "freshness_state": safe.get("freshness_state", "fresh"),
+        "administrative_state": safe.get("administrative_state", "active"),
+        "created_at": safe.get("created_at", ""),
+        "updated_at": safe.get("updated_at", ""),
+    }
+    merchant_id = safe.get("merchant_id") or ""
+    if merchant_id:
+        record["merchant_id"] = merchant_id
+
+    protocols: dict[str, list[str]] = {}
+    if endpoints:
+        for ep in endpoints:
+            pub = public_endpoint_summary(ep)
+            if pub is None:
+                continue
+            kind = pub["kind"]
+            if kind == "agent_card" and pub.get("url"):
+                record["agent_card_url"] = pub["url"]
+            elif kind == "ucp_profile" and pub.get("url"):
+                record["ucp_profile_url"] = pub["url"]
+            proto = pub.get("protocol", "")
+            ver = pub.get("protocol_version", "")
+            if proto:
+                versions = protocols.setdefault(proto, [])
+                if ver and ver not in versions:
+                    versions.append(ver)
+    if protocols:
+        record["protocols"] = protocols
+
+    if capabilities:
+        record["capabilities"] = [
+            public_capability_summary(c)["capability_id"] for c in capabilities
+        ]
+    if skills:
+        record["skills"] = [public_skill_summary(s) for s in skills]
+
+    handoff = decode_json(safe.get("handoff_destination_types", "[]"), [])
+    if handoff:
+        record["handoff_destination_types"] = handoff
+    if safe.get("last_verified_at"):
+        record["last_verified_at"] = safe["last_verified_at"]
+    return record

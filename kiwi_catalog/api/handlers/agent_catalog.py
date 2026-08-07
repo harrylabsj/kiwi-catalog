@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiwi_catalog.agent_catalog.serializers import catalog_search_result
+from kiwi_catalog.agent_catalog.serializers import catalog_agent_record, catalog_search_result
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     enforce_catalog_register_domain_limit,
     get_catalog_agent_with_merchant,
@@ -21,7 +21,9 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     list_catalog_agents as _list_catalog_agents,
     list_catalog_agents_by_merchant as _list_catalog_agents_by_merchant,
     list_endpoints,
+    list_skills,
     require_catalog_agent,
+    search_catalog_agents as _repo_search_catalog_agents,
 )
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
@@ -273,8 +275,9 @@ def _enqueue_verification(db_path: str | Path, catalog_agent_id: str, *, kind: s
     return _verification_queue(db_path).enqueue(catalog_agent_id, kind=kind, actor=actor, wait=False)
 
 
-def _verification_response(result: Any) -> dict[str, Any]:
-    return {
+def _verification_response(result: Any, db_path: str | Path | None = None) -> dict[str, Any]:
+    """验证结果信封（legacy 折叠 verification_status + v0.3 三正交域）。"""
+    response: dict[str, Any] = {
         "ok": True,
         "catalog_agent_id": result.catalog_agent_id,
         "previous_status": result.previous_status,
@@ -292,6 +295,13 @@ def _verification_response(result: Any) -> dict[str, Any]:
         ],
         "idempotent": False,
     }
+    if db_path is not None:
+        with db_session(db_path) as conn:
+            row = require_catalog_agent(conn, str(result.catalog_agent_id))
+        response["verification_level"] = row["verification_level"]
+        response["freshness_state"] = row["freshness_state"]
+        response["administrative_state"] = row["administrative_state"]
+    return response
 
 
 # ── Handlers ───────────────────────────────────────────────────────────────
@@ -340,6 +350,21 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
                 ucp_profile_url=str(payload.get("ucp_profile_url") or ""),
                 merchant_id=merchant_id,
                 actor=actor,
+                display_name=str(payload.get("display_name") or ""),
+                hosting_mode=str(payload.get("hosting_mode") or ""),
+                handoff_destination_types=(
+                    list(payload["handoff_destination_types"])
+                    if isinstance(payload.get("handoff_destination_types"), list)
+                    else None
+                ),
+                capabilities=(
+                    list(payload["capabilities"])
+                    if isinstance(payload.get("capabilities"), list)
+                    else None
+                ),
+                skills=(
+                    list(payload["skills"]) if isinstance(payload.get("skills"), list) else None
+                ),
             )
             cagt_id = str(result.get("catalog_agent_id") or "")
             response = {
@@ -450,7 +475,7 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
             actor = _require_catalog_write_auth(conn, agent, payload)
             service = _verification_service(db_path, conn)
             result = service.verify(catalog_agent_id, actor=actor)
-            response = _verification_response(result)
+            response = _verification_response(result, db_path)
             api_idempotency.complete_catalog_write_idempotency(
                 conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash, response
             )
@@ -633,3 +658,121 @@ def reinstate_catalog_agent(
         response["verify_enqueued"] = True
         response["verify_task_id"] = getattr(enqueued, "task_id", "")
     return response
+
+
+# ── /v1/agents（v0.3 新 API：三正交状态域 record）─────────────────────────
+
+
+def _record_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
+    """Serialize a catalog agent row → CatalogAgentRecord（含 skills）。"""
+    cagt_id = str(row.get("catalog_agent_id", ""))
+    caps = list_capabilities(conn, cagt_id)
+    eps = list_endpoints(conn, cagt_id)
+    merchant: dict[str, Any] = {
+        "id": row.get("merchant_id", ""),
+        "name": row.get("merchant_name", ""),
+        "city": row.get("merchant_city", ""),
+        "service_area": row.get("merchant_service_area", ""),
+        "tags_json": row.get("merchant_tags_json", "[]"),
+    }
+    return catalog_agent_record(
+        catalog_agent=row,
+        merchant=merchant,
+        capabilities=caps,
+        endpoints=eps,
+        skills=list_skills(conn, cagt_id),
+    )
+
+
+def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
+    """GET /v1/agents — paginated list（record 形状）。"""
+    limit = result_limit(query.get("limit"), default=20)
+    cursor = str(query.get("cursor") or "").strip()
+    with db_session(db_path) as conn:
+        rows, next_cursor = _list_catalog_agents(conn, limit=limit, cursor=cursor)
+        results = [_record_row(row, conn) for row in rows]
+        return {"ok": True, "results": results, "next_cursor": next_cursor}
+
+
+def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
+    """GET /v1/agents/search — 三态域 + handoff 词表搜索（v0.3 §8）。"""
+    limit = result_limit(query.get("limit"), default=20)
+    # canonical hosting_mode（direct_only/hosted_only）归一化为 legacy 存储值。
+    hosting_mode = agent_catalog_writes.normalize_hosting_mode(
+        str(query.get("hosting_mode") or "")
+    )
+    with db_session(db_path) as conn:
+        rows, next_cursor = _repo_search_catalog_agents(
+            conn,
+            q=str(query.get("q") or ""),
+            capability=str(query.get("capability") or ""),
+            protocol=str(query.get("protocol") or ""),
+            hosting_mode=hosting_mode,
+            verification_level=str(query.get("verification_level") or ""),
+            freshness_state=str(query.get("freshness_state") or ""),
+            administrative_state=str(query.get("administrative_state") or ""),
+            handoff_destination_types=str(query.get("handoff_destination_types") or ""),
+            limit=limit,
+            cursor=str(query.get("cursor") or "").strip(),
+        )
+        results = [_record_row(row, conn) for row in rows]
+        return {"ok": True, "results": results, "next_cursor": next_cursor}
+
+
+def v1_get_agent(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
+    """GET /v1/agents/{catalog_agent_id} — detail（record 形状）。"""
+    with db_session(db_path) as conn:
+        row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
+        if row is None:
+            raise NotFoundError(f"Unknown catalog agent: {catalog_agent_id}")
+        return {"ok": True, "agent": _record_row(row, conn)}
+
+
+def v1_register_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agents/register — 复用 legacy 写路径（幂等/限流/审计同一套），
+    响应换 CatalogAgentRecord（v0.3 §9）。"""
+    legacy = register_catalog_agent(db_path, payload)
+    cagt_id = str(legacy["catalog_agent"]["catalog_agent_id"])
+    with db_session(db_path) as conn:
+        row = get_catalog_agent_with_merchant(conn, cagt_id)
+        record = _record_row(row, conn) if row is not None else None
+    return {
+        "ok": True,
+        "agent": record,
+        "verification_enqueued": legacy.get("verification_enqueued", True),
+        "task_id": legacy.get("task_id", ""),
+        "idempotent": legacy.get("idempotent", False),
+    }
+
+
+def v1_refresh_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agents/{id}/refresh — 响应换 record + 三域。"""
+    legacy = refresh_catalog_agent(db_path, catalog_agent_id, payload)
+    with db_session(db_path) as conn:
+        row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
+        record = _record_row(row, conn) if row is not None else None
+    return {
+        "ok": True,
+        "agent": record,
+        "refresh_enqueued": legacy.get("refresh_enqueued", True),
+        "task_id": legacy.get("task_id", ""),
+        "idempotent": legacy.get("idempotent", False),
+    }
+
+
+def v1_verify_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agents/{id}/verify — legacy 信封（含三域）+ record 视图。"""
+    legacy = verify_catalog_agent(db_path, catalog_agent_id, payload)
+    with db_session(db_path) as conn:
+        row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
+        record = _record_row(row, conn) if row is not None else None
+    return {**legacy, "agent": record}
+
+
+def v1_claim_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/agents/{id}/claim — 响应换 record。"""
+    legacy = claim_catalog_agent(db_path, catalog_agent_id, payload)
+    with db_session(db_path) as conn:
+        row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
+        record = _record_row(row, conn) if row is not None else None
+    return {"ok": True, "agent": record, "idempotent": legacy.get("idempotent", False)}
