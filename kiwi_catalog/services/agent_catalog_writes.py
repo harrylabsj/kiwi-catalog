@@ -22,6 +22,7 @@ import re
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
+    list_catalog_agents_by_merchant,
     append_catalog_audit,
     get_catalog_agent_by_domain,
     list_endpoints,
@@ -95,6 +96,16 @@ def register_catalog_agent(
     """
     canonical = normalize_canonical_domain(domain)
     merchant_id = str(merchant_id or "").strip()
+
+    # 一商家一 agent（弱引用 schema 的业务约束）：merchant 已有一个 catalog
+    # agent 时拒绝新注册（数据层有部分唯一索引兜底，此处给明确错误）。
+    if merchant_id:
+        owned, _ = list_catalog_agents_by_merchant(conn, merchant_id)
+        if owned:
+            raise ConflictError(
+                f"merchant {merchant_id} already has a catalog agent "
+                f"({owned[0]['catalog_agent_id']})"
+            )
 
     # §17.4 cooldown: the same domain may only be registered once while the
     # record is live.  Terminal states (rejected / suspended) are re-openable.
@@ -178,6 +189,16 @@ def claim_catalog_agent(
     merchant_id = str(merchant_id or "").strip()
     if not merchant_id:
         raise ValidationError("merchant_id is required to claim a catalog agent")
+
+    # 一商家一 agent：目标 merchant 已认领其他 agent 时拒绝（当前 agent
+    # 已在 claim 流程中，不受影响）。
+    owned, _ = list_catalog_agents_by_merchant(conn, merchant_id)
+    owned = [a for a in owned if a["catalog_agent_id"] != catalog_agent_id]
+    if owned:
+        raise ConflictError(
+            f"merchant {merchant_id} already has a catalog agent "
+            f"({owned[0]['catalog_agent_id']})"
+        )
 
     agent = require_catalog_agent(conn, catalog_agent_id)
     canonical = str(agent.get("canonical_domain") or "").strip()

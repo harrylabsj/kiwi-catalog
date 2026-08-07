@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -236,6 +236,19 @@ def migration_006_verification_queue_tasks(conn: sqlite3.Connection) -> None:
     conn.execute(_VERIFICATION_QUEUE_RECOVERY_INDEX_DDL)
 
 
+def migration_007_merchant_single_agent(conn: sqlite3.Connection) -> None:
+    """一商家一 agent 约束：merchant_id 非空时唯一（部分唯一索引）。
+
+    弱引用 schema 下 merchant_id 是普通列——本索引从数据层兜底
+    「一个商家只能有一个 catalog agent」，服务层另有显式校验
+    （ConflictError 而非 IntegrityError）。
+    """
+    conn.execute(
+        "create unique index if not exists idx_catalog_agents_merchant_unique"
+        " on catalog_agents(merchant_id) where merchant_id != ''"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -243,6 +256,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "agent_trust_observations", migration_004_agent_trust_observations),
     Migration(5, "a2a_inbound_idempotency", migration_005_a2a_inbound_idempotency),
     Migration(6, "verification_queue_tasks", migration_006_verification_queue_tasks),
+    Migration(7, "merchant_single_agent", migration_007_merchant_single_agent),
 )
 
 
