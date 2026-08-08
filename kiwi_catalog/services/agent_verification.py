@@ -394,6 +394,11 @@ class VerificationService:
         Idempotent: an already-suspended agent returns unchanged.  The
         suspension reason is recorded in the §23 audit event.  verification_level
         与 freshness 均保留——恢复后按证据继续（三域正交）。
+
+        治理联动（v0.4 DoD #12 两件事都做）：owned ACTIVE Listings →
+        SUSPENDED 与 agent suspend 同事务原子提交（search join 排除半边在
+        listings/search.py）。联动在此统一实现——HTTP admin 路径、CLI
+        `agent catalog suspend`、队列 suspend 任务共用 service，单点生效。
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         current = agent["verification_status"]
@@ -409,9 +414,28 @@ class VerificationService:
             "catalog_agent_suspended",
             {"reason": reason or "operator suspension"},
         )
+        self._suspend_owned_listings(catalog_agent_id, actor)
         return VerificationResult(
             catalog_agent_id, current, target, (StageResult("suspend", "suspended", target),)
         )
+
+    def _suspend_owned_listings(self, catalog_agent_id: str, actor: str) -> None:
+        """DoD #12 标记半边：owned ACTIVE Listings → SUSPENDED（幂等）。
+
+        已 SUSPENDED/WITHDRAWN 的不再触碰；受影响行数 > 0 时落
+        listings_suspended 审计。与 agent suspend 同一事务（本连接未提交
+        前不返回——调用方随后 commit 原子提交）。
+        """
+        from kiwi_catalog.listings.policy import suspend_owned_listings
+
+        count = suspend_owned_listings(self._conn, catalog_agent_id)
+        if count:
+            self._write_audit(
+                catalog_agent_id,
+                actor,
+                "listings_suspended",
+                {"count": count},
+            )
 
     def reinstate(self, catalog_agent_id: str, *, actor: str = "admin", reason: str = "") -> VerificationResult:
         """Reinstate a suspended catalog agent（行政处置，v0.3 §7.3）。
