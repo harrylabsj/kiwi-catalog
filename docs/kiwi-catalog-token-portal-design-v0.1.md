@@ -164,8 +164,12 @@ CLI（`catalog merchant applications list/approve/reject`、`token rotate/revoke
 `status`——与 HTTP 共用 `services/merchant_tokens.py`，本地直连 SQLite 信任边界）
 + 测试（双栈全量 191）。
 
-后续（不在本次）：邮件交付（项目无邮件设施，MVP 靠一次性展示 + 轮换兜底）；
-Cloudflare 子域名 `merchant.kiwi.harrylabsj.com` DNS/反代接线。
+部署接线（方案 A 已定）：`merchant.kiwi.harrylabsj.com` → Cloudflare Tunnel →
+catalog 主机 127.0.0.1:8600。完整步骤见 `deploy/cloudflare-tunnel.md`（cloudflared
+安装 / ingress 配置 / DNS 路由 / systemd 常驻 / 验证清单 / 安全边界 / 回滚）。
+**执行前提**：catalog 已部署到主机 + 项目维护者在 Cloudflare 控制台完成登录授权。
+
+后续（不在本次）：邮件交付（项目无邮件设施，MVP 靠一次性展示 + 轮换兜底）。
 
 ## 10. 测试要点
 
