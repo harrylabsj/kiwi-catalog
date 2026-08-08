@@ -186,6 +186,20 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         self.assertFalse(payload.get("verification_enqueued", True))
         self.assertIn("queue full", payload.get("queue_reason", ""))
 
+    def test_register_idempotency_hash_includes_public_fields(self) -> None:
+        """审查 P2：同 key 改 display_name 等公开字段 → 409（此前 hash 不含
+        这些字段，同 key 改字段被静默重放，调用方以为新字段已生效）。"""
+        body = {**REGISTER_BODY, "domain": "hashcheck.example", "idempotency_key": "idem-reg-1"}
+        status, first = _call_http(
+            self.app, "POST", "/v1/agents/register", json.dumps(body).encode()
+        )
+        self.assertEqual(status, 200, first)
+        body2 = {**body, "display_name": "Renamed"}
+        status, payload = _call_http(
+            self.app, "POST", "/v1/agents/register", json.dumps(body2).encode()
+        )
+        self.assertEqual(status, 409, payload)
+
     def test_legacy_route_consumes_v1_registered_agent(self) -> None:
         """#4 authority 转移消费端可用性：v1 register → legacy /v1/agent-catalog
         搜索命中，折叠 verification.status 与 v1 三态域一致（独立服务承载

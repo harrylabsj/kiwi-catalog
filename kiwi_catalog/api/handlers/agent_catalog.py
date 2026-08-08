@@ -220,9 +220,14 @@ def _catalog_register_domain_limit_per_hour() -> int:
     if not raw:
         return 20
     try:
-        return max(0, min(int(raw), 10000))
+        limit = int(raw)
     except (TypeError, ValueError):
         return 20
+    # 审查 P2：0 视为误配回退默认——enforce_rate_limit 把 limit<=0 解释为
+    # 「禁用限流」，env 误配 0 会静默关掉公开 register 的 SSRF 放大防护。
+    if limit <= 0:
+        return 20
+    return min(limit, 10000)
 
 
 def _verification_worker_token() -> str:

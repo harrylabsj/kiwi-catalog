@@ -423,6 +423,18 @@ class ListingsApiTest(unittest.TestCase):
         self.assertEqual(status, 403, payload)
         self.assertIn("invalid owner token", payload.get("error", ""))
 
+    def test_list_agent_listings_admin_exempt_for_bound_agent(self) -> None:
+        """审查 P2：已绑定 merchant 的 agent 自查，admin token 必须豁免
+        （此前只走 owner HMAC 校验，admin 恒 403——与 withdraw/reinstate 不一致）。"""
+        self._publish()
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
+            status, payload = _call_http(
+                self.app,
+                "GET",
+                f"/v1/agents/{self.agent_id}/listings?admin_token=admin-tok",
+            )
+        self.assertEqual(status, 200, payload)
+
     def test_list_agent_listings_unbound_agent_admin_only(self) -> None:
         """未绑定 merchant 的 agent 无 owner 可归属：仅 admin 可读（含治理状态面）。"""
         body = {

@@ -529,7 +529,11 @@ class VerificationService:
         fetched: dict[str, Any] = {}
         for kind in ("agent_card", "ucp_profile"):
             url = urls[kind]
-            latest = latest_profile_snapshot(self._conn, catalog_agent_id, kind)
+            # 审查 P2：快照存储键是 "ucp"（_write_snapshot / _is_stale 同规），
+            # 查询曾用 "ucp_profile" 恒查不到 → etag/last_modified 恒 None，
+            # ucp 的 304/ETag 缓存语义永不生效（每次都全量下载 + 新快照落库）。
+            snapshot_kind = "ucp" if kind == "ucp_profile" else kind
+            latest = latest_profile_snapshot(self._conn, catalog_agent_id, snapshot_kind)
             etag = (latest or {}).get("etag") or None
             last_modified = (latest or {}).get("last_modified") or None
             try:

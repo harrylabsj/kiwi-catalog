@@ -149,7 +149,10 @@ def v1_list_agent_listings(db_path: str | Path, agent_id: str, query: dict[str, 
     with db_session(db_path) as conn:
         merchant_id = owner_agent_merchant_id(conn, owner_agent_id)
         if merchant_id:
-            api_auth.require_owner_token(auth_payload, merchant_id)
+            # 审查 P2：admin 豁免此前未生效——直接 require_owner_token 会用
+            # admin token 比对 HMAC 派生值恒 403，与 docstring「授权与
+            # withdraw/reinstate 一致（admin 豁免）」相悖；复用同一 helper。
+            _require_owner_token_for_merchant(auth_payload, merchant_id)
         else:
             try:
                 api_auth.require_admin_token(auth_payload)

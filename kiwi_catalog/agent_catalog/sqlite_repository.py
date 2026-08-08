@@ -85,6 +85,14 @@ def _agent_status_rank(status: str) -> int:
     return _AGENT_STATUS_RANK.get(str(status or ""), 9)
 
 
+def _like_escaped(term: str) -> str:
+    """LIKE 通配符转义（审查 P2）：用户输入里的 % / _ / \\ 是 SQL LIKE 元字符，
+    不转义会让 q="%" 匹配全表、q="a_" 匹配任意单字符后缀。所有 LIKE 谓词必须
+    配 ``escape '\\'`` 使用。"""
+    escaped = str(term).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _encode_agent_cursor(
     rank: int, last_verified_at: str | None, display_name: str, catalog_agent_id: str
 ) -> str:
@@ -507,9 +515,10 @@ def search_catalog_agents(
     # q: free-text search across display_name, provider_name, canonical_domain
     if q:
         clauses.append(
-            "(ca.display_name like ? or ca.provider_name like ? or ca.canonical_domain like ?)"
+            "(ca.display_name like ? escape '\\' or ca.provider_name like ? escape '\\'"
+            " or ca.canonical_domain like ? escape '\\')"
         )
-        like_q = f"%{q}%"
+        like_q = _like_escaped(q)
         params.extend([like_q, like_q, like_q])
 
     # category: match against merchant tags（独立 schema 无 products 表——
@@ -517,9 +526,10 @@ def search_catalog_agents(
     # 会 500（no such table: products），只保留 merchants.tags_json 匹配）。
     if category:
         clauses.append(
-            "exists (select 1 from merchants m2 where m2.id = ca.merchant_id and m2.tags_json like ?)"
+            "exists (select 1 from merchants m2 where m2.id = ca.merchant_id"
+            " and m2.tags_json like ? escape '\\')"
         )
-        params.append(f"%{category}%")
+        params.append(_like_escaped(category))
 
     # capability: match against agent_capabilities
     if capability:
@@ -538,10 +548,10 @@ def search_catalog_agents(
             """exists (
             select 1 from agent_skills ask
             where ask.catalog_agent_id = ca.catalog_agent_id
-              and (ask.skill_id = ? or ask.name like ?)
+              and (ask.skill_id = ? or ask.name like ? escape '\\')
             )"""
         )
-        params.extend([skill, f"%{skill}%"])
+        params.extend([skill, _like_escaped(skill)])
 
     # protocol: match against agent_endpoints
     if protocol:

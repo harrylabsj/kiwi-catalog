@@ -198,6 +198,14 @@ class ListingsSearchTest(unittest.TestCase):
         )
         self.assertEqual(len(payload["results"]), 2)
 
+    def test_search_q_like_wildcards_escaped(self) -> None:
+        """审查 P2：q 中的 % _ 是字面量而非 SQL LIKE 通配符——q="%" 不得匹配全表。"""
+        self._publish({"source_product_ref": "SKU-pct", "title": "Discount 50% off"})
+        self._publish({"source_product_ref": "SKU-plain", "title": "Plain Item"})
+        _, payload = _call_http(self.app, "GET", "/v1/listings/search?q=%25")
+        self.assertEqual(len(payload["results"]), 1, payload)
+        self.assertEqual(payload["results"][0]["listing"]["title"], "Discount 50% off")
+
     def test_search_attribute_path_filter(self) -> None:
         self._publish({"attributes": {"screen_size": "21.5", "ip_rating": "IP67"}})
         _, payload = _call_http(self.app, "GET", "/v1/listings/search?attribute.screen_size=21.5")

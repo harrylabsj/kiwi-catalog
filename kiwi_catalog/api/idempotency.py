@@ -94,6 +94,14 @@ def catalog_register_request_hash(payload: dict[str, Any]) -> str:
             "agent_card_url": str(payload.get("agent_card_url") or "").strip(),
             "ucp_profile_url": str(payload.get("ucp_profile_url") or "").strip(),
             "merchant_id": str(payload.get("merchant_id") or "").strip(),
+            # 审查 P2：其余 public 白名单字段纳入 hash——同 key 改 display_name/
+            # hosting_mode/handoff/capabilities/skills 此前 hash 相同被静默重放，
+            # 调用方以为新字段已生效。
+            "display_name": str(payload.get("display_name") or "").strip(),
+            "hosting_mode": str(payload.get("hosting_mode") or "").strip(),
+            "handoff_destination_types": payload.get("handoff_destination_types") or [],
+            "capabilities": payload.get("capabilities") or [],
+            "skills": payload.get("skills") or [],
         }
     )
 

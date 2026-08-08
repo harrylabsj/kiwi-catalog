@@ -55,6 +55,13 @@ from kiwi_catalog.listings.sqlite_repository import (
 # 旧格式（2 段）解码时 rank=None → 谓词退化为旧行为。
 
 
+def _like_escaped(term: str) -> str:
+    """LIKE 通配符转义（审查 P2）：q 中的 % / _ / \\ 是 SQL LIKE 元字符——
+    不转义时 q="%" 匹配全表、q="a_" 匹配任意单字符后缀。配 escape '\\' 使用。"""
+    escaped = str(term).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _encode_search_cursor(freshness_state: str, updated_at: str, listing_id: str) -> str:
     rank = "0" if freshness_state == "FRESH" else "1"
     return urllib.parse.quote(f"{rank}|{updated_at}|{listing_id}", safe="")
@@ -165,8 +172,11 @@ def search_listings(
 
     q = str(query.get("q") or "").strip()
     if q:
-        where.append("(title like ? or category like ? or brand like ? or summary like ?)")
-        pattern = f"%{q}%"
+        where.append(
+            "(title like ? escape '\\' or category like ? escape '\\'"
+            " or brand like ? escape '\\' or summary like ? escape '\\')"
+        )
+        pattern = _like_escaped(q)
         values.extend([pattern, pattern, pattern, pattern])
 
     listing_type = str(query.get("listing_type") or "").strip()
