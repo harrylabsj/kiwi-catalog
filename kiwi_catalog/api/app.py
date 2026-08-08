@@ -1019,29 +1019,30 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
 
+    def _portal_html(result: dict[str, Any]) -> HTMLResponse:
+        """门户 handler 结果 → HTMLResponse；__status__ 键覆盖状态码
+        （与 fallback _send_json 语义一致）。"""
+        return HTMLResponse(
+            result["__html__"],
+            status_code=int(result.get("__status__") or 200),
+            headers=_PORTAL_HTML_HEADERS,
+        )
+
     @app.get("/portal")
     def portal_home_page() -> HTMLResponse:
-        return HTMLResponse(
-            portal_handlers.portal_home()["__html__"], headers=_PORTAL_HTML_HEADERS
-        )
+        return _portal_html(portal_handlers.portal_home())
 
     @app.get("/portal/apply")
     def portal_apply_page() -> HTMLResponse:
-        return HTMLResponse(
-            portal_handlers.portal_apply()["__html__"], headers=_PORTAL_HTML_HEADERS
-        )
+        return _portal_html(portal_handlers.portal_apply())
 
     @app.get("/portal/admin")
     def portal_admin_page() -> HTMLResponse:
-        return HTMLResponse(
-            portal_handlers.portal_admin()["__html__"], headers=_PORTAL_HTML_HEADERS
-        )
+        return _portal_html(portal_handlers.portal_admin())
 
     @app.get("/portal/status")
     def portal_status_page() -> HTMLResponse:
-        return HTMLResponse(
-            portal_handlers.portal_status()["__html__"], headers=_PORTAL_HTML_HEADERS
-        )
+        return _portal_html(portal_handlers.portal_status())
 
 
 def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:

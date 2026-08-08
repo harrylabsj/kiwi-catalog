@@ -393,12 +393,37 @@ class MerchantsApiTest(unittest.TestCase):
     # ── 门户页 ─────────────────────────────────────────────────────────────
 
     def test_portal_pages_serve_html(self) -> None:
-        for path in ("/portal", "/portal/apply", "/portal/admin", "/portal/status"):
+        for path in ("/portal", "/portal/apply", "/portal/status"):
             status, payload, headers = _call_http(self.app, "GET", path)
             self.assertEqual(status, 200, (path, payload))
             self.assertIn("text/html", headers.get("content-type", ""))
             self.assertIn("no-store", headers.get("cache-control", ""))
-            self.assertIn("Kiwi Merchant", payload.get("_raw", ""))
+            self.assertIn("Kiwi", payload.get("_raw", ""))
+
+    def test_portal_admin_hidden_by_default(self) -> None:
+        """审核后台不对外公布：默认 404，页面不含审核表单。"""
+        status, payload, _ = _call_http(self.app, "GET", "/portal/admin")
+        self.assertEqual(status, 404, payload)
+        self.assertNotIn("id=\"admin_token\"", payload.get("_raw", ""))
+
+    def test_portal_admin_enabled_via_env(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+        ):
+            status, payload, headers = _call_http(self.app, "GET", "/portal/admin")
+            self.assertEqual(status, 200, payload)
+            self.assertIn("text/html", headers.get("content-type", ""))
+            self.assertIn("admin_token", payload.get("_raw", ""))
+            self.assertIn("no-store", headers.get("cache-control", ""))
+
+    def test_portal_pages_use_official_theme(self) -> None:
+        """门户页与官网共用主题（nav/hero/section/card 类 + --kiwi-* 变量）。"""
+        for path in ("/portal", "/portal/apply", "/portal/status"):
+            _, payload, _ = _call_http(self.app, "GET", path)
+            raw = payload.get("_raw", "")
+            self.assertIn("--kiwi-800", raw, path)
+            self.assertIn("class=\"nav\"", raw, path)
+            self.assertIn("class=\"section", raw, path)
 
     def test_token_digest_format(self) -> None:
         self.assertEqual(len(token_digest("mkt_x")), 64)
