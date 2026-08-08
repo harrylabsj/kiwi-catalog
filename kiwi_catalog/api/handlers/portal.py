@@ -14,63 +14,149 @@
 
 """Merchant 门户页面（docs/kiwi-catalog-token-portal-design-v0.1 §6）。
 
-fallback 栈渲染的轻量 HTML（内联 CSS/JS，零新依赖）：申请表单 / 审核后台 /
-商家自查 / 门户首页。页面只做表单与 fetch 调用——动态数据全部走 JSON API
-（/v1/merchants/*），页面本身无逻辑可被注入。
+fallback 栈渲染的轻量 HTML（零新依赖）：申请表单 / 审核后台 / 商家自查 /
+门户首页。样式与官网（kiwi 仓 docs/website/）完全一致——内联官网 style.css
++ 门户特有表单补充（主题变量同源，官网改样式时同步拷贝）。
 
-响应体约定：``{"__html__": "..."}`` 标记，fallback_asgi._send_json 检测该
-键改发 text/html（ETag/304 语义不变）。明文 token 只在审核后台批准/轮换的
-响应里出现一次，页面 JS 展示后不缓存（响应头 no-store 由 _send_json 加）。
+安全边界：
+- **审核后台不对外公布**：/portal/admin 由 env ``KIWI_CATALOG_PORTAL_ADMIN_ENABLED``
+  控制，默认关闭（404）；审核工作主走 CLI（catalog merchant applications
+  approve/reject），网页后台按需在主机开启、用完关闭；
+- 页面只做表单与 fetch 调用，动态数据全部走 JSON API（/v1/merchants/*，
+  admin 端点另有 admin token fail-closed）；
+- 响应体 ``{"__html__": "..."}`` 标记经 fallback _send_json 发 text/html +
+  no-store（明文 token 只在审核后台批准/轮换响应出现一次）。
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-_PAGE_CSS = """
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f6f7f9;color:#1a2332;line-height:1.6}
-.wrap{max-width:760px;margin:0 auto;padding:32px 20px}
-h1{font-size:26px;margin-bottom:8px}
-h2{font-size:18px;margin:28px 0 12px}
-p{color:#3d4a5c;margin-bottom:12px}
-.card{background:#fff;border:1px solid #e3e7ee;border-radius:10px;padding:24px;margin-bottom:20px}
-label{display:block;font-size:14px;font-weight:600;margin:14px 0 6px}
-input,textarea,select{width:100%;padding:10px 12px;border:1px solid #c9d1dc;border-radius:8px;font-size:14px;font-family:inherit}
-button{margin-top:18px;padding:11px 20px;background:#1a6cff;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
-button.ghost{background:#eef1f6;color:#1a2332;margin-left:8px}
-button:disabled{opacity:.5;cursor:not-allowed}
-.note{background:#f0f5ff;border-left:4px solid #1a6cff;padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0;font-size:14px}
-.token-box{background:#0f172a;color:#7dd3fc;font-family:ui-monospace,Menlo,monospace;font-size:14px;padding:14px 16px;border-radius:8px;word-break:break-all;margin:12px 0}
-.err{color:#d93025;font-size:14px;margin-top:10px}
-.ok{color:#188038;font-size:14px;margin-top:10px}
-.mono{font-family:ui-monospace,Menlo,monospace;font-size:13px}
-.row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #eef1f6}
-.row:last-child{border-bottom:none}
-.small{font-size:13px;color:#5b6779}
-.nav{display:flex;gap:16px;margin-bottom:24px;font-size:14px}
-.nav a{color:#1a6cff;text-decoration:none}
+_PORTAL_ADMIN_ENABLED_ENV = "KIWI_CATALOG_PORTAL_ADMIN_ENABLED"
+
+# 官网 style.css（kiwi 仓 docs/website/style.css，2026-08-08 同步）——两处
+# 共用同一套主题（--kiwi-* 变量、nav/section/card/btn/notice/footer）。
+_OFFICIAL_CSS = """
+:root {
+  --kiwi-900: #143d18;
+  --kiwi-800: #1b5e20;
+  --kiwi-700: #2e7d32;
+  --kiwi-600: #43a047;
+  --kiwi-100: #e8f5e9;
+  --ink: #1a1f1a;
+  --ink-soft: #4b554b;
+  --paper: #ffffff;
+  --paper-soft: #f6f8f6;
+  --line: #dde5dd;
+  --radius: 14px;
+  --maxw: 1080px;
+  font-size: 17px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.nav-inner { max-width: var(--maxw); margin: 0 auto; padding: 14px 24px; display: flex; align-items: center; gap: 28px; }
+.nav-logo { font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em; color: var(--kiwi-800); text-decoration: none; }
+.nav-links { display: flex; gap: 20px; margin-left: auto; }
+.nav-links a { color: var(--ink-soft); text-decoration: none; font-size: 0.95rem; padding: 4px 2px; border-bottom: 2px solid transparent; }
+.nav-links a:hover, .nav-links a.active { color: var(--kiwi-700); border-bottom-color: var(--kiwi-600); }
+.hero {
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgba(67, 160, 71, 0.35), transparent 60%),
+    linear-gradient(160deg, var(--kiwi-900), var(--kiwi-800) 55%, var(--kiwi-700));
+  color: #fff; padding: 72px 24px 64px;
+}
+.hero-inner { max-width: var(--maxw); margin: 0 auto; }
+.hero h1 { font-size: clamp(2rem, 4.5vw, 3rem); line-height: 1.1; letter-spacing: -0.02em; font-weight: 800; }
+.hero .tagline { margin-top: 12px; font-size: clamp(1rem, 2vw, 1.2rem); color: rgba(255, 255, 255, 0.88); max-width: 42em; }
+.hero-actions { margin-top: 28px; display: flex; gap: 14px; flex-wrap: wrap; }
+.btn { display: inline-block; padding: 12px 24px; border-radius: 999px; font-weight: 600; text-decoration: none; font-size: 0.98rem; transition: transform 0.12s ease, box-shadow 0.12s ease; }
+.btn:hover { transform: translateY(-1px); }
+.btn-solid { background: #fff; color: var(--kiwi-800); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); }
+.btn-ghost { border: 1.5px solid rgba(255, 255, 255, 0.75); color: #fff; }
+.section { padding: 56px 24px; }
+.section-inner { max-width: var(--maxw); margin: 0 auto; }
+.section-alt { background: var(--paper-soft); }
+.kicker { color: var(--kiwi-700); font-weight: 700; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; }
+h2 { font-size: clamp(1.5rem, 3vw, 2rem); letter-spacing: -0.02em; margin-top: 10px; }
+.lead { margin-top: 10px; font-size: 1.05rem; color: var(--ink-soft); max-width: 44em; }
+.grid { display: grid; gap: 20px; margin-top: 30px; }
+.grid-3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; box-shadow: 0 2px 8px rgba(20, 40, 24, 0.04); }
+.card h3 { font-size: 1.05rem; margin-bottom: 8px; }
+.card p { color: var(--ink-soft); font-size: 0.94rem; margin-bottom: 8px; }
+.card-num { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--kiwi-100); color: var(--kiwi-800); font-weight: 700; font-size: 0.85rem; margin-bottom: 12px; }
+.notice { margin-top: 32px; border-left: 4px solid var(--kiwi-600); background: var(--kiwi-100); border-radius: 0 var(--radius) var(--radius) 0; padding: 18px 22px; font-size: 0.94rem; max-width: 46em; }
+.notice strong { color: var(--kiwi-800); }
+pre { background: #12251a; color: #d7f0da; border-radius: var(--radius); padding: 18px 20px; overflow-x: auto; font-size: 0.85rem; line-height: 1.6; margin-top: 20px; }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.footer { border-top: 1px solid var(--line); padding: 32px 24px 44px; background: var(--paper-soft); color: var(--ink-soft); font-size: 0.9rem; }
+.footer-inner { max-width: var(--maxw); margin: 0 auto; }
+.footer a { color: var(--kiwi-700); text-decoration: none; }
+@media (max-width: 640px) {
+  .nav-inner { flex-wrap: wrap; gap: 10px; }
+  .nav-links { margin-left: 0; width: 100%; }
+  .hero { padding: 52px 20px 44px; }
+  .section { padding: 40px 20px; }
+}
 """
 
-_NAV = """
-<div class="nav">
-  <a href="/portal">门户首页</a>
-  <a href="/portal/apply">商家申请</a>
-  <a href="/portal/admin">审核后台</a>
-  <a href="/portal/status">状态自查</a>
-</div>
+# 门户特有（表单/令牌展示/审核列表），主题变量与官网同源
+_PORTAL_EXTRA_CSS = """
+.form-card { max-width: 560px; }
+label { display: block; font-size: 0.9rem; font-weight: 600; margin: 16px 0 6px; color: var(--ink); }
+input, textarea {
+  width: 100%; padding: 11px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  font-size: 0.95rem; font-family: inherit; color: var(--ink);
+  background: var(--paper);
+}
+input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset: 1px; border-color: var(--kiwi-600); }
+.btn-form {
+  margin-top: 22px; display: inline-block; border: none; cursor: pointer;
+  padding: 12px 26px; border-radius: 999px; font-weight: 600;
+  font-size: 0.98rem; font-family: inherit;
+  background: var(--kiwi-800); color: #fff;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.btn-form:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(27, 94, 32, 0.25); }
+.btn-form:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-mini {
+  border: 1px solid var(--line); background: var(--paper-soft); color: var(--ink);
+  padding: 7px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
+  cursor: pointer; font-family: inherit; margin-left: 6px;
+}
+.token-box { background: #12251a; color: #7dd3a8; font-family: ui-monospace, Menlo, monospace; font-size: 0.92rem; padding: 12px 14px; border-radius: 10px; word-break: break-all; margin: 10px 0; }
+.mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
+.small { font-size: 0.83rem; color: var(--ink-soft); }
+.err { color: #b3261e; font-size: 0.9rem; margin-top: 10px; }
+.ok { color: var(--kiwi-700); font-size: 0.9rem; margin-top: 10px; }
+.app-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.app-row:last-child { border-bottom: none; }
+.app-actions { flex-shrink: 0; }
 """
 
 
 def _page(title: str, body: str) -> dict[str, Any]:
     return {
         "__html__": (
-            f"<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-            f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             f"<title>{title} — Kiwi Merchant Portal</title>"
-            f"<style>{_PAGE_CSS}</style></head>"
-            f"<body><div class=\"wrap\">{_NAV}{body}</div>"
-            f"<script>{_PORTAL_JS}</script></body></html>"
+            f"<style>{_OFFICIAL_CSS}{_PORTAL_EXTRA_CSS}</style></head>"
+            f"<body>{body}<script>{_PORTAL_JS}</script></body></html>"
         )
     }
 
@@ -89,44 +175,73 @@ function getJson(url, token) {
 }
 """
 
+_NAV = """
+<nav class="nav"><div class="nav-inner">
+  <a class="nav-logo" href="/portal">Kiwi</a>
+  <div class="nav-links">
+    <a href="/portal" class="active">Merchant Portal</a>
+    <a href="/portal/apply">商家申请</a>
+    <a href="/portal/status">状态自查</a>
+  </div>
+</div></nav>
+"""
+
+_FOOTER = """
+<footer class="footer"><div class="footer-inner">
+  <p>Kiwi Merchant Portal · 令牌只显示一次，遗失请联系运营轮换 · 明文令牌永不出现在日志中</p>
+</div></footer>
+"""
+
 
 def portal_home() -> dict[str, Any]:
-    body = """
-<h1>Kiwi Merchant 门户</h1>
-<p>注册 Kiwi 商家身份，获取访问令牌（token），把产品目录接入 Kiwi 网络。</p>
-<div class="card">
+    body = (
+        _NAV
+        + """
+<header class="hero"><div class="hero-inner">
+  <h1>Kiwi Merchant 门户</h1>
+  <p class="tagline">注册 Kiwi 商家身份，获取访问令牌，把产品目录接入 Kiwi 网络——Buyer Agent 就能直接找到你、跟你谈、向你买。</p>
+  <div class="hero-actions">
+    <a class="btn btn-solid" href="/portal/apply">申请商家令牌</a>
+    <a class="btn btn-ghost" href="/portal/status">状态自查</a>
+  </div>
+</div></header>
+<section class="section"><div class="section-inner">
+  <div class="kicker">How it works</div>
   <h2>三步接入</h2>
-  <p>1. <strong>提交申请</strong> — 填写店铺域名、Agent 名称与联系邮箱。</p>
-  <p>2. <strong>等待审核</strong> — 平台批准后签发商家 ID（mkt_…）与访问令牌。</p>
-  <p>3. <strong>发布产品</strong> — 用令牌注册 Agent、发布 Listing，Buyer Agent 就能找到你。</p>
-</div>
-<div class="card">
-  <h2>入口</h2>
-  <p><a href="/portal/apply">商家申请</a> — 提交接入申请</p>
-  <p><a href="/portal/admin">审核后台</a> — 平台运营审批申请、签发/轮换/吊销令牌（需 admin token）</p>
-  <p><a href="/portal/status">状态自查</a> — 用你的 token 查看名下 Agent 与产品状态</p>
-</div>
-<div class="note">令牌只在签发时显示一次，遗失请联系运营轮换。明文令牌永不出现在日志中。</div>
+  <div class="grid grid-3">
+    <div class="card"><div class="card-num">1</div><h3>提交申请</h3><p>填写店铺域名、Agent 名称与联系邮箱。平台审核确认商家身份。</p></div>
+    <div class="card"><div class="card-num">2</div><h3>审核签发</h3><p>获批后得到商家 ID（<code>mkt_…</code>）与一次性访问令牌，仅展示一次。</p></div>
+    <div class="card"><div class="card-num">3</div><h3>发布产品</h3><p>用令牌注册 Agent、发布 Listing；遗失请联系运营轮换。</p></div>
+  </div>
+  <div class="notice"><p><strong>令牌安全：</strong>令牌只在签发时显示一次。申请通过后请立即保存；泄漏或遗失请联系运营在审核后台轮换。</p></div>
+</div></section>
 """
+        + _FOOTER
+    )
     return _page("Merchant Portal", body)
 
 
 def portal_apply() -> dict[str, Any]:
-    body = """
-<h1>商家申请</h1>
-<p>提交以下信息，平台审核通过后签发商家 ID 与访问令牌。</p>
-<div class="card">
-  <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
-  <input id="domain" placeholder="acme.example" autocomplete="off">
-  <label for="agent_name">Agent 名称</label>
-  <input id="agent_name" placeholder="Acme Merchant Agent">
-  <label for="contact_email">联系邮箱</label>
-  <input id="contact_email" type="email" placeholder="ops@acme.example">
-  <label for="purpose">用途说明（可选）</label>
-  <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
-  <button id="submit">提交申请</button>
-  <div id="out"></div>
-</div>
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Apply</div>
+  <h2>商家申请</h2>
+  <p class="lead">提交以下信息，平台审核通过后签发商家 ID 与访问令牌。</p>
+  <div class="card form-card">
+    <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
+    <input id="domain" placeholder="acme.example" autocomplete="off">
+    <label for="agent_name">Agent 名称</label>
+    <input id="agent_name" placeholder="Acme Merchant Agent">
+    <label for="contact_email">联系邮箱</label>
+    <input id="contact_email" type="email" placeholder="ops@acme.example">
+    <label for="purpose">用途说明（可选）</label>
+    <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
+    <button class="btn-form" id="submit">提交申请</button>
+    <div id="out"></div>
+  </div>
+</div></section>
 <script>
 document.getElementById('submit').addEventListener('click', () => {
   const btn = document.getElementById('submit');
@@ -149,24 +264,43 @@ document.getElementById('submit').addEventListener('click', () => {
 });
 </script>
 """
+        + _FOOTER
+    )
     return _page("商家申请", body)
 
 
 def portal_admin() -> dict[str, Any]:
-    body = """
-<h1>审核后台</h1>
-<p>输入平台 admin token，查看待审申请并签发商家令牌。</p>
-<div class="card">
-  <label for="admin_token">Admin Token</label>
-  <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
-  <button id="load">加载待审申请</button>
-  <div id="out"></div>
-  <div id="list"></div>
-</div>
-<div class="card" id="result_card" style="display:none">
-  <h2>签发结果（令牌仅显示一次）</h2>
-  <div id="result"></div>
-</div>
+    """审核后台——默认不对外公布（env 开关，见模块 docstring）。
+
+    关闭时返回 404 HTML（__status__ 标记让 fallback/FastAPI 双栈发真实
+    404 状态码，而非 200 包 404 页面）。
+    """
+    if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {"__html__": _not_found_html(), "__status__": 404}
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Admin</div>
+  <h2>审核后台</h2>
+  <p class="lead">输入平台 admin token，查看待审申请并签发商家令牌。</p>
+  <div class="card form-card">
+    <label for="admin_token">Admin Token</label>
+    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
+    <button class="btn-form" id="load">加载待审申请</button>
+    <div id="out"></div>
+    <div id="list"></div>
+  </div>
+  <div class="card form-card" id="result_card" style="display:none">
+    <h3>签发结果（令牌仅显示一次）</h3>
+    <div id="result"></div>
+  </div>
+</div></section>
 <script>
 function showToken(r) {
   const card = document.getElementById('result_card');
@@ -189,13 +323,13 @@ function loadList() {
     if (!r.results.length) { list.innerHTML = '<p class="small">没有待审申请</p>'; return; }
     r.results.forEach(a => {
       const row = document.createElement('div');
-      row.className = 'row';
+      row.className = 'app-row';
       row.innerHTML = '<div><strong>' + a.agent_name + '</strong><br>'
         + '<span class="small mono">' + a.domain + ' · ' + a.contact_email + '</span>'
         + (a.purpose ? '<br><span class="small">' + a.purpose + '</span>' : '')
         + '</div>'
-        + '<div><button data-app="' + a.application_id + '" class="ghost">批准签发</button>'
-        + '<button data-rej="' + a.application_id + '" class="ghost">拒绝</button></div>';
+        + '<div class="app-actions"><button data-app="' + a.application_id + '" class="btn-mini">批准签发</button>'
+        + '<button data-rej="' + a.application_id + '" class="btn-mini">拒绝</button></div>';
       list.appendChild(row);
     });
   });
@@ -215,19 +349,26 @@ document.getElementById('list').addEventListener('click', e => {
 });
 </script>
 """
+        + _FOOTER
+    )
     return _page("审核后台", body)
 
 
 def portal_status() -> dict[str, Any]:
-    body = """
-<h1>状态自查</h1>
-<p>输入你的商家令牌，查看名下 Agent 与产品状态。</p>
-<div class="card">
-  <label for="owner_token">你的令牌</label>
-  <input id="owner_token" type="password" placeholder="mkt_…" autocomplete="off">
-  <button id="check">查询</button>
-  <div id="out"></div>
-</div>
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Status</div>
+  <h2>状态自查</h2>
+  <p class="lead">输入你的商家令牌，查看名下 Agent 与产品状态。</p>
+  <div class="card form-card">
+    <label for="owner_token">你的令牌</label>
+    <input id="owner_token" type="password" placeholder="mkt_…" autocomplete="off">
+    <button class="btn-form" id="check">查询</button>
+    <div id="out"></div>
+  </div>
+</div></section>
 <script>
 document.getElementById('check').addEventListener('click', () => {
   const token = document.getElementById('owner_token').value.trim();
@@ -245,4 +386,22 @@ document.getElementById('check').addEventListener('click', () => {
 });
 </script>
 """
+        + _FOOTER
+    )
     return _page("状态自查", body)
+
+
+def _not_found_html() -> str:
+    """404 页面 HTML 字符串（不含 JS，供 __status__: 404 包裹）。"""
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">404</div>
+  <h2>页面不存在</h2>
+  <p class="lead">审核后台不对外公开，运营请使用本地 CLI：<code>kiwi-catalog catalog merchant applications approve &lt;id&gt;</code>。</p>
+</div></section>
+"""
+        + _FOOTER
+    )
+    return _page("Not Found", body)["__html__"]

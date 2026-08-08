@@ -175,8 +175,14 @@ class MarketplaceASGIApp:
 
         ``{"__html__": "..."}`` 标记响应（/portal/* 门户页，docs §6）改发
         text/html；门户页含一次性令牌展示，响应带 no-store 防缓存。
+        ``__status__`` 键覆盖状态码（如审核后台关闭时发真实 404）。
         """
         html = response.get("__html__") if isinstance(response, dict) else None
+        override_status = (
+            response.get("__status__") if isinstance(response, dict) else None
+        )
+        if override_status is not None:
+            status = int(override_status)
         if html is not None:
             body = str(html).encode("utf-8")
             content_type = b"text/html; charset=utf-8"
