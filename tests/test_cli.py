@@ -46,8 +46,8 @@ class CatalogCliTest(unittest.TestCase):
         catalog_cmds = list(catalog._actions[-1].choices.keys())
         self.assertEqual(
             sorted(catalog_cmds),
-            ["claim", "doctor", "get", "refresh", "register", "reinstate",
-             "search", "stats", "suspend", "verify"],
+            ["claim", "doctor", "get", "merchant", "refresh", "register",
+             "reinstate", "search", "stats", "suspend", "verify"],
         )
 
     def test_stats_outputs_runtime_metrics(self) -> None:
