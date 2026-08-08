@@ -48,6 +48,15 @@ REGISTER_BODY = {
 }
 
 
+def _noop_enqueue(db_path, catalog_agent_id, *, kind="verify", actor="verification_worker"):
+    """测试替身：注册不真的跑异步验证。
+
+    审查 P3：REJECTED（证据失效）→ freshness=STALE 是异步可见状态——真实
+    队列任务会让紧随注册的断言（fold/三域）竞态。确定性测试用替身。
+    """
+    return type("_StubTask", (), {"task_id": ""})()
+
+
 def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict]:
     """裸 ASGI 调用（fallback 栈），返回 (status, parsed json)。
 
@@ -128,7 +137,12 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         self.assertIn("handoff_destination_types", str(payload.get("error", "")))
 
     def test_search_filters_by_three_domains_and_handoff(self) -> None:
-        self._register()
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            self._register()
         # 全量命中
         _, payload = _call_http(
             self.app,
@@ -204,7 +218,12 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         """#4 authority 转移消费端可用性：v1 register → legacy /v1/agent-catalog
         搜索命中，折叠 verification.status 与 v1 三态域一致（独立服务承载
         Agent Catalog 后，legacy 消费端照常工作）。"""
-        registered = self._register()
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            registered = self._register()
         status, payload = _call_http(self.app, "GET", "/v1/agent-catalog/agents/search")
         self.assertEqual(status, 200)
         self.assertEqual(len(payload["results"]), 1)
@@ -229,7 +248,13 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         self.db_path = os.path.join(self.tmp, "catalog.sqlite")
         self.app = create_catalog_app(self.db_path)
         body = json.dumps(REGISTER_BODY).encode()
-        _, payload = _call_http(self.app, "POST", "/v1/agents/register", body)
+        # enqueue 替身：异步验证任务会让紧随的 fold/三域断言竞态（审查 P3）
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            _, payload = _call_http(self.app, "POST", "/v1/agents/register", body)
         self.cagt_id = payload["agent"]["catalog_agent_id"]
 
     def _row(self) -> dict:
@@ -320,6 +345,76 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["agent"]["catalog_agent_id"], self.cagt_id)
+
+    def test_rejected_profile_failure_marks_stale_for_reverify(self) -> None:
+        """审查 P3：REJECTED（证据失效）后 freshness=STALE——/verify（不
+        force）不再被 freshness 门短路成 no-op，可重试恢复。"""
+        from kiwi_catalog.agent_catalog.sqlite_repository import require_catalog_agent
+        from kiwi_catalog.services.agent_verification import (
+            REJECTED,
+            VerificationService,
+            _ProfileFailure,
+        )
+
+        with db_session(self.db_path) as conn:
+            service = VerificationService(conn)
+            with mock.patch.object(
+                service,
+                "_load_profiles",
+                side_effect=_ProfileFailure(REJECTED, "mock rejected"),
+            ):
+                result = service.verify(self.cagt_id, actor="test")
+            self.assertIsNotNone(result)
+            row = require_catalog_agent(conn, self.cagt_id)
+            self.assertEqual(row["freshness_state"], "stale")
+            # 下一次非 force verify：freshness=STALE → 门不短路，真正重跑
+            #（用成功的 profiles 替身验证阶梯推进，而非返回 early no-op）
+            class _FakeCard:
+                canonical_domain = "acme.example"
+
+            class _FakeProfiles:
+                card = _FakeCard()
+                ucp = None  # 参数求值需要属性存在；trust_evaluator 被 mock 忽略
+                urls = {
+                    "agent_card": "https://acme.example/a.json",
+                    "ucp_profile": "https://acme.example/u.json",
+                }
+                snapshot_ids = (1, 2)
+
+            from kiwi_catalog.discovery.verifier import VerificationEvidence
+
+            def _passing_domain_control(_c: str, declared: dict | None = None) -> VerificationEvidence:
+                return VerificationEvidence(
+                    verification_type="domain_control",
+                    result="passed",
+                    details={},
+                    reason="mock pass",
+                    expires_in_seconds=3600,
+                )
+
+            service2 = VerificationService(conn)
+            service2._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
+            service2._identity_verifier.verify_domain_control = _passing_domain_control  # type: ignore[method-assign]
+            service2._trust_evaluator.evaluate_agent_identity = (  # type: ignore[method-assign]
+                lambda _card, _ucp, _domain: VerificationEvidence(
+                    verification_type="agent_identity",
+                    result="passed",
+                    details={},
+                    reason="mock pass",
+                    expires_in_seconds=3600,
+                )
+            )
+            service2._trust_evaluator.evaluate_commerce_capabilities = (  # type: ignore[method-assign]
+                lambda _card, _ucp, _domain: VerificationEvidence(
+                    verification_type="commerce_capability",
+                    result="passed",
+                    details={},
+                    reason="mock pass",
+                    expires_in_seconds=3600,
+                )
+            )
+            retry = service2.verify(self.cagt_id, actor="test")
+            self.assertEqual(retry.status, "commerce_verified", retry)
 
     def test_verify_reentry_domain_failure_keeps_evidence_level(self) -> None:
         """审查 P1-7：重验证中 domain 阶段瞬时失败 → 按最新 passed 证据降级到
@@ -469,14 +564,19 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             set_state_domains(conn, self.cagt_id, administrative_state="suspended")
         self.assertEqual(self._row()["verification_status"], "suspended")
 
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            "/v1/agents/register",
-            json.dumps(
-                {**REGISTER_BODY, "domain": "acme.example", "admin_token": "test-admin"}
-            ).encode(),
-        )
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            status, payload = _call_http(
+                self.app,
+                "POST",
+                "/v1/agents/register",
+                json.dumps(
+                    {**REGISTER_BODY, "domain": "acme.example", "admin_token": "test-admin"}
+                ).encode(),
+            )
         self.assertEqual(status, 200, payload)
         row = self._row()
         # 重新打开：三域一致（discovered/fresh/active），折叠投影同值。

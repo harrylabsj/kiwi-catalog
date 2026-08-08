@@ -32,6 +32,7 @@ actually serve the standard well-known locations over HTTPS.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from typing import Any
@@ -159,6 +160,10 @@ def register_catalog_agent(
     # agent 时拒绝新注册（数据层有部分唯一索引兜底，此处给明确错误）。
     if merchant_id:
         owned, _ = list_catalog_agents_by_merchant(conn, merchant_id)
+        # 审查 P3：治理处置（rejected/suspended）的旧绑定不挡重新注册——
+        # 该行的「重新打开」正是注册路径的语义，此前预检命中自身 → 永久
+        # ConflictError，merchant 无法带 merchant_id 恢复自己的 agent。
+        owned = [a for a in owned if a.get("administrative_state") not in RE_REGISTERABLE_ADMIN]
         if owned:
             raise ConflictError(
                 f"merchant {merchant_id} already has a catalog agent "
@@ -224,7 +229,14 @@ def register_catalog_agent(
                     "skill_id": str(s.get("skill_id") or ""),
                     "name": str(s.get("name") or ""),
                     "description": str(s.get("description") or ""),
-                    "tags_json": s.get("tags_json", "[]"),
+                    # 审查 P3：tags_json 客户端可传 list——写边界归一化为
+                    # JSON 字符串（此前 sqlite3 绑定 list 抛 ProgrammingError
+                    # → 500，未转换为 ValidationError）。
+                    "tags_json": (
+                        s["tags_json"]
+                        if isinstance(s.get("tags_json"), str)
+                        else json.dumps(s.get("tags_json") or [], ensure_ascii=False)
+                    ),
                 }
                 for s in skills
             ],

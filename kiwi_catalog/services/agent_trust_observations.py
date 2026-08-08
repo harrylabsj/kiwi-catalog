@@ -37,6 +37,7 @@ merged into a combined reputation score.
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
@@ -79,6 +80,18 @@ def record_observation(
         raise ValidationError(f"trust observation value must be numeric: {value!r}") from exc
     if not math.isfinite(numeric) or numeric < 0:
         raise ValidationError(f"trust observation value must be a finite non-negative number: {value!r}")
+
+    # 审查 P3：observed_at/expires_at 必须 ISO-8601（可解析）——非法日期此前
+    # 直接落库，污染 list_trust_observations 排序与未来的过期判断。
+    for label, raw in (("observed_at", observed_at), ("expires_at", expires_at)):
+        text = str(raw or "").strip()
+        if text:
+            try:
+                datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{label} must be ISO-8601, got {text!r}"
+                ) from exc
 
     source = str(source or "").strip() or "local"
     observation_id = insert_trust_observation(

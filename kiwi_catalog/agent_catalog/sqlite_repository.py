@@ -275,6 +275,24 @@ def _update_catalog_agent(
         fields.setdefault("verification_level", _level)
         fields.setdefault("freshness_state", _fresh)
         fields.setdefault("administrative_state", _admin)
+    # 审查 P3（折叠漂移面）：只写三域字段、不带 verification_status 时反向
+    # 重算折叠列——任何三域写入都不得让折叠列漂移（CLAUDE.md 契约）。
+    elif any(
+        f in fields for f in ("verification_level", "freshness_state", "administrative_state")
+    ):
+        fields["verification_status"] = _fold_verification_status(
+            str(fields.get("verification_level") or ""),
+            str(fields.get("freshness_state") or ""),
+            str(fields.get("administrative_state") or ""),
+        )
+    # 审查 P3（last_verified_at 不刷新）：hosted 投影反复同步 commerce_verified
+    # 时刷新 last_verified_at——否则该行永远排在同 rank 老位置、verified_after
+    # 过滤失真（搜索排序键的一部分）。
+    if (
+        fields.get("verification_status") == "commerce_verified"
+        and fields.get("last_verified_at") is None
+    ):
+        fields["last_verified_at"] = now_iso()
     updates: list[str] = []
     values: list[Any] = []
     for col, val in fields.items():
@@ -402,6 +420,28 @@ def list_capabilities(conn: sqlite3.Connection, catalog_agent_id: str) -> list[d
     return [_row_to_dict(r) for r in rows]
 
 
+def _list_capabilities_by_agent(
+    conn: sqlite3.Connection, catalog_agent_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """批量取 capabilities（审查 P3：搜索/列表每行 N+1 → 一次 IN 查询分组）。"""
+    ids = [i for i in catalog_agent_ids if i]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"""
+        select * from agent_capabilities
+        where catalog_agent_id in ({placeholders})
+        order by namespace, capability_id
+        """,
+        ids,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["catalog_agent_id"]), []).append(_row_to_dict(row))
+    return grouped
+
+
 def replace_capabilities(
     conn: sqlite3.Connection,
     catalog_agent_id: str,
@@ -444,6 +484,50 @@ def list_endpoints(conn: sqlite3.Connection, catalog_agent_id: str) -> list[dict
         (catalog_agent_id,),
     ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+def _list_endpoints_by_agent(
+    conn: sqlite3.Connection, catalog_agent_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """批量取 endpoints（审查 P3：N+1 → 一次 IN 查询分组）。"""
+    ids = [i for i in catalog_agent_ids if i]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"""
+        select * from agent_endpoints
+        where catalog_agent_id in ({placeholders})
+        order by preference desc, endpoint_id
+        """,
+        ids,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["catalog_agent_id"]), []).append(_row_to_dict(row))
+    return grouped
+
+
+def _list_skills_by_agent(
+    conn: sqlite3.Connection, catalog_agent_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """批量取 skills（审查 P3：N+1 → 一次 IN 查询分组）。"""
+    ids = [i for i in catalog_agent_ids if i]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"""
+        select * from agent_skills
+        where catalog_agent_id in ({placeholders})
+        order by skill_id
+        """,
+        ids,
+    ).fetchall()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["catalog_agent_id"]), []).append(_row_to_dict(row))
+    return grouped
 
 
 # ── Search ──────────────────────────────────────────────────────────────────

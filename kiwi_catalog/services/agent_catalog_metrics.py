@@ -177,7 +177,9 @@ def catalog_doctor_report(conn: Any, *, checked_at: str = "") -> dict[str, Any]:
         warnings.append(f"{no_endpoints} agent(s) without any endpoint")
 
     return {
-        "ok": True,
+        # 审查 P3：ok 此前恒 True——消费方（CLI doctor 退出码）若误用 ok
+        # 判健康会误报；与 healthy 同源。
+        "ok": not issues,
         "healthy": not issues,
         "total_agents": total,
         "stale_agents": counts["stale"],

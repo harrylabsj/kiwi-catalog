@@ -67,10 +67,11 @@ def require_admin_token(payload: dict[str, Any]) -> None:
     """Raise AuthError unless the payload carries a valid admin token."""
     expected = configured_admin_token()
     if not expected:
-        raise AuthError("admin token is not configured")
+        # 审查 P3：不区分「未配置」与「无效」——配置状态泄漏会辅助枚举性探测
+        raise AuthError("invalid admin token")
     token = payload_token(payload)
     if not token:
-        raise AuthError("admin token required")
+        raise AuthError("invalid admin token")
     if not token_matches(token, expected):
         raise AuthError("invalid admin token")
 
@@ -101,6 +102,11 @@ def require_owner_token(payload: dict[str, Any], merchant_id: str) -> None:
         raise AuthError("merchant id required for owner authorization")
     presented = str((payload or {}).get("owner_token") or "")
     if not presented:
-        raise AuthError("owner token required")
-    if not token_matches(presented, owner_token(merchant_id)):
+        raise AuthError("invalid owner token")
+    try:
+        expected = owner_token(merchant_id)
+    except AuthError:
+        # 审查 P3：secret 未配置不向调用方泄漏（配置状态辅助枚举探测）
+        raise AuthError("invalid owner token") from None
+    if not token_matches(presented, expected):
         raise AuthError("invalid owner token")

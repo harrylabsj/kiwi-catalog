@@ -67,6 +67,17 @@ docker run --rm -p 8601:8600 -e KIWI_CATALOG_OWNER_TOKEN_SECRET=... kiwi-catalog
 
 - 数据目录/文件 0700/0600；owner token = HMAC-SHA256(secret,
   `kiwi-catalog-owner:{merchant_id}`)。
+- 时间戳格式：全库 ISO 文本（UTC、无微秒，`now_iso()`）——唯一例外是
+  `verification_queue_tasks` 的 `enqueued_at`/`started_at`/`finished_at`
+  （epoch REAL，与 `time.time()` 同单位，数值比较；跨表比较前先转换）。
+  新增时间列一律 ISO 文本。
+- 已知设计取舍（不修，勿当 bug 报）：
+  - GET 自查接口（`/v1/agents/{id}/listings`）token 经 query string——GET
+    无 body 的必然妥协，勿改为 body 传递；
+  - CLI `--admin-token` 只作 actor 标注不校验（本地 CLI 信任边界，服务端
+    校验不放松）；
+  - verifier 过渡表允许 STALE/UNREACHABLE 直达 COMMERCE_VERIFIED 是表
+    语义，服务层按顺序逐 stage 驱动不会真跳级。
 - fail-closed：任何校验/状态迁移失败抛类型化错误（core/errors.py），不静默
   容错；三域迁移合法性由 state_domains 状态机约束。
 - register 只读取白名单公开字段（display_name/hosting_mode/

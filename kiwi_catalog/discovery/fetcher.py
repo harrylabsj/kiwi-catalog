@@ -67,14 +67,23 @@ from kiwi_catalog.services.catalog_runtime_metrics import record_profile_fetch
 _METADATA_IP = ipaddress.IPv4Address("169.254.169.254")
 
 # Additional private-like ranges to block even when is_private is False in
-# some environments (e.g. Docker's default bridge).
+# some environments (e.g. Docker's default bridge). 审查 P3：补齐保留/特殊段
+# （类 E、TEST-NET、已废弃 site-local、组播）。
 _EXTRA_BLOCKED_V4 = [
     ipaddress.IPv4Network("0.0.0.0/8"),  # "This host on this network"
     ipaddress.IPv4Network("100.64.0.0/10"),  # CGNAT (RFC 6598)
     ipaddress.IPv4Network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
+    ipaddress.IPv4Network("240.0.0.0/4"),  # Class E reserved
+    ipaddress.IPv4Network("198.51.100.0/24"),  # TEST-NET-2 (RFC 5737)
+    ipaddress.IPv4Network("203.0.113.0/24"),  # TEST-NET-3 (RFC 5737)
 ]
 
 _LINK_LOCAL_V6 = ipaddress.IPv6Network("fe80::/10")
+# 已废弃 site-local（RFC 3879）与组播段——不可路由但显式封堵更稳
+_EXTRA_BLOCKED_V6 = [
+    ipaddress.IPv6Network("fec0::/10"),  # deprecated site-local
+    ipaddress.IPv6Network("ff00::/8"),  # multicast
+]
 
 # ── Verified IP store (shared across handler and redirect handler) ─────────────
 # Maps (hostname, port) → verified IP string.  Populated by the redirect handler
@@ -124,6 +133,9 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | N
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.is_link_local or ip in _LINK_LOCAL_V6:
             return "link-local address"
+        for net in _EXTRA_BLOCKED_V6:
+            if ip in net:
+                return f"blocked range {net}"
         # IPv4-mapped IPv6 (::ffff:a.b.c.d) — extract and check the v4 part
         if ip.ipv4_mapped:
             v4 = ip.ipv4_mapped
@@ -698,7 +710,9 @@ class ProfileFetcher:
 
         try:
             with opener.open(request, timeout=self._timeout) as response:
-                return self._process_response(response, url, fetched_at)
+                # 审查 P3：response.geturl() 是重定向后的终址——此前传初请求
+                # URL，快照/审计记录的是跳转前地址。
+                return self._process_response(response, response.geturl(), fetched_at)
         except SSRFBlockError:
             raise
         except FetchLimitError:
@@ -763,6 +777,10 @@ class ProfileFetcher:
         max_age = None
         if cache_ctrl:
             max_age = _parse_max_age_from_header(cache_ctrl)
+            # 审查 P3：远端 max-age 无上限——恶意源站可声明 10 年，拉长重验证
+            # 节奏。cap 到策略新鲜期上限的 2 倍（证据 24h 过期不受影响）。
+            if max_age is not None:
+                max_age = min(max_age, self._policy.profile_max_age_seconds * 2)
 
         return FetchResult(
             url=final_url,

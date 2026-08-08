@@ -20,7 +20,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from kiwi_catalog.api.auth import payload_token
@@ -210,6 +210,10 @@ def claim_catalog_write_idempotency(
     return None
 
 
+_IDEMPOTENCY_RETENTION_DAYS = 7
+_IDEMPOTENCY_PRUNE_EVERY = 128
+
+
 def complete_catalog_write_idempotency(
     conn: Any,
     endpoint: str,
@@ -221,6 +225,21 @@ def complete_catalog_write_idempotency(
     if not idempotency_key:
         return
     stored = dict(response)
+    # 审查 P3：惰性清理已完成行（键空间此前只增不删——60/min/actor 上限下
+    # 每日约 8.6 万行）。updated_at 是 ISO 文本，字符串比较即时间序。
+    complete_catalog_write_idempotency._prune_count = getattr(
+        complete_catalog_write_idempotency, "_prune_count", 0
+    ) + 1
+    if complete_catalog_write_idempotency._prune_count % _IDEMPOTENCY_PRUNE_EVERY == 0:
+        try:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=_IDEMPOTENCY_RETENTION_DAYS)).isoformat()
+            conn.execute(
+                "delete from agent_catalog_write_idempotency"
+                " where status = 'completed' and updated_at < ?",
+                (cutoff,),
+            )
+        except sqlite3.Error:
+            pass  # 清理失败不影响主路径
     conn.execute(
         """
         update agent_catalog_write_idempotency

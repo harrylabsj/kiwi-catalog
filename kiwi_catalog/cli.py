@@ -39,9 +39,8 @@ from kiwi_catalog.cli_agent_catalog_commands import (
     cmd_agent_catalog_suspend,
     cmd_agent_catalog_verify,
 )
+from kiwi_catalog.config import DEFAULT_DB_PATH
 from kiwi_catalog.core.errors import ShoppingCliError
-
-DEFAULT_DB_PATH = "kiwi-catalog.sqlite"
 
 
 def build_parser() -> argparse.ArgumentParser:

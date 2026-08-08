@@ -154,11 +154,20 @@ def _parse_fresh_until(value: Any) -> str:
     if parsed.tzinfo is None:
         raise ValidationError("fresh_until must include timezone")
     now = datetime.now(timezone.utc)
-    delta = (parsed - now).total_seconds()
+    # 审查 P3：校验与输出统一按无微秒比较——声明未来 0.5s 的 fresh_until
+    # 若用带微秒的 delta 判定「未来」、输出却截断微秒，会归一化到与 now
+    # 同秒（立即过期）；截断后再算 delta，语义与存储一致。
+    normalized = parsed.astimezone(timezone.utc).replace(microsecond=0)
+    now_truncated = now.replace(microsecond=0)
+    delta = (normalized - now_truncated).total_seconds()
     if delta <= 0:
         raise ValidationError("fresh_until must be in the future")
     if delta > MAX_PUBLISHED_TTL_SECONDS:
         raise ValidationError("fresh_until exceeds the max published TTL (30 days)")
+    # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
+    # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
+    # 整秒边界提前 1 秒判过期）。
+    return normalized.isoformat()
     # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
     # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
     # 整秒边界提前 1 秒判过期）。

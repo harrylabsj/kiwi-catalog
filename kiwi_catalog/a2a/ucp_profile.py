@@ -25,6 +25,7 @@ Binding: docs/a2a/shopping-cli-a2a-binding-1.0-rc1.md §5 (a2a service shape:
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import Any
 
 from kiwi_catalog import VERSION
@@ -43,6 +44,11 @@ from kiwi_catalog.discovery.ucp import parse_ucp_profile
 # Pinned UCP specification family (§0.3).  The UCP parser validates
 # ``specificationVersion`` against the TrustPolicy UCP version allowlist.
 UCP_SPEC_VERSION = "2026-04-08"
+
+
+def _url_quote(value: Any) -> str:
+    """审查 P3：id 拼 URL 前 percent-encode（? # % 等字符不破坏 URL 语义）。"""
+    return urllib.parse.quote(str(value or ""), safe="")
 
 
 def _fq_capability_ids(cap_rows: list[dict[str, Any]]) -> list[str]:
@@ -94,7 +100,7 @@ def build_hosted_ucp_profile(
 
     profile: dict[str, Any] = {
         "specificationVersion": UCP_SPEC_VERSION,
-        "implementationVersion": f"shopping-cli/{VERSION}",
+        "implementationVersion": f"kiwi-catalog/{VERSION}",
         "serviceIdentity": {
             "id": card_url,
             "name": name,
@@ -111,13 +117,13 @@ def build_hosted_ucp_profile(
                     {"uri": card_url, "protocol": "a2a"},
                 ],
                 "documentationUri": (
-                    f"{base}/v1/hosted/agents/{cagt_id}/agent-card.json"
+                    f"{base}/v1/hosted/agents/{_url_quote(cagt_id)}/agent-card.json"
                 ),
             }
         ],
     }
 
-    source_url = f"{base}/v1/hosted/agents/{cagt_id}/ucp"
+    source_url = f"{base}/v1/hosted/agents/{_url_quote(cagt_id)}/ucp"
     try:
         parse_ucp_profile(profile, source_url=source_url)
     except ProfileValidationError as exc:

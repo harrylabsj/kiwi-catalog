@@ -167,7 +167,10 @@ def catalog_search_result(
     if not merchant_block:
         mname = safe_catalog.get("merchant_name") or safe_catalog.get("display_name") or ""
         if mname:
-            merchant_block = {"name": mname}
+            # 审查 P3：回退块必须带 id（schema 对 merchant 要求 [id, name]；
+            # 缺影子行时只给 name 会让 legacy 响应校验失败）。id 与 name
+            # 同源（影子行的弱引用主键）。
+            merchant_block = {"id": safe_catalog.get("merchant_id") or "", "name": mname}
     if merchant_block:
         result["merchant"] = merchant_block
 

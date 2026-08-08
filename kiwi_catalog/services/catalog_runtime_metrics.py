@@ -79,7 +79,8 @@ class RuntimeMetricsRegistry:
     def record_latency(self, name: str, duration_s: float) -> None:
         """Record one latency sample; keeps count/sum/max only."""
         if duration_s < 0:
-            raise ValueError("duration_s must be >= 0")
+            # 审查 P3：指标埋点不得打挂被埋点请求——负值（时钟异常）按 0 记
+            return
         with self._lock:
             rec = self._latency.get(name)
             if rec is None:

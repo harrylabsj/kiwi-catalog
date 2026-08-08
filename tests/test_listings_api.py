@@ -412,7 +412,8 @@ class ListingsApiTest(unittest.TestCase):
         self._publish()
         status, payload = _call_http(self.app, "GET", f"/v1/agents/{self.agent_id}/listings")
         self.assertEqual(status, 403, payload)
-        self.assertIn("owner token required", payload.get("error", ""))
+        # 审查 P3：认证失败文案统一模糊（不区分缺失/无效/未配置）
+        self.assertIn("invalid owner token", payload.get("error", ""))
 
     def test_list_agent_listings_wrong_owner_rejected(self) -> None:
         self._publish()

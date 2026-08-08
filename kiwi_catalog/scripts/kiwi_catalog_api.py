@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import argparse
 
+from kiwi_catalog.config import DEFAULT_DB_PATH
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="kiwi-catalog standalone service")
-    parser.add_argument("--db", default="kiwi-catalog.sqlite", help="Catalog SQLite file")
+    parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Catalog SQLite file")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8600)
     args = parser.parse_args()

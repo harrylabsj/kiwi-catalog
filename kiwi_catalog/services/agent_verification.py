@@ -219,7 +219,10 @@ def _outcome_for(target_status: str) -> str:
 
 
 def _iso_from_epoch(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    # 审查 P3：截断微秒与 now_iso()（UTC、无微秒）同格式——带微秒的 ISO 与
+    # 无微秒 ISO 做纯字符串比较时，同一秒内 'T15:06:40.500000+00:00' <
+    # 'T15:06:40+00:00' 为 False（'.' > '+'），过期判定最多滞后 1 秒。
+    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0).isoformat()
 
 
 class VerificationService:
@@ -815,6 +818,11 @@ class VerificationService:
             return self._finalize(catalog_agent_id, previous, target, stages, actor, exc.target_status)
         degraded = self._degrade_level_to_supported(agent)
         self._apply_level(agent, degraded)
+        # 审查 P3：REJECTED（证据失效）后 freshness 置 STALE——否则 freshness
+        # 仍 FRESH + 级别在阶梯上时，/verify（永不 force）被 freshness 门短路
+        # 成 no-op，agent 只能靠 /refresh 恢复；置 STALE 让下次 verify 真正
+        # 重验证（与「抓取失败只动 freshness」的 STALE/UNREACHABLE 分支一致）。
+        self._apply_freshness(agent, STALE)
         target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
         stages = [*stages, StageResult("profile", "rejected", target, reason=exc.reason)]
         return self._finalize(catalog_agent_id, previous, target, stages, actor, REJECTED)

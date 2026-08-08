@@ -91,7 +91,7 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
         elif current_version > CURRENT_SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema version {current_version} is newer than the supported version "
-                f"{CURRENT_SCHEMA_VERSION}; upgrade shopping-cli instead of opening this database "
+                f"{CURRENT_SCHEMA_VERSION}; upgrade kiwi-catalog instead of opening this database "
                 "with an older release"
             )
         return conn

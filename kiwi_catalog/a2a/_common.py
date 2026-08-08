@@ -81,7 +81,9 @@ def load_hosted_agent(conn: Any, catalog_agent_id: str) -> dict[str, Any]:
 
 def agent_card_url(base_url: str, catalog_agent_id: str) -> str:
     """§14.1 shared-host agent path for a catalog agent."""
-    return f"{validate_base_url(base_url)}/a2a/agents/{catalog_agent_id}"
+    # 审查 P3：id 拼 URL 前 percent-encode（路由层禁 "/" 只是兜底，id 里
+    # 的 ?#% 等字符此前会破坏 URL 语义）。
+    return f"{validate_base_url(base_url)}/a2a/agents/{urllib.parse.quote(str(catalog_agent_id), safe='')}"
 
 
 def merchant_public_ref(row: dict[str, Any]) -> dict[str, Any]:

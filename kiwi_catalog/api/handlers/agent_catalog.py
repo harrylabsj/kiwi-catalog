@@ -30,6 +30,9 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.serializers import catalog_agent_record, catalog_search_result
 from kiwi_catalog.agent_catalog.sqlite_repository import (
+    _list_capabilities_by_agent,
+    _list_endpoints_by_agent,
+    _list_skills_by_agent,
     append_catalog_audit,
     enforce_catalog_register_domain_limit,
     get_catalog_agent_by_domain,
@@ -57,11 +60,23 @@ from kiwi_catalog.services.agent_verification import VerificationQueueFullError
 from kiwi_catalog.api.handlers.common import MAX_SQLITE_INTEGER, require_field, result_limit
 
 
-def _serialize_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
+def _serialize_row(
+    row: dict[str, Any],
+    conn: Any,
+    caps_map: dict[str, list[dict[str, Any]]] | None = None,
+    eps_map: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Serialize a catalog agent row + merchant join through public serializer."""
     cagt_id = str(row.get("catalog_agent_id", ""))
-    caps = list_capabilities(conn, cagt_id)
-    eps = list_endpoints(conn, cagt_id)
+    # 审查 P3：批量路径传预取的 map（一次 IN 查询），单行路径回退逐行查询。
+    if caps_map is not None:
+        caps = caps_map.get(cagt_id, [])
+    else:
+        caps = list_capabilities(conn, cagt_id)
+    if eps_map is not None:
+        eps = eps_map.get(cagt_id, [])
+    else:
+        eps = list_endpoints(conn, cagt_id)
     merchant: dict[str, Any] = {
         "id": row.get("merchant_id", ""),
         "name": row.get("merchant_name", ""),
@@ -77,13 +92,21 @@ def _serialize_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
     )
 
 
+def _serialize_rows(rows: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+    """批量序列化（审查 P3：N+1 → 每类一次 IN 查询）。"""
+    ids = [str(r.get("catalog_agent_id", "")) for r in rows]
+    caps_map = _list_capabilities_by_agent(conn, ids)
+    eps_map = _list_endpoints_by_agent(conn, ids)
+    return [_serialize_row(row, conn, caps_map, eps_map) for row in rows]
+
+
 def list_catalog_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
     """GET /v1/agent-catalog/agents — paginated list."""
     limit = result_limit(query.get("limit"), default=20)
     cursor = str(query.get("cursor") or "").strip()
     with db_session(db_path) as conn:
         rows, next_cursor = _list_catalog_agents(conn, limit=limit, cursor=cursor)
-        results = [_serialize_row(row, conn) for row in rows]
+        results = _serialize_rows(rows, conn)
         return {
             "ok": True,
             "results": results,
@@ -134,7 +157,7 @@ def list_merchant_catalog_agents(
         rows, next_cursor = _list_catalog_agents_by_merchant(
             conn, merchant_id=str(merchant_id).strip(), limit=limit, cursor=cursor
         )
-        results = [_serialize_row(row, conn) for row in rows]
+        results = _serialize_rows(rows, conn)
         return {
             "ok": True,
             "results": results,
@@ -750,11 +773,28 @@ def reinstate_catalog_agent(
 # ── /v1/agents（v0.3 新 API：三正交状态域 record）─────────────────────────
 
 
-def _record_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
+def _record_row(
+    row: dict[str, Any],
+    conn: Any,
+    caps_map: dict[str, list[dict[str, Any]]] | None = None,
+    eps_map: dict[str, list[dict[str, Any]]] | None = None,
+    skills_map: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Serialize a catalog agent row → CatalogAgentRecord（含 skills）。"""
     cagt_id = str(row.get("catalog_agent_id", ""))
-    caps = list_capabilities(conn, cagt_id)
-    eps = list_endpoints(conn, cagt_id)
+    # 审查 P3：批量路径传预取 map；单行路径回退逐行查询。
+    if caps_map is not None:
+        caps = caps_map.get(cagt_id, [])
+    else:
+        caps = list_capabilities(conn, cagt_id)
+    if eps_map is not None:
+        eps = eps_map.get(cagt_id, [])
+    else:
+        eps = list_endpoints(conn, cagt_id)
+    if skills_map is not None:
+        skills = skills_map.get(cagt_id, [])
+    else:
+        skills = list_skills(conn, cagt_id)
     merchant: dict[str, Any] = {
         "id": row.get("merchant_id", ""),
         "name": row.get("merchant_name", ""),
@@ -767,8 +807,17 @@ def _record_row(row: dict[str, Any], conn: Any) -> dict[str, Any]:
         merchant=merchant,
         capabilities=caps,
         endpoints=eps,
-        skills=list_skills(conn, cagt_id),
+        skills=skills,
     )
+
+
+def _record_rows(rows: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+    """批量序列化 record（审查 P3：N+1 → 每类一次 IN 查询）。"""
+    ids = [str(r.get("catalog_agent_id", "")) for r in rows]
+    caps_map = _list_capabilities_by_agent(conn, ids)
+    eps_map = _list_endpoints_by_agent(conn, ids)
+    skills_map = _list_skills_by_agent(conn, ids)
+    return [_record_row(row, conn, caps_map, eps_map, skills_map) for row in rows]
 
 
 def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
@@ -777,7 +826,7 @@ def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]
     cursor = str(query.get("cursor") or "").strip()
     with db_session(db_path) as conn:
         rows, next_cursor = _list_catalog_agents(conn, limit=limit, cursor=cursor)
-        results = [_record_row(row, conn) for row in rows]
+        results = _record_rows(rows, conn)
         return {"ok": True, "results": results, "next_cursor": next_cursor}
 
 
@@ -802,7 +851,7 @@ def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
             limit=limit,
             cursor=str(query.get("cursor") or "").strip(),
         )
-        results = [_record_row(row, conn) for row in rows]
+        results = _record_rows(rows, conn)
         return {"ok": True, "results": results, "next_cursor": next_cursor}
 
 
