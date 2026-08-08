@@ -393,7 +393,7 @@ class MerchantsApiTest(unittest.TestCase):
     # ── 门户页 ─────────────────────────────────────────────────────────────
 
     def test_portal_pages_serve_html(self) -> None:
-        for path in ("/portal", "/portal/apply", "/portal/status"):
+        for path in ("/portal", "/portal/apply"):
             status, payload, headers = _call_http(self.app, "GET", path)
             self.assertEqual(status, 200, (path, payload))
             self.assertIn("text/html", headers.get("content-type", ""))
@@ -418,7 +418,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_portal_pages_use_official_theme(self) -> None:
         """门户页与官网共用主题（nav/hero/section/card 类 + --kiwi-* 变量）。"""
-        for path in ("/portal", "/portal/apply", "/portal/status"):
+        for path in ("/portal", "/portal/apply"):
             _, payload, _ = _call_http(self.app, "GET", path)
             raw = payload.get("_raw", "")
             self.assertIn("--kiwi-800", raw, path)

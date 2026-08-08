@@ -197,12 +197,16 @@ function getJson(url, token) {
 }
 """
 
-_NAV = """
+def _nav(active: str = "") -> str:
+    """商家侧一级导航：令牌申请（首页）+ 我的（My Account，防迷失）。"""
+    portal_cls = ' class="active"' if active == "portal" else ""
+    account_cls = ' class="active"' if active == "account" else ""
+    return f"""
 <nav class="nav"><div class="nav-inner">
   <a class="nav-logo" href="/portal">Kiwi</a>
   <div class="nav-links">
-    <a href="/portal" class="active">Merchant Portal</a>
-    <a href="/portal/status">令牌</a>
+    <a href="/portal"{portal_cls}>令牌申请</a>
+    <a href="/portal/account"{account_cls}>My Account</a>
   </div>
 </div></nav>
 """
@@ -228,7 +232,7 @@ def portal_home() -> dict[str, Any]:
     邮箱/电话不需要填写——注册与账户基本信息已提供，提交时自动带上。
     """
     body = (
-        _NAV
+        _nav("portal")
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">Token 申请</div>
@@ -367,62 +371,6 @@ document.getElementById('list').addEventListener('click', e => {
         + _FOOTER
     )
     return _page("审核后台", body)
-
-
-def portal_status() -> dict[str, Any]:
-    """"令牌"页（登录态）：显示我的令牌——只读展示 + 复制，不可修改。
-
-    登录即身份（无需输入令牌）；未登录进入登录流程。令牌如需更换，
-    联系运营轮换（运营后台/CLI 操作）。
-    """
-    body = (
-        _NAV
-        + """
-<section class="section center-page"><div class="section-inner">
-  <div class="kicker">令牌</div>
-  <h2>令牌</h2>
-  <p class="lead">你的商家令牌。只读展示，不能修改；如需更换请联系运营轮换。</p>
-  <div class="card form-card">
-    <div id="no_token" style="display:none">
-      <p class="muted">还没有令牌。<a href="/portal">去申请令牌</a></p>
-    </div>
-    <div id="token_view" style="display:none">
-      <p class="small">商家令牌（mkt_…）</p>
-      <div class="token-box" id="my_token"></div>
-      <button class="btn-mini" id="copy_token">复制令牌</button>
-      <div id="token_meta" style="margin-top:12px"></div>
-      <p class="small muted" style="margin-top:14px">令牌不能修改。遗失或泄漏请联系运营轮换（新令牌同样显示在这里）。</p>
-    </div>
-    <div id="out"></div>
-  </div>
-</div></section>
-<script>
-fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
-  if (!r.ok) { window.location.href = '/portal/login'; return; }
-  if (r.token && r.token.status === 'active') {
-    document.getElementById('token_view').style.display = 'block';
-    document.getElementById('my_token').textContent = r.token.token;
-    const meta = document.getElementById('token_meta');
-    let html = '<p class="small">签发 ' + (r.token.issued_at || '').slice(0, 10)
-      + (r.token.rotated_at ? ' · 最近轮换 ' + r.token.rotated_at.slice(0, 10) : '')
-      + '</p>';
-    html += '<p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>';
-    meta.innerHTML = html;
-  } else {
-    document.getElementById('no_token').style.display = 'block';
-  }
-});
-document.getElementById('copy_token').addEventListener('click', () => {
-  navigator.clipboard.writeText(document.getElementById('my_token').textContent.trim());
-  const out = document.getElementById('out');
-  out.className = 'ok';
-  out.textContent = '已复制到剪贴板';
-});
-</script>
-"""
-        + _FOOTER
-    )
-    return _account_page("令牌", body)
 
 
 
@@ -618,7 +566,7 @@ def _account_page(title: str, body: str) -> dict[str, Any]:
 def portal_register() -> dict[str, Any]:
     """注册页（极简：仅邮箱 + 密码）→ 邮箱验证码 → 验证后进入「我的」。"""
     body = (
-        _NAV
+        _nav("portal")
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">Register</div>
@@ -710,7 +658,7 @@ def portal_login() -> dict[str, Any]:
     邮箱未验证时提示并显示验证码输入（验证通过自动登录）。
     """
     body = (
-        _NAV
+        _nav("portal")
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">Login</div>
@@ -788,7 +736,7 @@ document.getElementById('resend').addEventListener('click', () => {
 def portal_account() -> dict[str, Any]:
     """「我的」：工单状态 / 申请 token / 查看 token（明文，登录态）/ 状态查询。"""
     body = (
-        _NAV
+        _nav("account")
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">My Account</div>
@@ -921,7 +869,7 @@ loadMe();
 def _not_found_html() -> str:
     """404 页面 HTML 字符串（不含 JS，供 __status__: 404 包裹）。"""
     body = (
-        _NAV
+        _nav("")
         + """
 <section class="section"><div class="section-inner">
   <div class="kicker">404</div>
