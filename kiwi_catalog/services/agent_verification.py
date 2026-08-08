@@ -282,6 +282,11 @@ class VerificationService:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         previous = agent["verification_status"]
         level = agent["verification_level"]
+        # 审查 P1-7：重入前保留原级别，作为本 run 证据重算降级的基准——
+        # 级别被清空后 _degrade_level_to_supported 以 DISCOVERED 为基准，
+        # can_degrade 全拦截，任何阶段瞬时失败都会把已验证级别打到
+        # DISCOVERED（§7.1「按最新未过期证据重算」在主链路上失效）。
+        original_level = level
         freshness = agent["freshness_state"]
         admin = agent["administrative_state"]
 
@@ -327,21 +332,27 @@ class VerificationService:
             StageResult("profile", "passed", profile_target, snapshot_ids=profiles.snapshot_ids)
         )
 
-        domain_stage = self._stage_domain(catalog_agent_id, profile_target, actor, profiles)
+        domain_stage = self._stage_domain(
+            catalog_agent_id, profile_target, actor, profiles, from_level=original_level
+        )
         stages.append(domain_stage)
         if domain_stage.outcome != "passed":
             return self._finalize(
                 catalog_agent_id, previous, domain_stage.target_status, stages, actor, domain_stage.outcome
             )
 
-        identity_stage = self._stage_identity(catalog_agent_id, domain_stage.target_status, actor, profiles)
+        identity_stage = self._stage_identity(
+            catalog_agent_id, domain_stage.target_status, actor, profiles, from_level=original_level
+        )
         stages.append(identity_stage)
         if identity_stage.outcome != "passed":
             return self._finalize(
                 catalog_agent_id, previous, identity_stage.target_status, stages, actor, identity_stage.outcome
             )
 
-        commerce_stage = self._stage_commerce(catalog_agent_id, identity_stage.target_status, actor, profiles)
+        commerce_stage = self._stage_commerce(
+            catalog_agent_id, identity_stage.target_status, actor, profiles, from_level=original_level
+        )
         stages.append(commerce_stage)
         failure_kind = None if commerce_stage.outcome == "passed" else commerce_stage.outcome
         return self._finalize(
@@ -559,6 +570,12 @@ class VerificationService:
             self._write_snapshot(catalog_agent_id, "ucp", ucp, fetched["ucp_profile"]),
         )
         self._index_profiles(catalog_agent_id, card, ucp, urls)
+        # 审查 P1-5：快照/索引落库后立即提交，关闭写事务——后续 domain 阶段的
+        # well-known 抓取（10s 级网络 I/O）不再持有 SQLite 写锁，否则期间全体
+        # 并发写入者会在 busy_timeout（5s）后抛 database is locked → 500。
+        # 阶梯其余阶段各以短事务写入。幂等 claim 行已在 handler 层持久化，
+        # 失败路径的 clear 仍独立生效。
+        self._conn.commit()
         return _Profiles(card=card, ucp=ucp, urls=urls, snapshot_ids=snapshot_ids)
 
     def _write_snapshot(
@@ -633,6 +650,8 @@ class VerificationService:
         current: str,
         actor: str,
         profiles: _Profiles,
+        *,
+        from_level: str | None = None,
     ) -> StageResult:
         """HTTPS domain-control (§6 MVP identity mechanism；v0.3 级别语义）。"""
         canonical_domain = profiles.card.canonical_domain
@@ -648,7 +667,8 @@ class VerificationService:
             outcome = "passed"
         else:
             # 证据失效 → 按证据重算降级（v0.3 §7.1；不是行政 REJECTED）。
-            target = self._degrade_level_to_supported(agent)
+            # from_level：完整 verify() 传入 run 开始时的原级别（审查 P1-7）。
+            target = self._degrade_level_to_supported(agent, from_level=from_level)
             self._apply_level(agent, target)
             outcome = "rejected"
         vid = self._persist_verification(catalog_agent_id, evidence, target)
@@ -662,6 +682,8 @@ class VerificationService:
         current: str,
         actor: str,
         profiles: _Profiles,
+        *,
+        from_level: str | None = None,
     ) -> StageResult:
         """Agent identity threshold (§6 AGENT_VERIFIED；v0.3 级别语义）。"""
         evidence = self._trust_evaluator.evaluate_agent_identity(
@@ -673,7 +695,8 @@ class VerificationService:
             self._apply_level(agent, target)
             outcome = "passed"
         else:
-            target = self._degrade_level_to_supported(agent)
+            # 审查 P1-7：同 _stage_domain，降级基准 = run 原级别。
+            target = self._degrade_level_to_supported(agent, from_level=from_level)
             self._apply_level(agent, target)
             outcome = "rejected"
         vid = self._persist_verification(catalog_agent_id, evidence, target)
@@ -687,6 +710,8 @@ class VerificationService:
         current: str,
         actor: str,
         profiles: _Profiles,
+        *,
+        from_level: str | None = None,
     ) -> StageResult:
         """Commerce capability intersection + §5.1 publish-state invariant."""
         evidence = self._trust_evaluator.evaluate_commerce_capabilities(
@@ -694,7 +719,8 @@ class VerificationService:
         )
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         if not evidence.passed:
-            target = self._degrade_level_to_supported(agent)
+            # 审查 P1-7：同 _stage_domain，降级基准 = run 原级别。
+            target = self._degrade_level_to_supported(agent, from_level=from_level)
             self._apply_level(agent, target)
             vid = self._persist_verification(catalog_agent_id, evidence, target)
             return StageResult(
@@ -711,7 +737,7 @@ class VerificationService:
                 agent["hosted_runtime_agent_id"] or "",
             )
         except ValidationError as exc:
-            target = self._degrade_level_to_supported(agent)
+            target = self._degrade_level_to_supported(agent, from_level=from_level)
             self._apply_level(agent, target)
             failed_evidence = _failed_evidence(
                 evidence.verification_type,
@@ -789,25 +815,35 @@ class VerificationService:
         stages = [*stages, StageResult("profile", "rejected", target, reason=exc.reason)]
         return self._finalize(catalog_agent_id, previous, target, stages, actor, REJECTED)
 
-    def _degrade_level_to_supported(self, agent: dict[str, Any]) -> str:
+    def _degrade_level_to_supported(
+        self, agent: dict[str, Any], *, from_level: str | None = None
+    ) -> str:
         """v0.3 §7.1：按最新未过期证据重算「最高仍支持的较低级别」。
 
-        检查当前级以下各级对应的证据类型（domain_control / agent_identity /
-        commerce_capability）；最新一条 passed 且未过期 → 该级；否则 DISCOVERED。
-        历史证据保持可审计，降级不删除既有观察。
+        检查基准级以下各级对应的证据类型（domain_control / agent_identity /
+        commerce_capability）；最新一条 **passed** 且未过期 → 该级；否则
+        DISCOVERED。历史证据保持可审计，降级不删除既有观察。
+
+        审查 P1-7：
+        - from_level 显式指定降级基准（完整 verify() 重入清级后，DB 级已被
+          清零——基准必须是 run 开始时的原级别，否则 can_degrade 全拦截）；
+          granular 入口不传 → 以 DB 当前级为基准（行为不变）。
+        - 证据只认最新 passed 行（failed 行不得屏蔽历史 passed 证据）。
         """
         agent_id = str(agent["catalog_agent_id"])
-        current = agent["verification_level"]
+        current = from_level or agent["verification_level"]
         now_ts = self._now()
         for kind, level in (
             ("commerce_capability", COMMERCE_VERIFIED),
             ("agent_identity", AGENT_VERIFIED),
             ("domain_control", DOMAIN_VERIFIED),
         ):
-            if not self._level_machine.can_degrade(current, level):
+            # 允许「严格更低」+「同级」：passed 证据支撑当前级时应保持同级
+            # （审查 P1-7——can_degrade 是严格小于，同级证据会被拦成 DISCOVERED）。
+            if level != current and not self._level_machine.can_degrade(current, level):
                 continue
-            row = latest_verification(self._conn, agent_id, kind)
-            if row is None or row["result"] != "passed":
+            row = latest_verification(self._conn, agent_id, kind, result="passed")
+            if row is None:
                 continue
             expires_at = str(row.get("expires_at") or "")
             if expires_at:

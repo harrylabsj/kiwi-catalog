@@ -255,7 +255,13 @@ def scan_secrets(value: Any, *, max_secrets: int = 64) -> list[str]:
         if isinstance(o, dict):
             for key, item in o.items():
                 if len(paths) >= max_secrets:
-                    return
+                    # 审查 P1-1：early-return 会让第 65 个起的 secret 字段不被扫描，
+                    # _skip 判「未隔离」→ 凭据进入 public 投影并落库。命中 cap 视为
+                    # 敌意负载 fail-closed，而不是静默放行后半棵子树。
+                    raise ProfileValidationError(
+                        f"profile contains more than {max_secrets} secret-like fields; "
+                        "refusing to scan past the cap"
+                    )
                 child = f"{path}.{key}" if path else str(key)
                 if isinstance(item, str) and (_is_secret_field(key) or _is_secret_value(item)):
                     paths.append(child)
@@ -268,7 +274,11 @@ def scan_secrets(value: Any, *, max_secrets: int = 64) -> list[str]:
         elif isinstance(o, list):
             for i, item in enumerate(o):
                 if len(paths) >= max_secrets:
-                    return
+                    # 同上：cap 命中即 fail-closed，不静默放行。
+                    raise ProfileValidationError(
+                        f"profile contains more than {max_secrets} secret-like fields; "
+                        "refusing to scan past the cap"
+                    )
                 _scan(item, f"{path}.{i}")
 
     _scan(value, "")

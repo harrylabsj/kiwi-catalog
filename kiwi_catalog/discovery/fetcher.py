@@ -168,6 +168,18 @@ def _validate_port(port: int, allowed_ports: tuple[int, ...]) -> None:
         )
 
 
+def _port_of(parsed: Any, scheme: str) -> int:
+    """``parsed.port`` 对非法端口（如 ``https://host:abc/``）抛 ValueError。
+
+    审查 P1-2：恶意 URL（注册或重定向目标）不得以未捕获 ValueError 逃逸成
+    500——映射为 SSRFBlockError（fail-closed 语义）。
+    """
+    try:
+        return parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as exc:
+        raise SSRFBlockError(f"invalid port in URL: {exc}") from exc
+
+
 # ── DNS resolution ────────────────────────────────────────────────────────────
 
 
@@ -280,7 +292,7 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
         verified_ip = self._validator(newurl)
         parsed = urllib.parse.urlparse(newurl)
         hostname = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        port = _port_of(parsed, parsed.scheme)
         assert hostname is not None  # validator guarantees a hostname is present
         self._ip_store[(hostname, port)] = str(verified_ip)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -311,7 +323,7 @@ def _build_opener(
             # Determine the hostname and port for the current request.
             parsed = urllib.parse.urlparse(req.full_url)
             req_hostname = parsed.hostname
-            req_port = parsed.port or 443  # default HTTPS port
+            req_port = _port_of(parsed, "https")
             assert req_hostname is not None  # req.full_url always has a hostname
 
             # Look up the verified IP for this host:port.
@@ -523,7 +535,7 @@ class ProfileFetcher:
         scheme = parsed.scheme
         hostname = parsed.hostname
         assert hostname is not None  # _validate_url guarantees a hostname is present
-        port = parsed.port or (443 if scheme == "https" else 80)
+        port = _port_of(parsed, scheme)
 
         # 2. Enforce HTTPS requirement
         if self._policy.require_https and scheme != "https":
@@ -597,7 +609,7 @@ class ProfileFetcher:
         scheme = parsed.scheme
         hostname = parsed.hostname
         assert hostname is not None  # _validate_url guarantees a hostname is present
-        port = parsed.port or (443 if scheme == "https" else 80)
+        port = _port_of(parsed, scheme)
 
         if self._policy.require_https and scheme != "https":
             raise SSRFBlockError(f"Redirect to non-HTTPS URL blocked: {redirect_url}")
@@ -687,6 +699,10 @@ class ProfileFetcher:
                 parsed = json.loads(body)
             except json.JSONDecodeError as exc:
                 raise FetchLimitError(f"Response is not valid JSON: {exc}") from exc
+            except RecursionError as exc:
+                # 审查 P1-2：深嵌套 JSON 在解析阶段就触发 RecursionError（深度
+                # 防护在 parse 之后），映射为 FetchLimitError 而非未捕获 500。
+                raise FetchLimitError("Response JSON is too deeply nested") from exc
             if parsed is not None:
                 _validate_json_structure(parsed, self._json_max_depth, self._json_max_nodes)
 

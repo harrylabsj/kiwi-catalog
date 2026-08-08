@@ -32,6 +32,7 @@ from kiwi_catalog.agent_catalog.serializers import catalog_agent_record, catalog
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     append_catalog_audit,
     enforce_catalog_register_domain_limit,
+    get_catalog_agent_by_domain,
     get_catalog_agent_with_merchant,
     list_capabilities,
     list_catalog_agents as _list_catalog_agents,
@@ -48,6 +49,10 @@ from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import agent_catalog_writes
 from kiwi_catalog.services.agent_catalog import search_catalog_agents as _search_catalog_agents_service
+# 审查 P1-8：VerificationQueueFullError 必须在模块级可见——此前只在
+# _verification_queue 函数内导入，队列满的 except 分支求值时抛 NameError
+# → 500，优雅降级（verification_enqueued=False）是死代码。
+from kiwi_catalog.services.agent_verification import VerificationQueueFullError
 
 from kiwi_catalog.api.handlers.common import MAX_SQLITE_INTEGER, require_field, result_limit
 
@@ -376,6 +381,22 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
         try:
             merchant_id = str(payload.get("merchant_id") or "").strip()
             actor = _register_actor(conn, payload, merchant_id)
+            # 审查 P1-4b：重注册已治理 agent（suspended / rejected）= 复活，
+            # 必须证明控制权——admin token，或既有绑定商户的 owner token。
+            # 匿名重注册不得静默撤销 admin 处置（suspend 端点「唯一出向
+            # admin reinstate」语义）；新域注册不受影响。
+            existing_row = get_catalog_agent_by_domain(conn, canonical)
+            if (
+                existing_row is not None
+                and str(existing_row.get("administrative_state") or "")
+                in agent_catalog_writes.RE_REGISTERABLE_ADMIN
+                and actor == "cli"
+            ):
+                bound = str(existing_row.get("merchant_id") or "").strip()
+                if bound:
+                    api_auth.require_owner_token(payload, bound)
+                else:
+                    api_auth.require_admin_token(payload)
             result = agent_catalog_writes.register_catalog_agent(
                 conn,
                 domain=canonical,
@@ -802,6 +823,7 @@ def v1_register_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str,
         "agent": record,
         "verification_enqueued": legacy.get("verification_enqueued", True),
         "task_id": legacy.get("task_id", ""),
+        "queue_reason": legacy.get("queue_reason", ""),
         "idempotent": legacy.get("idempotent", False),
     }
 

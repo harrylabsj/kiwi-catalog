@@ -60,7 +60,7 @@ def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dic
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [],
+        "headers": [(b"content-type", b"application/json")],
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",
@@ -165,6 +165,27 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         self.assertEqual(payload["agent"]["catalog_agent_id"], cagt_id)
         self.assertNotIn("floor_price_minor", payload["agent"])  # #8 private-only
 
+    def test_register_queue_full_is_graceful_not_500(self) -> None:
+        """审查 P1-8：队列满 → 注册成功但显式标注未入队（此前 except 引用
+        未定义名字抛 NameError → 500，调用方重试拿到「已入队」假象）。"""
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+        from kiwi_catalog.services.agent_verification import VerificationQueueFullError
+
+        with mock.patch.object(
+            handlers_mod,
+            "_enqueue_verification",
+            side_effect=VerificationQueueFullError("queue full"),
+        ):
+            status, payload = _call_http(
+                self.app,
+                "POST",
+                "/v1/agents/register",
+                json.dumps(REGISTER_BODY).encode(),
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertFalse(payload.get("verification_enqueued", True))
+        self.assertIn("queue full", payload.get("queue_reason", ""))
+
     def test_legacy_route_consumes_v1_registered_agent(self) -> None:
         """#4 authority 转移消费端可用性：v1 register → legacy /v1/agent-catalog
         搜索命中，折叠 verification.status 与 v1 三态域一致（独立服务承载
@@ -187,6 +208,9 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
     """三域写入 → 折叠投影一致性 + 迁移约束（repository 层）。"""
 
     def setUp(self) -> None:
+        # 治理重注册（P1-4b 修复后需 admin token）与 moderation 测试需要
+        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = "test-admin"
+        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
         self.tmp = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmp, "catalog.sqlite")
         self.app = create_catalog_app(self.db_path)
@@ -261,7 +285,10 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                 service.verify(self.cagt_id)
 
     def test_rejected_fold_and_registration_reopen(self) -> None:
-        """行政 REJECTED 折叠为 rejected；同域可重新注册（v0.3 §7.3 可恢复终态）。"""
+        """行政 REJECTED 折叠为 rejected；同域可重新注册（v0.3 §7.3 可恢复终态）。
+
+        审查 P1-4b：复活治理处置需 admin token（或既有绑定商户的 owner token）。
+        """
         from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
 
         with db_session(self.db_path) as conn:
@@ -273,17 +300,149 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/agents/register",
-            json.dumps({**REGISTER_BODY, "domain": "acme.example"}).encode(),
+            json.dumps(
+                {**REGISTER_BODY, "domain": "acme.example", "admin_token": "test-admin"}
+            ).encode(),
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["agent"]["catalog_agent_id"], self.cagt_id)
 
+    def test_verify_reentry_domain_failure_keeps_evidence_level(self) -> None:
+        """审查 P1-7：重验证中 domain 阶段瞬时失败 → 按最新 passed 证据降级到
+        DOMAIN_VERIFIED，而非清级后恒 DISCOVERED（§7.1 证据重算主链路回归）。"""
+        from datetime import datetime, timedelta, timezone
+
+        from kiwi_catalog.agent_catalog.sqlite_repository import (
+            insert_verification,
+            set_state_domains,
+        )
+        from kiwi_catalog.discovery.verifier import VerificationEvidence
+        from kiwi_catalog.services.agent_verification import (
+            AGENT_VERIFIED,
+            DISCOVERED,
+            DOMAIN_VERIFIED,
+            VerificationService,
+        )
+
+        class _FakeCard:
+            canonical_domain = "acme.example"
+
+        class _FakeProfiles:
+            card = _FakeCard()
+            urls = {
+                "agent_card": "https://acme.example/.well-known/agent-card.json",
+                "ucp_profile": "https://acme.example/ucp.json",
+            }
+            snapshot_ids = (1, 2)
+
+        def _failing_domain_control(_canonical: str, declared: dict | None = None) -> VerificationEvidence:
+            return VerificationEvidence(
+                verification_type="domain_control",
+                result="failed",
+                details={},
+                reason="mock domain control failure",
+                expires_in_seconds=3600,
+            )
+
+        with db_session(self.db_path) as conn:
+            set_state_domains(conn, self.cagt_id, verification_level="agent_verified")
+            insert_verification(
+                conn,
+                catalog_agent_id=self.cagt_id,
+                verification_type="domain_control",
+                result="passed",
+                evidence_json="{}",
+                checked_at=(datetime.now(timezone.utc)).isoformat(),
+                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            )
+
+        with db_session(self.db_path) as conn:
+            service = VerificationService(conn)
+            service._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
+            service._identity_verifier.verify_domain_control = _failing_domain_control  # type: ignore[method-assign]
+            result = service.verify(self.cagt_id, actor="test", force=True)
+        self.assertEqual(result.status, "domain_verified", result)
+        row = self._row()
+        self.assertEqual(row["verification_level"], DOMAIN_VERIFIED)
+        self.assertNotEqual(row["verification_level"], DISCOVERED)
+
+        # 二次失败：最新一条证据已是 failed，passed 证据仍应支撑 DOMAIN_VERIFIED
+        # （failed 行不得屏蔽历史 passed 证据）。
+        with db_session(self.db_path) as conn:
+            service = VerificationService(conn)
+            service._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
+            service._identity_verifier.verify_domain_control = _failing_domain_control  # type: ignore[method-assign]
+            service.verify(self.cagt_id, actor="test", force=True)
+        row = self._row()
+        self.assertEqual(row["verification_level"], DOMAIN_VERIFIED)
+
+    def test_v1_search_pagination_crosses_verification_ranks(self) -> None:
+        """审查 P1-6：agent 搜索跨验证等级分页不丢行（游标与排序键同键）。
+
+        历史 bug：游标只编码 catalog_agent_id，ORDER BY 首键是验证等级 rank
+        组（同 rank 内按 last_verified_at/display_name）——rank 组的行跨页丢。
+        """
+        from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
+
+        ids: list[str] = []
+        for domain in ("alpha.example", "beta.example", "gamma.example"):
+            status, payload = _call_http(
+                self.app,
+                "POST",
+                "/v1/agents/register",
+                json.dumps({**REGISTER_BODY, "domain": domain}).encode(),
+            )
+            self.assertEqual(status, 200, payload)
+            ids.append(payload["agent"]["catalog_agent_id"])
+        with db_session(self.db_path) as conn:
+            set_state_domains(conn, ids[0], verification_level="commerce_verified")
+            set_state_domains(conn, ids[1], verification_level="domain_verified")
+            # ids[2] 保持 discovered（rank 4）
+
+        seen: list[str] = []
+        cursor = ""
+        for _ in range(10):
+            path = (
+                f"/v1/agents/search?limit=1&cursor={cursor}"
+                if cursor
+                else "/v1/agents/search?limit=1"
+            )
+            _, page = _call_http(self.app, "GET", path)
+            seen += [r["catalog_agent_id"] for r in page["results"]]
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        # setUp 已注册 acme.example（discovered，与 gamma 同 rank 组——顺带
+        # 覆盖同 rank 内 display_name/id tie-break），合计 4 行
+        self.assertEqual(len(seen), 4, "all 4 agents must be reachable across pages")
+        self.assertEqual(len(set(seen)), 4, "no overlap / no skip across pages")
+
+    def test_anonymous_register_cannot_revive_governed_agent(self) -> None:
+        """审查 P1-4b：治理处置（suspended）的 agent 匿名重注册必须拒绝。
+
+        复活 = 撤销 admin 处置，需 admin token 或既有绑定商户的 owner token。
+        """
+        from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
+
+        with db_session(self.db_path) as conn:
+            set_state_domains(conn, self.cagt_id, administrative_state="suspended")
+
+        status, payload = _call_http(
+            self.app,
+            "POST",
+            "/v1/agents/register",
+            json.dumps({**REGISTER_BODY, "domain": "acme.example"}).encode(),
+        )
+        self.assertEqual(status, 403, payload)
+        self.assertEqual(self._row()["administrative_state"], "suspended")
+
     def test_reopen_after_suspend_syncs_three_domains(self) -> None:
-        """suspended → re-register（可恢复终态 §7.3）→ 三域与折叠一致（P1 回归）。
+        """suspended → admin 重注册（可恢复终态 §7.3）→ 三域与折叠一致（P1 回归）。
 
         upsert 更新分支曾直写 legacy verification_status、漏走三域派生，留下
         admin=suspended + 折叠 discovered 的僵尸状态（公开列表可见但 verify
-        永久 InvalidStateTransitionError）。
+        永久 InvalidStateTransitionError）。审查 P1-4b 后：复活治理处置必须带
+        admin token（匿名被拒，见 test_anonymous_register_cannot_revive_governed_agent）。
         """
         from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
         from kiwi_catalog.services.agent_verification import (
@@ -300,7 +459,9 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/agents/register",
-            json.dumps({**REGISTER_BODY, "domain": "acme.example"}).encode(),
+            json.dumps(
+                {**REGISTER_BODY, "domain": "acme.example", "admin_token": "test-admin"}
+            ).encode(),
         )
         self.assertEqual(status, 200, payload)
         row = self._row()

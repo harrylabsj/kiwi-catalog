@@ -425,9 +425,11 @@ def handle_request(
 try:
     from fastapi import FastAPI
     from fastapi import Header as _Header
+    from fastapi import Request as _FastAPIRequest
 except ImportError:
     FastAPI = None  # type: ignore[assignment,misc]
     _Header = None  # type: ignore[assignment,misc]
+    _FastAPIRequest = None  # type: ignore[assignment,misc]
 
 
 def _auth_header_default() -> Any:
@@ -454,6 +456,20 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     """
     from fastapi.responses import JSONResponse
     from kiwi_catalog.api import auth as api_auth
+
+    def _query_params_from_request(request: _FastAPIRequest) -> dict[str, str]:
+        """Mirror fallback parse_qs(keep_blank_values=True) + last-value-wins.
+
+        FastAPI 只识别声明过的 query 参数、静默丢弃其余键（含 attribute.* 动态键
+        与未知键），与 fallback 全量透传语义分裂（审查 P2-3）。共享 handler 自带
+        键白名单校验，路由层不做参数裁剪。
+
+        注意：必须用模块级导入的 _FastAPIRequest（from __future__ import
+        annotations 会把函数内导入的注解变成字符串，FastAPI 无法解析 → 参数被
+        误判为 query 字段）。
+        """
+        return {key: value for key, value in request.query_params.multi_items()}
+
 
     def _error_response(status: int, exc: Exception) -> JSONResponse:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
@@ -495,38 +511,12 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _health(db_path)
 
     @app.get("/v1/agent-catalog/agents")
-    def list_catalog_agents(limit: str = "", cursor: str = "") -> dict[str, Any]:
-        return _list_catalog_agents(db_path, {}, {"limit": limit, "cursor": cursor})
+    def list_catalog_agents(request: _FastAPIRequest) -> dict[str, Any]:
+        return _list_catalog_agents(db_path, {}, _query_params_from_request(request))
 
     @app.get("/v1/agent-catalog/agents/search")
-    def search_agent_catalog(
-        q: str = "",
-        category: str = "",
-        skill: str = "",
-        capability: str = "",
-        protocol: str = "",
-        hosting_mode: str = "",
-        verification_status: str = "",
-        verified_after: str = "",
-        limit: str = "",
-        cursor: str = "",
-    ) -> dict[str, Any]:
-        return _search_agent_catalog(
-            db_path,
-            {},
-            {
-                "q": q,
-                "category": category,
-                "skill": skill,
-                "capability": capability,
-                "protocol": protocol,
-                "hosting_mode": hosting_mode,
-                "verification_status": verification_status,
-                "verified_after": verified_after,
-                "limit": limit,
-                "cursor": cursor,
-            },
-        )
+    def search_agent_catalog(request: _FastAPIRequest) -> dict[str, Any]:
+        return _search_agent_catalog(db_path, {}, _query_params_from_request(request))
 
     @app.get("/v1/agent-catalog/agents/{catalog_agent_id}")
     def get_catalog_agent(catalog_agent_id: str) -> dict[str, Any]:
@@ -534,10 +524,10 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agent-catalog/merchants/{merchant_id}/agents")
     def list_merchant_catalog_agents(
-        merchant_id: str, limit: str = "", cursor: str = ""
+        merchant_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _list_merchant_catalog_agents(
-            db_path, merchant_id, {}, {"limit": limit, "cursor": cursor}
+            db_path, merchant_id, {}, _query_params_from_request(request)
         )
 
     @app.post("/v1/agent-catalog/agents/register")
@@ -606,38 +596,12 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
 
     @app.get("/v1/agents")
-    def v1_list_agents(limit: str = "", cursor: str = "") -> dict[str, Any]:
-        return _v1_list_agents(db_path, {}, {"limit": limit, "cursor": cursor})
+    def v1_list_agents(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_list_agents(db_path, {}, _query_params_from_request(request))
 
     @app.get("/v1/agents/search")
-    def v1_search_agents(
-        q: str = "",
-        capability: str = "",
-        protocol: str = "",
-        hosting_mode: str = "",
-        verification_level: str = "",
-        freshness_state: str = "",
-        administrative_state: str = "",
-        handoff_destination_types: str = "",
-        limit: str = "",
-        cursor: str = "",
-    ) -> dict[str, Any]:
-        return _v1_search_agents(
-            db_path,
-            {},
-            {
-                "q": q,
-                "capability": capability,
-                "protocol": protocol,
-                "hosting_mode": hosting_mode,
-                "verification_level": verification_level,
-                "freshness_state": freshness_state,
-                "administrative_state": administrative_state,
-                "handoff_destination_types": handoff_destination_types,
-                "limit": limit,
-                "cursor": cursor,
-            },
-        )
+    def v1_search_agents(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_search_agents(db_path, {}, _query_params_from_request(request))
 
     @app.get("/v1/agents/{catalog_agent_id}")
     def v1_get_agent(catalog_agent_id: str) -> dict[str, Any]:
@@ -695,42 +659,8 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _hosted_ucp_profile_document(db_path, catalog_agent_id)
 
     @app.get("/v1/listings/search")
-    def v1_search_listings(
-        q: str = "",
-        listing_type: str = "",
-        category: str = "",
-        brand: str = "",
-        region: str = "",
-        tag: str = "",
-        min_moq: str = "",
-        max_moq: str = "",
-        supports_bulk_quote: str = "",
-        supports_customization: str = "",
-        freshness_state: str = "",
-        handoff_destination_type: str = "",
-        limit: str = "",
-        cursor: str = "",
-    ) -> dict[str, Any]:
-        return _v1_search_listings(
-            db_path,
-            {},
-            {
-                "q": q,
-                "listing_type": listing_type,
-                "category": category,
-                "brand": brand,
-                "region": region,
-                "tag": tag,
-                "min_moq": min_moq,
-                "max_moq": max_moq,
-                "supports_bulk_quote": supports_bulk_quote,
-                "supports_customization": supports_customization,
-                "freshness_state": freshness_state,
-                "handoff_destination_type": handoff_destination_type,
-                "limit": limit,
-                "cursor": cursor,
-            },
-        )
+    def v1_search_listings(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_search_listings(db_path, {}, _query_params_from_request(request))
 
     @app.get("/v1/listings/{listing_id}")
     def v1_get_listing(listing_id: str) -> dict[str, Any]:
@@ -738,23 +668,10 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agents/{catalog_agent_id}/listings")
     def v1_list_agent_listings(
-        catalog_agent_id: str,
-        freshness_state: str = "",
-        limit: str = "",
-        cursor: str = "",
-        owner_token: str = "",
-        admin_token: str = "",
+        catalog_agent_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _v1_list_agent_listings(
-            db_path,
-            catalog_agent_id,
-            {
-                "freshness_state": freshness_state,
-                "limit": limit,
-                "cursor": cursor,
-                "owner_token": owner_token,
-                "admin_token": admin_token,
-            },
+            db_path, catalog_agent_id, _query_params_from_request(request)
         )
 
     @app.post("/v1/listings/publish")

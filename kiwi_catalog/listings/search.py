@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from typing import Any
 
 import sqlite3
@@ -46,6 +47,30 @@ from kiwi_catalog.listings.sqlite_repository import (
     encode_cursor,
     expire_stale_listings,
 )
+
+# ── 搜索分页游标（审查 P1-6）──────────────────────────────────────────────
+# 搜索的排序键是 (freshness rank, updated_at desc, id desc)；旧游标只编码
+# (updated_at, id)，STALE 行跨页不可达。新格式 "rank|updated_at|listing_id"
+# 与 encode_cursor（list-by-owner 用，其排序键就是 (updated_at, id)）分开。
+# 旧格式（2 段）解码时 rank=None → 谓词退化为旧行为。
+
+
+def _encode_search_cursor(freshness_state: str, updated_at: str, listing_id: str) -> str:
+    rank = "0" if freshness_state == "FRESH" else "1"
+    return urllib.parse.quote(f"{rank}|{updated_at}|{listing_id}", safe="")
+
+
+def _decode_search_cursor(cursor: str) -> tuple[str | None, str, str]:
+    """→ (rank|None, updated_at, listing_id)；畸形抛 ValueError（→ 4xx）。"""
+    parts = urllib.parse.unquote(str(cursor)).split("|")
+    if len(parts) == 3:
+        rank, updated_at, listing_id = parts
+        if rank not in ("0", "1"):
+            raise ValueError("unknown freshness rank in cursor")
+        return rank, updated_at, listing_id
+    if len(parts) == 2:
+        return None, parts[0], parts[1]
+    raise ValueError("malformed cursor")
 
 
 class SearchQueryError(ValueError):
@@ -222,13 +247,30 @@ def search_listings(
 
     if cursor:
         try:
-            updated_at, listing_id = decode_cursor(cursor)
+            rank, updated_at, listing_id = _decode_search_cursor(cursor)
         except ValueError as exc:
             raise SearchQueryError(f"malformed cursor: {exc}") from exc
-        where.append(
-            "(updated_at, id) < (?, (select id from commerce_listings where listing_id = ?))"
-        )
-        values.extend([updated_at, listing_id])
+        if rank is None:
+            # 旧格式游标（在途分页会话）：保持旧谓词（审查 P1-6 前的行为）
+            where.append(
+                "(updated_at, id) < (?, (select id from commerce_listings where listing_id = ?))"
+            )
+            values.extend([updated_at, listing_id])
+        else:
+            # 键集谓词与排序键（freshness rank asc, updated_at desc, id desc）
+            # 严格同键（审查 P1-6）：rank 更大整组在界后；同 rank 按
+            # updated_at/id 递减比较。两条 rank 分支是互斥 OR——必须包在
+            # 单个 where 项里，否则被 ' and ' 连接后恒为空集。
+            where.append(
+                "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) > ?"
+                " or ("
+                "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) = ?"
+                " and (updated_at < ?"
+                " or (updated_at = ? and id <"
+                " (select id from commerce_listings where listing_id = ?)))"
+                ")"
+            )
+            values.extend([int(rank), int(rank), updated_at, updated_at, listing_id])
 
     # deterministic ranking（v0.4 §12）：无声誉混入；id DESC 稳定 tie-breaker
     rows = conn.execute(
@@ -248,5 +290,9 @@ def search_listings(
     next_cursor = ""
     if len(rows) > limit and results:
         last = results[-1]
-        next_cursor = encode_cursor(str(last["updated_at"]), str(last["listing_id"]))
+        next_cursor = _encode_search_cursor(
+            str(last["listing_freshness_state"] or ""),
+            str(last["updated_at"]),
+            str(last["listing_id"]),
+        )
     return results, next_cursor

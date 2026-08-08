@@ -55,8 +55,9 @@ from kiwi_catalog.services.agent_catalog import get_catalog_agent_write_detail
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 
 # 行政处置终态：可被重新注册恢复（v0.3 §7.3——REJECTED / SUSPENDED 属
-# administrative_state；legacy 折叠值同义）。
-_RE_REGISTERABLE_ADMIN = frozenset({"rejected", "suspended"})
+# administrative_state；legacy 折叠值同义）。重注册 = 复活治理处置，必须
+# 由 admin 或既有绑定商户的 owner token 发起（审查 P1-4b），匿名不得触发。
+RE_REGISTERABLE_ADMIN = frozenset({"rejected", "suspended"})
 
 
 def _ensure_merchant_shadow(conn: Any, merchant_id: str, display_name: str) -> None:
@@ -166,7 +167,7 @@ def register_catalog_agent(
     # §17.4 cooldown: the same domain may only be registered once while the
     # record is live.  行政终态（rejected / suspended）可重新注册（v0.3 §7.3）。
     existing = get_catalog_agent_by_domain(conn, canonical)
-    if existing is not None and existing["administrative_state"] not in _RE_REGISTERABLE_ADMIN:
+    if existing is not None and existing["administrative_state"] not in RE_REGISTERABLE_ADMIN:
         raise ConflictError(f"domain {canonical} is already registered")
 
     catalog_agent_id = str(existing["catalog_agent_id"]) if existing else new_catalog_agent_id()
@@ -305,6 +306,10 @@ def claim_catalog_agent(
         # §6.2: HTTPS domain-control challenge — proof of domain control, not
         # knowledge of the Agent Card URL.
         verifier = identity_verifier or _default_identity_verifier()
+        # 审查 P1-5：抓取前提交，关闭写事务——well-known 抓取（10s 级网络
+        # I/O）期间不持有 SQLite 写锁（idempotency claim 行已持久化，失败时
+        # handler 的 clear 独立生效；merchant 绑定写入由迁移 v7 唯一索引兜底）。
+        conn.commit()
         evidence = verifier.verify_domain_control(canonical, declared=_declared_profile_urls(conn, catalog_agent_id))
         if not evidence.passed:
             raise PermissionDenied(f"claim denied: {evidence.reason}")

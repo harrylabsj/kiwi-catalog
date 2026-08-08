@@ -179,8 +179,13 @@ class CatalogRepository(Protocol):
         self,
         catalog_agent_id: str,
         verification_type: str,
+        result: str | None = None,
     ) -> dict[str, Any] | None:
-        """Return the newest verification row of a type (v0.3 §7.1 级别重算依据)."""
+        """Return the newest verification row of a type (v0.3 §7.1 级别重算依据).
+
+        ``result`` 非空时只考虑该结果的最近一行（降级重算用 result="passed"，
+        审查 P1-7：failed 行不得屏蔽历史 passed 证据）。
+        """
         ...
 
     # ── Trust observations (§5.7) ─────────────────────────────────────────

@@ -273,6 +273,16 @@ def ensure_hosted_catalog_agent(
     catalog_agent_id = f"cagt_{agent_id}"
     caps = list(runtime_capabilities or [])
 
+    # 审查 P1-4a：治理优先——被 admin 处置（suspended / rejected）的 agent
+    # 不得被 hosted 投影同步复活（「REJECTED 终态 / 仅 admin reinstate 恢复」
+    # 契约）。投影对治理行是无操作：不 upsert、不重置三域、不写审计。
+    try:
+        governed = get_catalog_agent(conn, catalog_agent_id)
+    except NotFoundError:
+        governed = None
+    if governed is not None and str(governed.get("administrative_state") or "") != "active":
+        return get_catalog_agent(conn, catalog_agent_id)
+
     # ── upsert catalog_agents row ───────────────────────────────────────
     upsert_catalog_agent(
         conn,

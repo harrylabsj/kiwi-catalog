@@ -71,7 +71,7 @@ def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dic
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [],
+        "headers": [(b"content-type", b"application/json")],
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",

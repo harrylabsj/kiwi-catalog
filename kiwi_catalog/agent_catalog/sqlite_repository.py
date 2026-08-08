@@ -21,6 +21,7 @@ already set to sqlite3.Row by the session layer.
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 from typing import Any
@@ -40,6 +41,102 @@ from kiwi_catalog.agent_catalog.state_domains import (
 )
 from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
+
+
+# ── §8.3 keyset pagination（审查 P1-6）─────────────────────────────────────
+# 三处列表/搜索共用同一排序键：verification_status rank → last_verified_at
+# desc → display_name → catalog_agent_id。键集分页谓词必须与排序键完全同键，
+# 历史 bug：游标只编码 catalog_agent_id，跨 rank/lva 组丢行/重行。
+
+_AGENT_STATUS_RANK = {
+    "commerce_verified": 0,
+    "agent_verified": 1,
+    "domain_verified": 2,
+    "profile_valid": 3,
+    "discovered": 4,
+    "stale": 5,
+    "unreachable": 6,
+    "suspended": 7,
+    "rejected": 8,
+}
+
+# 与 Python 侧 _AGENT_STATUS_RANK 镜像的 SQL CASE 片段（两处使用：ORDER BY
+# 与游标谓词；保持一致是契约——tests/test_repository_abstraction.py 断言）。
+_AGENT_STATUS_RANK_CASE = """
+    case ca.verification_status
+        when 'commerce_verified' then 0
+        when 'agent_verified' then 1
+        when 'domain_verified' then 2
+        when 'profile_valid' then 3
+        when 'discovered' then 4
+        when 'stale' then 5
+        when 'unreachable' then 6
+        when 'suspended' then 7
+        when 'rejected' then 8
+        else 9
+    end
+"""
+
+# display_name 可空：ASC 排序 NULL 最前；谓词统一 coalesce 到 '' 保持同序
+_AGENT_SORT_NAME = "coalesce(ca.display_name, '')"
+
+
+def _agent_status_rank(status: str) -> int:
+    return _AGENT_STATUS_RANK.get(str(status or ""), 9)
+
+
+def _encode_agent_cursor(
+    rank: int, last_verified_at: str | None, display_name: str, catalog_agent_id: str
+) -> str:
+    """v2 键集游标：base64url(JSON [rank, last_verified_at, display_name, id])。
+
+    v2: 前缀让解码无歧义（裸 id 可能恰好是合法 base64）。旧格式裸 id 在
+    decode 时回退旧谓词，不拒绝在途分页会话。
+    """
+    payload = json.dumps([rank, last_verified_at, display_name, catalog_agent_id])
+    return "v2:" + base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def _decode_agent_cursor(cursor: str) -> tuple[list[Any], bool]:
+    """返回 (键值列表, is_v2)。v2 键值 [rank, last_verified_at, name, id]；
+    旧格式（裸 catalog_agent_id）返回 (['<id>'], False)，谓词退化为旧行为。"""
+    if cursor.startswith("v2:"):
+        try:
+            keys = json.loads(base64.urlsafe_b64decode(cursor[3:].encode("ascii")).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            keys = None
+        if isinstance(keys, list) and len(keys) == 4:
+            return keys, True
+    return [cursor], False
+
+
+def _agent_cursor_predicate(cursor: str) -> tuple[str, list[Any]]:
+    """与 §8.3 排序键严格同键的键集谓词（审查 P1-6）。
+
+    last_verified_at DESC 中 NULL 排最后：界后包含「更小的值行 + NULL 行」；
+    界为 NULL 时只剩 NULL 行（`lva < NULL` 恒 NULL，仅 `is null` 命中），
+    随后按 display_name / id 继续比较。
+    """
+    keys, is_v2 = _decode_agent_cursor(cursor)
+    if not is_v2:
+        return "ca.catalog_agent_id > ?", [keys[0]]
+    rank, last_verified_at, name, cagt_id = keys
+    clauses = [
+        f"{_AGENT_STATUS_RANK_CASE} > ?",
+        f"{_AGENT_STATUS_RANK_CASE} = ? and "
+        f"(ca.last_verified_at < ? or ca.last_verified_at is null)",
+        f"{_AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
+        f"and {_AGENT_SORT_NAME} > ?",
+        f"{_AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
+        f"and {_AGENT_SORT_NAME} = ? and ca.catalog_agent_id > ?",
+    ]
+    params: list[Any] = [
+        rank,
+        rank, last_verified_at,
+        rank, last_verified_at, name,
+        rank, last_verified_at, name, cagt_id,
+    ]
+    return "(" + " or ".join(clauses) + ")", params
 
 
 def _row_to_dict(row: sqlite3.Row, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -457,10 +554,11 @@ def search_catalog_agents(
         )
         params.extend([protocol, protocol])
 
-    # ── cursor (keyset pagination on catalog_agent_id) ──────────────────
+    # ── cursor（键集分页：谓词与 §8.3 排序键同键，审查 P1-6）───────────
     if cursor:
-        clauses.append("ca.catalog_agent_id > ?")
-        params.append(cursor)
+        cursor_clause, cursor_params = _agent_cursor_predicate(cursor)
+        clauses.append(cursor_clause)
+        params.extend(cursor_params)
 
     where = ""
     if clauses:
@@ -483,7 +581,7 @@ def search_catalog_agents(
             else 9
         end,
         ca.last_verified_at desc,
-        ca.display_name,
+        coalesce(ca.display_name, ''),
         ca.catalog_agent_id
     """
 
@@ -505,7 +603,13 @@ def search_catalog_agents(
     result_rows = rows[:limit]
     next_cursor: str | None = None
     if has_more and result_rows:
-        next_cursor = str(result_rows[-1]["catalog_agent_id"])
+        last = result_rows[-1]
+        next_cursor = _encode_agent_cursor(
+            _agent_status_rank(str(last["verification_status"] or "")),
+            last["last_verified_at"],
+            str(last["display_name"] or ""),
+            str(last["catalog_agent_id"]),
+        )
 
     results = [_row_to_dict(r) for r in result_rows]
     return results, next_cursor
@@ -546,7 +650,7 @@ def list_catalog_agents(
             else 9
         end,
         ca.last_verified_at desc,
-        ca.display_name,
+        coalesce(ca.display_name, ''),
         ca.catalog_agent_id
     """
 
@@ -568,7 +672,13 @@ def list_catalog_agents(
     result_rows = rows[:limit]
     next_cursor: str | None = None
     if has_more and result_rows:
-        next_cursor = str(result_rows[-1]["catalog_agent_id"])
+        last = result_rows[-1]
+        next_cursor = _encode_agent_cursor(
+            _agent_status_rank(str(last["verification_status"] or "")),
+            last["last_verified_at"],
+            str(last["display_name"] or ""),
+            str(last["catalog_agent_id"]),
+        )
 
     results = [_row_to_dict(r) for r in result_rows]
     return results, next_cursor
@@ -603,7 +713,7 @@ def list_catalog_agents_by_merchant(
             else 9
         end,
         ca.last_verified_at desc,
-        ca.display_name,
+        coalesce(ca.display_name, ''),
         ca.catalog_agent_id
     """
 
@@ -625,7 +735,13 @@ def list_catalog_agents_by_merchant(
     result_rows = rows[:limit]
     next_cursor: str | None = None
     if has_more and result_rows:
-        next_cursor = str(result_rows[-1]["catalog_agent_id"])
+        last = result_rows[-1]
+        next_cursor = _encode_agent_cursor(
+            _agent_status_rank(str(last["verification_status"] or "")),
+            last["last_verified_at"],
+            str(last["display_name"] or ""),
+            str(last["catalog_agent_id"]),
+        )
 
     results = [_row_to_dict(r) for r in result_rows]
     return results, next_cursor
@@ -822,14 +938,28 @@ def latest_verification(
     conn: sqlite3.Connection,
     catalog_agent_id: str,
     verification_type: str,
+    result: str | None = None,
 ) -> dict[str, Any] | None:
-    """最新一条指定类型的验证证据（v0.3 §7.1 级别重算依据）。"""
-    row = conn.execute(
-        "select * from agent_verifications"
-        " where catalog_agent_id = ? and verification_type = ?"
-        " order by checked_at desc, verification_id desc limit 1",
-        (catalog_agent_id, verification_type),
-    ).fetchone()
+    """最新一条指定类型的验证证据（v0.3 §7.1 级别重算依据）。
+
+    审查 P1-7：降级重算必须按「最新 passed 证据」而非「最新一条证据」——
+    否则一次失败的验证写入的 failed 行会屏蔽历史 passed 证据，后续重算
+    持续退化到 DISCOVERED。
+    """
+    if result is not None:
+        row = conn.execute(
+            "select * from agent_verifications"
+            " where catalog_agent_id = ? and verification_type = ? and result = ?"
+            " order by checked_at desc, verification_id desc limit 1",
+            (catalog_agent_id, verification_type, result),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "select * from agent_verifications"
+            " where catalog_agent_id = ? and verification_type = ?"
+            " order by checked_at desc, verification_id desc limit 1",
+            (catalog_agent_id, verification_type),
+        ).fetchone()
     return None if row is None else _row_to_dict(row)
 
 

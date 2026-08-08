@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.listings.contracts import validate_publish_payload
@@ -205,8 +205,10 @@ class PublishContractTest(unittest.TestCase):
         self.assertNotIn(".", canonical["fresh_until"])  # 微秒已截断
 
     def test_fresh_until_accepted_within_ttl(self) -> None:
+        # 相对未来时间（历史教训：硬编码日期会在过期后让套件时间炸弹式变红）
+        future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         canonical = validate_publish_payload(
-            {**PRODUCT_PAYLOAD, "fresh_until": "2026-08-08T00:00:00Z"}
+            {**PRODUCT_PAYLOAD, "fresh_until": future}
         )
         self.assertIn("fresh_until", canonical)
 

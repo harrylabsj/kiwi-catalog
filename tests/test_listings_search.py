@@ -56,7 +56,7 @@ def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dic
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [],
+        "headers": [(b"content-type", b"application/json")],
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",
@@ -242,6 +242,44 @@ class ListingsSearchTest(unittest.TestCase):
         all_ids = ids1 + ids2 + ids3
         self.assertEqual(len(set(all_ids)), 5, "cursor pages must not overlap or skip")
 
+    def test_cursor_pagination_crosses_freshness_ranks(self) -> None:
+        """审查 P1-6：STALE 行跨页可达——游标谓词必须与排序键（rank, updated_at, id）同键。
+
+        历史 bug：游标只编码 (updated_at, id)，STALE 行（翻转后 updated_at 最
+        新、排序却靠后）在后续任何页都不再出现。
+        """
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        for i in range(5):
+            self._publish(
+                {
+                    "source_product_ref": f"SKU-{i:03d}",
+                    "title": f"Item {i}",
+                    "fresh_until": future,
+                }
+            )
+        self._publish({"source_product_ref": "SKU-stale", "title": "Stale item", "fresh_until": future})
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update commerce_listings set fresh_until = '2000-01-01T00:00:00Z'"
+                " where source_product_ref = 'SKU-stale'"
+            )
+
+        seen: list[str] = []
+        cursor = ""
+        for _ in range(10):
+            path = (
+                f"/v1/listings/search?limit=2&cursor={cursor}"
+                if cursor
+                else "/v1/listings/search?limit=2"
+            )
+            _, page = _call_http(self.app, "GET", path)
+            seen += [r["listing"]["listing_id"] for r in page["results"]]
+            cursor = page["next_cursor"]
+            if not cursor:
+                break
+        self.assertEqual(len(seen), 6, "all 6 rows must be reachable across pages")
+        self.assertEqual(len(set(seen)), 6, "no overlap / no skip across pages")
+
     def test_ranking_is_deterministic(self) -> None:
         for i in range(3):
             self._publish({"source_product_ref": f"SKU-{i:03d}", "title": f"Item {i}"})
@@ -255,7 +293,9 @@ class ListingsSearchTest(unittest.TestCase):
     # ── freshness (v0.4 §7.2 / §15.1) ───────────────────────────────────────
 
     def test_expired_listing_flips_to_stale_on_read(self) -> None:
-        self._publish({"fresh_until": "2026-08-08T00:00:00Z"})
+        # 相对未来时间（publish 要求 future；随后手动改成 2000 触发翻转）
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self._publish({"fresh_until": future})
         listing_id = None
         with db_session(self.db_path) as conn:
             listing_id = conn.execute("select listing_id from commerce_listings").fetchone()[0]
