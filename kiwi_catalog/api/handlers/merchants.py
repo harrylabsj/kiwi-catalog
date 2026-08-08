@@ -37,6 +37,7 @@ from kiwi_catalog.api.handlers.common import require_field
 from kiwi_catalog.core.errors import AuthError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
+from kiwi_catalog.services import usage_metrics
 from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
 from kiwi_catalog.services.merchant_tokens import APPLICATION_STATUSES
 from kiwi_catalog.services.rate_limit import (
@@ -220,6 +221,8 @@ def self_status(
             if token_row is None:
                 raise AuthError("invalid owner token")
             merchant_id = str(token_row["merchant_id"])
+            # 埋点只记商家自查动作（token 即身份的路径），admin 查询不计
+            usage_metrics.record_usage(conn, usage_metrics.METRIC_MERCHANT_SELF_CHECK)
         assert token_row is not None  # 两条分支都保证非空（fail-closed）
         status = tokens_service.merchant_status(conn, token_row)
         return {"ok": True, **status}

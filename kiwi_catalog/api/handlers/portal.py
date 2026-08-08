@@ -146,17 +146,34 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
 .app-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .app-row:last-child { border-bottom: none; }
 .app-actions { flex-shrink: 0; }
+/* dashboard */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-top: 26px; }
+.kpi { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
+.kpi .num { font-size: 2rem; font-weight: 800; color: var(--kiwi-800); letter-spacing: -0.02em; }
+.kpi .lbl { font-size: 0.83rem; color: var(--ink-soft); margin-top: 2px; }
+.bars { display: flex; align-items: flex-end; gap: 6px; height: 120px; margin-top: 18px; }
+.bar { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.bar .fill { width: 100%; background: var(--kiwi-600); border-radius: 6px 6px 2px 2px; min-height: 2px; }
+.bar .d { font-size: 0.68rem; color: var(--ink-soft); white-space: nowrap; }
+.section-title { font-size: 1.05rem; font-weight: 700; margin: 26px 0 6px; }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.83rem; color: var(--ink-soft); }
+.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
+table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.88rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--kiwi-800); font-weight: 700; white-space: nowrap; font-size: 0.82rem; }
+.muted { color: var(--ink-soft); }
+.mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.82rem; }
 """
 
 
-def _page(title: str, body: str) -> dict[str, Any]:
+def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
     return {
         "__html__": (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             f"<title>{title} — Kiwi Merchant Portal</title>"
             f"<style>{_OFFICIAL_CSS}{_PORTAL_EXTRA_CSS}</style></head>"
-            f"<body>{body}<script>{_PORTAL_JS}</script></body></html>"
+            f"<body>{body}<script>{_PORTAL_JS}{extra_js}</script></body></html>"
         )
     }
 
@@ -389,6 +406,182 @@ document.getElementById('check').addEventListener('click', () => {
         + _FOOTER
     )
     return _page("状态自查", body)
+
+
+def portal_dashboard() -> dict[str, Any]:
+    """运营 Dashboard——默认不对外公布（env 开关，与审核后台一致）。"""
+    if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {"__html__": _not_found_html(), "__status__": 404}
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Operations</div>
+  <h2>运营 Dashboard</h2>
+  <p class="lead">商家申请审批、网络规模与使用趋势。</p>
+  <div class="card form-card">
+    <label for="admin_token">Admin Token</label>
+    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
+    <button class="btn-form" id="load">加载 Dashboard</button>
+    <div id="out"></div>
+  </div>
+  <div id="content" style="display:none">
+    <div class="kpis" id="kpis"></div>
+    <div class="section-title">使用趋势（最近 14 天）</div>
+    <div id="usage"></div>
+    <div class="legend" id="legend"></div>
+    <div class="section-title">待审申请</div>
+    <div id="apps"></div>
+    <div class="section-title">商家列表</div>
+    <div id="merchants"></div>
+  </div>
+  <div class="card form-card" id="report_card" style="display:none">
+    <h3 id="report_title">商家报告</h3>
+    <div id="report"></div>
+    <button class="btn-mini" id="report_back" style="margin-top:12px">← 返回列表</button>
+  </div>
+</div></section>
+"""
+        + _FOOTER
+    )
+    return _page("运营 Dashboard", body, extra_js=_PORTAL_JS_EXTRA)
+
+
+_PORTAL_JS_EXTRA = """
+const METRIC_LABELS = {
+  buyer_agent_search: 'Agent 搜索',
+  buyer_listing_search: '商品搜索',
+  merchant_self_check: '商家自查',
+  listing_publish: '商品发布',
+};
+const METRIC_COLORS = {
+  buyer_agent_search: '#2e7d32',
+  buyer_listing_search: '#43a047',
+  merchant_self_check: '#81c784',
+  listing_publish: '#143d18',
+};
+
+function adminApi(path, token) {
+  return getJson(path + (path.includes('?') ? '&' : '?') + 'admin_token=' + encodeURIComponent(token));
+}
+
+function renderKpis(d) {
+  const c = d.counts;
+  const kpis = [
+    ['商家数', c.merchants], ['Agent 数', c.agents], ['商品数', c.listings],
+    ['待审申请', c.pending_applications], ['有效令牌', c.active_tokens],
+  ];
+  document.getElementById('kpis').innerHTML = kpis.map(([lbl, n]) =>
+    '<div class="kpi"><div class="num">' + n + '</div><div class="lbl">' + lbl + '</div></div>'
+  ).join('');
+}
+
+function renderUsage(usage) {
+  const max = Math.max(1, ...usage.map(u => u.total));
+  document.getElementById('usage').innerHTML =
+    '<div class="bars">' + usage.map(u =>
+      '<div class="bar" title="' + u.day + ' 总 ' + u.total + '"><div class="fill" style="height:' + Math.max(2, Math.round(u.total / max * 100)) + '%"></div><div class="d">' + u.day.slice(5) + '</div></div>'
+    ).join('') + '</div>';
+  document.getElementById('legend').innerHTML = Object.entries(METRIC_LABELS).map(([k, v]) =>
+    '<span><span class="sw" style="background:' + METRIC_COLORS[k] + '"></span>' + v + '</span>'
+  ).join('');
+}
+
+function renderApps(token, apps) {
+  const el = document.getElementById('apps');
+  if (!apps.length) { el.innerHTML = '<p class="small muted">没有待审申请</p>'; return; }
+  el.innerHTML = '<table><tr><th>#</th><th>名称</th><th>域名</th><th>邮箱</th><th>用途</th><th></th></tr>' +
+    apps.map(a => '<tr><td>' + a.application_id + '</td><td>' + a.agent_name + '</td><td class="mono">' + a.domain +
+      '</td><td>' + a.contact_email + '</td><td class="small muted">' + (a.purpose || '-') + '</td><td>' +
+      '<button class="btn-mini" data-app="' + a.application_id + '">批准</button>' +
+      '<button class="btn-mini" data-rej="' + a.application_id + '">拒绝</button></td></tr>').join('') + '</table>';
+}
+
+function renderMerchants(list) {
+  const el = document.getElementById('merchants');
+  if (!list.length) { el.innerHTML = '<p class="small muted">还没有商家</p>'; return; }
+  el.innerHTML = '<table><tr><th>商家 ID</th><th>名称</th><th>Agent</th><th>商品</th><th>令牌</th><th>签发</th><th></th></tr>' +
+    list.map(m => '<tr><td class="mono">' + m.merchant_id + '</td><td>' + m.name + '</td><td>' + m.agents_count +
+      '</td><td>' + m.listings_count + '</td><td>' + m.token_status + '</td><td class="small muted">' +
+      (m.token_issued_at || '-').slice(0, 10) + '</td><td><button class="btn-mini" data-report="' +
+      m.merchant_id + '">报告</button></td></tr>').join('') + '</table>';
+}
+
+function renderReport(r, token) {
+  const m = r.merchant;
+  let html = '<p class="small muted">' + m.merchant_id + ' · 创建 ' + (m.created_at || '').slice(0, 10) + ' · 更新 ' + (m.updated_at || '').slice(0, 10) + '</p>';
+  html += '<div class="section-title">Token 生命周期</div>';
+  html += r.tokens.length ? '<table><tr><th>状态</th><th>签发</th><th>轮换</th><th>吊销</th></tr>' + r.tokens.map(t =>
+    '<tr><td>' + t.status + '</td><td>' + (t.issued_at || '-').slice(0, 10) + '</td><td>' + (t.rotated_at || '-').slice(0, 10) + '</td><td>' + (t.revoked_at || '-').slice(0, 10) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无令牌</p>';
+  html += '<div class="section-title">Agents（' + r.agents.length + '）</div>';
+  html += r.agents.length ? '<table><tr><th>ID</th><th>名称</th><th>域名</th><th>验证</th><th>状态</th></tr>' + r.agents.map(a =>
+    '<tr><td class="mono">' + a.catalog_agent_id + '</td><td>' + a.display_name + '</td><td class="mono">' + a.canonical_domain +
+    '</td><td>' + a.verification_level + '</td><td>' + a.administrative_state + '</td></tr>').join('') + '</table>' : '<p class="small muted">无 Agent</p>';
+  html += '<div class="section-title">商品（' + r.listings.length + '）</div>';
+  html += r.listings.length ? '<table><tr><th>ID</th><th>标题</th><th>类目</th><th>状态</th><th>发布</th></tr>' + r.listings.map(l =>
+    '<tr><td class="mono">' + l.listing_id + '</td><td>' + l.title + '</td><td>' + l.category + '</td><td>' +
+    l.publication_state + '</td><td>' + (l.published_at || '').slice(0, 10) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无商品</p>';
+  html += '<div class="section-title">审计事件（' + r.audit_events.length + '）</div>';
+  html += r.audit_events.length ? '<table><tr><th>时间</th><th>事件</th><th>操作者</th><th>详情</th></tr>' + r.audit_events.map(e =>
+    '<tr><td class="small muted">' + (e.created_at || '').slice(0, 16) + '</td><td>' + e.event + '</td><td>' + e.actor +
+    '</td><td class="small muted">' + e.details + '</td></tr>').join('') + '</table>' : '<p class="small muted">无审计事件</p>';
+  document.getElementById('report_title').textContent = '商家报告：' + m.name;
+  document.getElementById('report').innerHTML = html;
+  document.getElementById('report_card').style.display = 'block';
+  document.getElementById('content').style.display = 'none';
+}
+
+function loadDashboard(token) {
+  const out = document.getElementById('out');
+  out.className = ''; out.textContent = '';
+  adminApi('/v1/admin/dashboard', token).then(r => {
+    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
+    renderKpis(r); renderUsage(r.usage);
+    document.getElementById('content').style.display = 'block';
+    adminApi('/v1/admin/merchants', token).then(mr => {
+      if (mr.ok) { renderMerchants(mr.results); }
+    });
+    adminApi('/v1/merchants/applications?status=pending', token).then(ar => {
+      if (ar.ok) { renderApps(token, ar.results); }
+    });
+  });
+}
+
+document.getElementById('load').addEventListener('click', () => {
+  const token = document.getElementById('admin_token').value.trim();
+  if (token) loadDashboard(token);
+});
+document.getElementById('apps').addEventListener('click', e => {
+  const token = document.getElementById('admin_token').value.trim();
+  const app = e.target.dataset.app;
+  const rej = e.target.dataset.rej;
+  if (app) {
+    postJson('/v1/merchants/applications/' + app + '/approve', {}, token)
+      .then(r => { if (r.ok) { loadDashboard(token); alert('已签发：' + r.merchant_id + '\\n令牌（仅显示一次）：\\n' + r.token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
+  } else if (rej) {
+    postJson('/v1/merchants/applications/' + rej + '/reject', {}, token)
+      .then(r => { if (r.ok) { loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
+  }
+});
+document.getElementById('merchants').addEventListener('click', e => {
+  const token = document.getElementById('admin_token').value.trim();
+  const mid = e.target.dataset.report;
+  if (mid) {
+    adminApi('/v1/admin/merchants/' + mid + '/report', token).then(r => {
+      if (r.ok) { renderReport(r, token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; }
+    });
+  }
+});
+document.getElementById('report_back').addEventListener('click', () => {
+  document.getElementById('report_card').style.display = 'none';
+  document.getElementById('content').style.display = 'block';
+});
+"""
 
 
 def _not_found_html() -> str:

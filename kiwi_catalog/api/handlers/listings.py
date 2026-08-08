@@ -30,12 +30,13 @@ from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
 from kiwi_catalog.api.handlers.common import result_limit
-from kiwi_catalog.core.errors import AuthError, PermissionDenied, ValidationError
+from kiwi_catalog.core.errors import AuthError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.listings import sqlite_repository as repo
 from kiwi_catalog.listings.contracts import validate_publish_payload
 from kiwi_catalog.listings.domain import LISTING_FRESHNESS_STATES
-from kiwi_catalog.listings.search import SearchQueryError, search_listings as _search_listings
+from kiwi_catalog.listings.search import SearchQueryError
+from kiwi_catalog.listings.search import search_listings as _search_listings
 from kiwi_catalog.listings.serialization import (
     agent_projection,
     listing_record,
@@ -43,6 +44,7 @@ from kiwi_catalog.listings.serialization import (
     merchant_projection,
 )
 from kiwi_catalog.listings.service import owner_agent_merchant_id
+from kiwi_catalog.services import usage_metrics
 
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
@@ -102,6 +104,7 @@ def v1_search_listings(db_path: str | Path, query: dict[str, Any]) -> dict[str, 
     normalized = dict(query or {})
     normalized["limit"] = limit
     with db_session(db_path) as conn:
+        usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_LISTING_SEARCH)
         try:
             rows, next_cursor = _search_listings(conn, normalized)
         except SearchQueryError as exc:
@@ -241,6 +244,7 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
             api_idempotency.complete_catalog_write_idempotency(
                 conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash, response
             )
+            usage_metrics.record_usage(conn, usage_metrics.METRIC_LISTING_PUBLISH)
         except Exception:
             api_idempotency.clear_catalog_write_idempotency_claim(
                 conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash

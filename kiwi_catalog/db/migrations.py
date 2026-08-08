@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 
 @dataclass(frozen=True)
@@ -444,6 +444,28 @@ _MERCHANT_TOKEN_DDL = [
         primary key (actor_key, window_start)
     )
     """,
+    """
+    create table if not exists usage_metrics (
+        metric text not null,
+        day text not null,
+        count integer not null default 0,
+        updated_at text not null,
+        primary key (metric, day)
+    )
+    """,
+]
+
+
+_USAGE_METRICS_DDL = [
+    """
+    create table if not exists usage_metrics (
+        metric text not null,
+        day text not null,
+        count integer not null default 0,
+        updated_at text not null,
+        primary key (metric, day)
+    )
+    """,
 ]
 
 
@@ -564,6 +586,15 @@ def migration_012_merchant_tokens(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_013_usage_metrics(conn: sqlite3.Connection) -> None:
+    """运营埋点（dashboard 数据源）。
+
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（test_shadow_tables 守护）。
+    """
+    for statement in _USAGE_METRICS_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -577,6 +608,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "commerce_listings", migration_010_commerce_listings),
     Migration(11, "search_indexes_and_domain_unique", migration_011_search_indexes_and_domain_unique),
     Migration(12, "merchant_tokens", migration_012_merchant_tokens),
+    Migration(13, "usage_metrics", migration_013_usage_metrics),
 )
 
 
