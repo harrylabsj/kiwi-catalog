@@ -257,6 +257,20 @@ class AdminApiTest(unittest.TestCase):
             self.assertIn("运营 Dashboard", payload.get("_raw", ""))
             self.assertIn("admin_token", payload.get("_raw", ""))
 
+    def test_admin_pages_have_no_merchant_portal_links(self) -> None:
+        """运营后台页面不带商家门户导航：无 /portal/apply、/portal/status
+        链接、无 nav-links 容器（官方找不到、无链接可到）。"""
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+        ):
+            for path in ("/portal/dashboard", "/portal/admin"):
+                _, payload = _call_http(self.app, "GET", path)
+                raw = payload.get("_raw", "")
+                self.assertNotIn("/portal/apply", raw, path)
+                self.assertNotIn("/portal/status", raw, path)
+                self.assertNotIn('class="nav-links"', raw, path)
+                self.assertIn("运营后台", raw, path)
+
 
 if __name__ == "__main__":
     unittest.main()
