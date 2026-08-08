@@ -67,11 +67,12 @@ def submit_application(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     agent_name = str(require_field(payload, "agent_name")).strip()
     contact_email = str(require_field(payload, "contact_email")).strip()
     purpose = str(payload.get("purpose") or "").strip()
+    phone = str(payload.get("phone") or "").strip()
     if not agent_name:
         raise ValidationError("agent_name is required")
     if not _EMAIL_RE.match(contact_email):
         raise ValidationError("contact_email must be a valid email address")
-    if len(agent_name) > 200 or len(contact_email) > 200 or len(purpose) > 2000:
+    if len(agent_name) > 200 or len(contact_email) > 200 or len(purpose) > 2000 or len(phone) > 40:
         raise ValidationError("application fields exceed size limits")
 
     with db_session(db_path) as conn:
@@ -90,10 +91,10 @@ def submit_application(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         cursor = conn.execute(
             """
             insert into merchant_applications
-                (status, domain, agent_name, contact_email, purpose, created_at)
-            values ('pending', ?, ?, ?, ?, ?)
+                (status, domain, agent_name, contact_email, purpose, phone, created_at)
+            values ('pending', ?, ?, ?, ?, ?, ?)
             """,
-            (domain, agent_name, contact_email, purpose, now_iso()),
+            (domain, agent_name, contact_email, purpose, phone, now_iso()),
         )
         application_id = int(cursor.lastrowid or 0)
         application = tokens_service.get_application(conn, application_id)

@@ -146,6 +146,11 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
 .app-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .app-row:last-child { border-bottom: none; }
 .app-actions { flex-shrink: 0; }
+/* 账号页居中（register/login/account） */
+.center-page { text-align: center; }
+.center-page .kicker, .center-page h2, .center-page .lead { text-align: center; margin-left: auto; margin-right: auto; }
+.center-page .form-card { text-align: left; margin: 28px auto 0; float: none; }
+.center-page .card { text-align: left; }
 /* dashboard */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-top: 26px; }
 .kpi { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
@@ -197,7 +202,7 @@ _NAV = """
   <a class="nav-logo" href="/portal">Kiwi</a>
   <div class="nav-links">
     <a href="/portal" class="active">Merchant Portal</a>
-    <a href="/portal/apply">商家申请</a>
+    <a href="/portal/apply">Token 申请</a>
     <a href="/portal/status">状态自查</a>
   </div>
 </div></nav>
@@ -251,17 +256,19 @@ def portal_apply() -> dict[str, Any]:
         _NAV
         + """
 <section class="section"><div class="section-inner">
-  <div class="kicker">Apply</div>
-  <h2>商家申请</h2>
+  <div class="kicker">Token 申请</div>
+  <h2>Token 申请</h2>
   <p class="lead">提交以下信息，平台审核通过后签发商家 ID 与访问令牌。</p>
   <div class="card form-card">
     <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
     <input id="domain" placeholder="acme.example" autocomplete="off">
-    <label for="agent_name">Agent 名称</label>
-    <input id="agent_name" placeholder="Acme Merchant Agent">
+    <label for="agent_name">商家名称</label>
+    <input id="agent_name" placeholder="Acme Merchant">
     <label for="contact_email">联系邮箱</label>
     <input id="contact_email" type="email" placeholder="ops@acme.example">
-    <label for="purpose">用途说明（可选）</label>
+    <label for="phone">电话联系方式（选填）</label>
+    <input id="phone" placeholder="+86 138 0000 0000">
+    <label for="purpose">用途说明（选填）</label>
     <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
     <button class="btn-form" id="submit">提交申请</button>
     <div id="out"></div>
@@ -276,6 +283,7 @@ document.getElementById('submit').addEventListener('click', () => {
     domain: document.getElementById('domain').value.trim(),
     agent_name: document.getElementById('agent_name').value.trim(),
     contact_email: document.getElementById('contact_email').value.trim(),
+    phone: document.getElementById('phone').value.trim(),
     purpose: document.getElementById('purpose').value.trim(),
   }).then(r => {
     if (r.ok) {
@@ -606,51 +614,85 @@ def _account_page(title: str, body: str) -> dict[str, Any]:
 
 
 def portal_register() -> dict[str, Any]:
-    """注册页：merchant 基本信息注册（建账号 + 待审工单），成功即登录。"""
+    """注册页（极简：仅邮箱 + 密码）→ 邮箱验证码 → 验证后进入「我的」。"""
     body = (
         _NAV
         + """
-<section class="section"><div class="section-inner">
+<section class="section center-page"><div class="section-inner">
   <div class="kicker">Register</div>
   <h2>注册商家账号</h2>
-  <p class="lead">填写商家基本信息注册——审核通过后，在「我的」里申请并查看令牌。</p>
+  <p class="lead">只需邮箱和密码。验证邮箱后，在「我的」里申请商家令牌。</p>
   <div class="card form-card">
-    <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
-    <input id="domain" placeholder="acme.example" autocomplete="off">
-    <label for="agent_name">商家名称（Agent 名）</label>
-    <input id="agent_name" placeholder="Acme Merchant">
-    <label for="email">邮箱（登录账号）</label>
-    <input id="email" type="email" placeholder="ops@acme.example">
-    <label for="password">密码（至少 8 位）</label>
-    <input id="password" type="password" autocomplete="new-password">
-    <label for="purpose">用途说明（可选）</label>
-    <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
-    <button class="btn-form" id="submit">注册</button>
-    <div id="out"></div>
-    <p class="small" style="margin-top:16px">已有账号？<a href="/portal/login">登录</a></p>
+    <div id="step1">
+      <label for="email">邮箱</label>
+      <input id="email" type="email" placeholder="ops@acme.example" autocomplete="email">
+      <label for="password">密码（至少 8 位）</label>
+      <input id="password" type="password" autocomplete="new-password">
+      <button class="btn-form" id="submit">注册</button>
+      <div id="out1"></div>
+      <p class="small" style="margin-top:16px">已有账号？<a href="/portal/login">登录</a></p>
+    </div>
+    <div id="step2" style="display:none">
+      <p class="ok" id="sent_note">验证码已发送到你的邮箱。</p>
+      <label for="code">邮箱验证码</label>
+      <input id="code" placeholder="6 位验证码" autocomplete="one-time-code">
+      <button class="btn-form" id="verify">验证并进入</button>
+      <div id="out2"></div>
+      <button class="btn-mini" id="resend" style="margin-top:12px">重新发送验证码</button>
+    </div>
   </div>
 </div></section>
 <script>
+let regEmail = '';
 document.getElementById('submit').addEventListener('click', () => {
   const btn = document.getElementById('submit');
-  const out = document.getElementById('out');
+  const out = document.getElementById('out1');
   btn.disabled = true;
   postJson('/v1/accounts/register', {
-    domain: document.getElementById('domain').value.trim(),
-    agent_name: document.getElementById('agent_name').value.trim(),
     email: document.getElementById('email').value.trim(),
     password: document.getElementById('password').value,
-    purpose: document.getElementById('purpose').value.trim(),
   }).then(r => {
     if (r.ok) {
-      out.className = 'ok';
-      out.textContent = '注册成功，等待平台审核。正在进入「我的」…';
-      setTimeout(() => go('/portal/account'), 800);
+      regEmail = r.email;
+      if (r.verification_code) {
+        document.getElementById('sent_note').textContent = '演示模式：验证码 ' + r.verification_code;
+      }
+      document.getElementById('step1').style.display = 'none';
+      document.getElementById('step2').style.display = 'block';
     } else {
       out.className = 'err';
       out.textContent = r.error || '注册失败';
       btn.disabled = false;
     }
+  });
+});
+document.getElementById('verify').addEventListener('click', () => {
+  const btn = document.getElementById('verify');
+  const out = document.getElementById('out2');
+  btn.disabled = true;
+  postJson('/v1/accounts/verify-email', {
+    email: regEmail,
+    code: document.getElementById('code').value.trim(),
+  }).then(r => {
+    if (r.ok) {
+      out.className = 'ok';
+      out.textContent = '邮箱已验证，正在进入「我的」…';
+      setTimeout(() => go('/portal/account'), 800);
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '验证失败';
+      btn.disabled = false;
+    }
+  });
+});
+document.getElementById('resend').addEventListener('click', () => {
+  const btn = document.getElementById('resend');
+  btn.disabled = true;
+  postJson('/v1/accounts/resend-code', {email: regEmail}).then(r => {
+    document.getElementById('sent_note').textContent = r.verification_code
+      ? '演示模式：验证码 ' + r.verification_code
+      : '验证码已重新发送。';
+    btn.disabled = false;
   });
 });
 </script>
@@ -661,11 +703,14 @@ document.getElementById('submit').addEventListener('click', () => {
 
 
 def portal_login() -> dict[str, Any]:
-    """登录页：邮箱 + 密码 → 会话 cookie → 「我的」。"""
+    """登录页：邮箱 + 密码 → 会话 cookie → 「我的」。
+
+    邮箱未验证时提示并显示验证码输入（验证通过自动登录）。
+    """
     body = (
         _NAV
         + """
-<section class="section"><div class="section-inner">
+<section class="section center-page"><div class="section-inner">
   <div class="kicker">Login</div>
   <h2>商家登录</h2>
   <div class="card form-card">
@@ -675,16 +720,24 @@ def portal_login() -> dict[str, Any]:
     <input id="password" type="password" autocomplete="current-password">
     <button class="btn-form" id="submit">登录</button>
     <div id="out"></div>
+    <div id="verify_block" style="display:none">
+      <label for="code">邮箱验证码（登录前需先验证邮箱）</label>
+      <input id="code" placeholder="6 位验证码" autocomplete="one-time-code">
+      <button class="btn-form" id="verify">验证并登录</button>
+      <button class="btn-mini" id="resend" style="margin-top:12px">重新发送验证码</button>
+    </div>
     <p class="small" style="margin-top:16px">还没有账号？<a href="/portal/register">注册商家账号</a></p>
   </div>
 </div></section>
 <script>
+let logEmail = '';
 document.getElementById('submit').addEventListener('click', () => {
   const btn = document.getElementById('submit');
   const out = document.getElementById('out');
+  logEmail = document.getElementById('email').value.trim();
   btn.disabled = true;
   postJson('/v1/accounts/login', {
-    email: document.getElementById('email').value.trim(),
+    email: logEmail,
     password: document.getElementById('password').value,
   }).then(r => {
     if (r.ok) {
@@ -695,7 +748,32 @@ document.getElementById('submit').addEventListener('click', () => {
       out.className = 'err';
       out.textContent = r.error || '登录失败';
       btn.disabled = false;
+      if (r.error && r.error.indexOf('not verified') !== -1) {
+        document.getElementById('verify_block').style.display = 'block';
+        postJson('/v1/accounts/resend-code', {email: logEmail}).then(r2 => {
+          if (r2.verification_code) { document.getElementById('out').textContent += '（演示模式：' + r2.verification_code + '）'; }
+        });
+      }
     }
+  });
+});
+document.getElementById('verify').addEventListener('click', () => {
+  postJson('/v1/accounts/verify-email', {
+    email: logEmail,
+    code: document.getElementById('code').value.trim(),
+  }).then(r => {
+    if (r.ok) { window.location.href = '/portal/account'; }
+    else {
+      const out = document.getElementById('out');
+      out.className = 'err';
+      out.textContent = r.error || '验证失败';
+    }
+  });
+});
+document.getElementById('resend').addEventListener('click', () => {
+  postJson('/v1/accounts/resend-code', {email: logEmail}).then(r => {
+    const out = document.getElementById('out');
+    out.textContent = r.verification_code ? '演示模式：验证码 ' + r.verification_code : '验证码已重新发送。';
   });
 });
 </script>
@@ -710,7 +788,7 @@ def portal_account() -> dict[str, Any]:
     body = (
         _NAV
         + """
-<section class="section"><div class="section-inner">
+<section class="section center-page"><div class="section-inner">
   <div class="kicker">My Account</div>
   <h2>我的</h2>
   <div id="out"></div>
@@ -718,7 +796,28 @@ def portal_account() -> dict[str, Any]:
     <div class="card form-card">
       <div id="profile"></div>
       <div id="token_box"></div>
-      <button class="btn-form" id="request_token" style="display:none">申请令牌</button>
+      <div id="apply_form" style="display:none">
+        <label for="a_domain">店铺域名（如 acme.example）</label>
+        <input id="a_domain" placeholder="acme.example" autocomplete="off">
+        <label for="a_name">商家名称</label>
+        <input id="a_name" placeholder="Acme Merchant">
+        <label for="a_phone">电话联系方式（选填）</label>
+        <input id="a_phone" placeholder="+86 138 0000 0000">
+        <label for="a_purpose">用途说明（选填）</label>
+        <textarea id="a_purpose" rows="2" placeholder="想销售的商品类目"></textarea>
+        <button class="btn-form" id="request_token">申请令牌</button>
+      </div>
+      <div class="section-title" style="text-align:left;margin-top:26px">账户基本信息</div>
+      <div id="profile_edit" style="text-align:left">
+        <label for="p_email">邮箱（登录账号，不可修改）</label>
+        <input id="p_email" disabled>
+        <label for="p_name">商家名称</label>
+        <input id="p_name">
+        <label for="p_phone">电话（选填）</label>
+        <input id="p_phone">
+        <button class="btn-form" id="save_profile">保存基本信息</button>
+        <div id="out_profile"></div>
+      </div>
       <button class="btn-mini" id="logout" style="margin-top:14px">退出登录</button>
     </div>
   </div>
@@ -742,6 +841,9 @@ function loadMe() {
         + ' · ' + esc(r.application.agent_name) + ' · ' + esc(r.application.domain) + '</p>';
     }
     p.innerHTML = html;
+    document.getElementById('p_email').value = r.email;
+    document.getElementById('p_name').value = r.merchant_name || '';
+    document.getElementById('p_phone').value = r.phone || '';
     const tb = document.getElementById('token_box');
     const rt = document.getElementById('request_token');
     if (r.token && r.token.status === 'active') {
@@ -759,17 +861,47 @@ function loadMe() {
     } else if (r.application && r.application.status === 'pending') {
       tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
       rt.style.display = 'none';
+      document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。提交申请，平台审核通过后签发。</p>';
-      rt.style.display = 'inline-block';
+      tb.innerHTML = '<p class="small muted">还没有令牌。填写商家信息提交申请，平台审核通过后签发。</p>';
+      rt.style.display = 'none';
+      document.getElementById('apply_form').style.display = 'block';
     }
   });
 }
 document.getElementById('request_token').addEventListener('click', () => {
-  postJson('/v1/accounts/token-request', {}).then(r => {
+  const btn = document.getElementById('request_token');
+  btn.disabled = true;
+  postJson('/v1/accounts/token-request', {
+    domain: document.getElementById('a_domain').value.trim(),
+    agent_name: document.getElementById('a_name').value.trim(),
+    phone: document.getElementById('a_phone').value.trim(),
+    purpose: document.getElementById('a_purpose').value.trim(),
+  }).then(r => {
     if (r.ok) { loadMe(); } else {
-      document.getElementById('out').className = 'err';
-      document.getElementById('out').textContent = r.error || '申请失败';
+      const out = document.getElementById('out');
+      out.className = 'err';
+      out.textContent = r.error || '申请失败';
+      btn.disabled = false;
+    }
+  });
+});
+document.getElementById('save_profile').addEventListener('click', () => {
+  const btn = document.getElementById('save_profile');
+  btn.disabled = true;
+  postJson('/v1/accounts/profile', {
+    merchant_name: document.getElementById('p_name').value.trim(),
+    phone: document.getElementById('p_phone').value.trim(),
+  }).then(r => {
+    const out = document.getElementById('out_profile');
+    if (r.ok) {
+      out.className = 'ok';
+      out.textContent = '已保存。';
+      loadMe();
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '保存失败';
+      btn.disabled = false;
     }
   });
 });

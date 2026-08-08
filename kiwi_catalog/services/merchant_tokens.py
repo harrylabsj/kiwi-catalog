@@ -61,6 +61,7 @@ def application_row(row: sqlite3.Row) -> dict[str, Any]:
         "agent_name": row["agent_name"],
         "contact_email": row["contact_email"],
         "purpose": row["purpose"],
+        "phone": row["phone"],
         "merchant_id": row["merchant_id"],
         "review_note": row["review_note"],
         "created_at": row["created_at"],
@@ -108,10 +109,20 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
     agent_name = str(row["agent_name"])
     merchant_id = new_platform_merchant_id(agent_name)
     now = now_iso()
+    # 账户基本信息（v16）：商家名称优先用账户已填值
+    account_id = int(row["account_id"] or 0)
+    display_name = agent_name
+    if account_id:
+        account_row = conn.execute(
+            "select merchant_name from merchant_accounts where account_id = ?",
+            (account_id,),
+        ).fetchone()
+        if account_row is not None and str(account_row["merchant_name"] or "").strip():
+            display_name = str(account_row["merchant_name"]).strip()
     conn.execute(
         "insert or ignore into merchants(id, name, created_at, updated_at)"
         " values (?, ?, ?, ?)",
-        (merchant_id, agent_name, now, now),
+        (merchant_id, display_name, now, now),
     )
     token = generate_merchant_token()
     # v14：明文 Fernet 加密落库（登录后"我的"可查，docs §account）
@@ -129,13 +140,17 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         " reviewed_at = ? where application_id = ?",
         (merchant_id, now, application_id),
     )
-    # 回填注册账号的 merchant_id（account_id>0 的工单来自账号注册）
-    account_id = int(row["account_id"] or 0)
+    # 回填注册账号的 merchant_id + 商家基本信息（v16）
     if account_id:
         conn.execute(
             "update merchant_accounts set merchant_id = ?, updated_at = ?"
             " where account_id = ?",
             (merchant_id, now, account_id),
+        )
+        conn.execute(
+            "update merchant_accounts set merchant_name = ?, phone = ?"
+            " where account_id = ? and merchant_name = ''",
+            (agent_name, str(row["phone"] or ""), account_id),
         )
     append_catalog_audit(
         conn,
