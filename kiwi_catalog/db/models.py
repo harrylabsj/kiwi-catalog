@@ -256,7 +256,7 @@ create table if not exists usage_metrics (
         primary key (metric, day)
     )
     """,
-    # v14 — 账号体系（docs §account）。merchant_accounts：注册即建账号，
+    # v14 — 账号体系（docs/accounts.md）。merchant_accounts：注册即建账号，
     # merchant_id 审批签发后回填；account_sessions：登录会话（随机
     # session token 落库 SHA-256 + 过期）；merchant_tokens.token_encrypted：
     # Fernet 加密的明文 token（登录后"我的"可查——解决签发即丢失）；

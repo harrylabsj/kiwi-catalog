@@ -180,7 +180,7 @@ class MarketplaceASGIApp:
         ``{"__html__": "..."}`` 标记响应（/portal/* 门户页，docs §6）改发
         text/html；门户页含一次性令牌展示，响应带 no-store 防缓存。
         ``__status__`` 键覆盖状态码（如审核后台关闭时发真实 404）；
-        ``__cookies__`` 列表下发 Set-Cookie（账号会话，docs §account）。
+        ``__cookies__`` 列表下发 Set-Cookie（账号会话，docs/accounts.md）。
         """
         html = response.get("__html__") if isinstance(response, dict) else None
         override_status = (

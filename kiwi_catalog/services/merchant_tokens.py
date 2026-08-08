@@ -134,7 +134,7 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         (merchant_id, display_name, now, now),
     )
     token = generate_merchant_token()
-    # v14：明文 Fernet 加密落库（登录后"我的"可查，docs §account）
+    # v14：明文 Fernet 加密落库（登录后"我的"可查，docs/accounts.md）
     from kiwi_catalog.services import accounts as accounts_service
 
     encrypted = accounts_service.encrypt_merchant_token(token)

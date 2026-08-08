@@ -623,7 +623,7 @@ def migration_013_usage_metrics(conn: sqlite3.Connection) -> None:
 
 
 def migration_014_accounts(conn: sqlite3.Connection) -> None:
-    """账号体系（docs §account）：幂等 ALTER + 回填 + 新表。
+    """账号体系（docs/accounts.md）：幂等 ALTER + 回填 + 新表。
 
     - merchant_tokens 加 token_encrypted（Fernet 加密明文，存量行回填空串）；
     - merchant_applications 加 account_id（存量行回填 0）；
@@ -645,7 +645,7 @@ def migration_014_accounts(conn: sqlite3.Connection) -> None:
 
 
 def migration_015_email_verification(conn: sqlite3.Connection) -> None:
-    """邮箱验证（docs §account）：merchant_accounts 幂等加 3 列。"""
+    """邮箱验证（docs/accounts.md）：merchant_accounts 幂等加 3 列。"""
     for column in (
         "email_verified integer not null default 0",
         "verification_code_hash text not null default ''",
@@ -660,7 +660,7 @@ def migration_015_email_verification(conn: sqlite3.Connection) -> None:
 
 
 def migration_016_account_profile(conn: sqlite3.Connection) -> None:
-    """账户基本信息（docs §account）：merchant_name/phone 列 + 工单 phone。"""
+    """账户基本信息（docs/accounts.md）：merchant_name/phone 列 + 工单 phone。"""
     for column, table in (
         ("merchant_name text not null default ''", "merchant_accounts"),
         ("phone text not null default ''", "merchant_accounts"),

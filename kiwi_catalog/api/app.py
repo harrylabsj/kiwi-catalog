@@ -278,7 +278,7 @@ RouteEntry(
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
     ),
-# ── /v1/accounts（商家账号，docs §account）───────────────────────────────
+# ── /v1/accounts（商家账号，docs/accounts.md）───────────────────────────────
 RouteEntry(
         {"POST"},
         "/v1/accounts/register",

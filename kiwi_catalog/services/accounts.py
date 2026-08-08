@@ -14,7 +14,7 @@
 
 """商家账号体系（注册/登录/会话 + token 加密存储）。
 
-设计（docs §account）：
+设计（docs/accounts.md）：
 - **注册即 merchant 注册**：基本信息（域名/商家名/邮箱/密码）注册 →
   自动创建待审工单（dashboard 审批流复用）；批准后 merchant_id 回填账号；
 - **会话**：登录签发随机 session token（SHA-256 落库 + 7 天过期），

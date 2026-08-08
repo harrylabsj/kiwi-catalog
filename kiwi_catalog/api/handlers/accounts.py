@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""商家账号 API（docs §account）：注册/登录/登出/我的/申请 token。
+"""商家账号 API（docs/accounts.md）：注册/登录/登出/我的/申请 token。
 
 - register / login 公开（限流防爆破）；登录签发会话 cookie
   （httpOnly + Secure + SameSite=Lax，7 天）；
