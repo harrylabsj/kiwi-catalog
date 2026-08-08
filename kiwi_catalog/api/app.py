@@ -35,6 +35,7 @@ from typing import Any
 
 from kiwi_catalog import VERSION
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
@@ -277,6 +278,32 @@ RouteEntry(
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
     ),
+# ── /v1/accounts（商家账号，docs §account）───────────────────────────────
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/register",
+        lambda db_path, payload, query, **kw: _v1_account_register(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/login",
+        lambda db_path, payload, query, **kw: _v1_account_login(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/logout",
+        lambda db_path, payload, query, **kw: _v1_account_logout(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/accounts/me",
+        lambda db_path, payload, query, **kw: _v1_account_me(db_path, payload, query),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/token-request",
+        lambda db_path, payload, query, **kw: _v1_account_token_request(db_path, payload, query),
+    ),
 # ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
 RouteEntry(
         {"GET"},
@@ -320,6 +347,21 @@ RouteEntry(
         {"GET"},
         "/portal/dashboard",
         lambda db_path, payload, query, **kw: _portal_dashboard(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/register",
+        lambda db_path, payload, query, **kw: _portal_register(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/login",
+        lambda db_path, payload, query, **kw: _portal_login(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/account",
+        lambda db_path, payload, query, **kw: _portal_account(),
     ),
 )
 
@@ -453,6 +495,29 @@ def _v1_merchant_self(db_path, payload, query):
     return merchants_handlers.self_status(db_path, payload, query or {})
 
 
+# ── /v1/accounts wrapper（商家账号）──────────────────────────────────────
+
+
+def _v1_account_register(db_path, payload):
+    return accounts_handlers.register(db_path, payload)
+
+
+def _v1_account_login(db_path, payload):
+    return accounts_handlers.login(db_path, payload)
+
+
+def _v1_account_logout(db_path, payload):
+    return accounts_handlers.logout(db_path, payload)
+
+
+def _v1_account_me(db_path, payload, query):
+    return accounts_handlers.me(db_path, payload, query or {})
+
+
+def _v1_account_token_request(db_path, payload, query):
+    return accounts_handlers.token_request(db_path, payload, query or {})
+
+
 # ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
 
 
@@ -489,6 +554,18 @@ def _portal_status():
 
 def _portal_dashboard():
     return portal_handlers.portal_dashboard()
+
+
+def _portal_register():
+    return portal_handlers.portal_register()
+
+
+def _portal_login():
+    return portal_handlers.portal_login()
+
+
+def _portal_account():
+    return portal_handlers.portal_account()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):
@@ -1057,6 +1134,44 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_merchant_self(db_path, {}, _query_params_from_request(request))
 
+    # ── /v1/accounts（商家账号；cookie 会话经 request 透传）───────────────
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    def _account_response(result: dict[str, Any]) -> _JSONResponse:
+        """账号 handler 结果 → JSONResponse；__cookies__ 下发 Set-Cookie。"""
+        cookies = result.pop("__cookies__", None) or []
+        headers = {"set-cookie": str(cookies[0])} if cookies else None
+        return _JSONResponse(result, headers=headers)
+
+    def _account_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
+        cookie = request.headers.get("cookie", "")
+        if cookie:
+            body = dict(body or {})
+            body["_cookie"] = cookie
+        return body
+
+    @app.post("/v1/accounts/register")
+    def v1_account_register(payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(accounts_handlers.register(db_path, payload))
+
+    @app.post("/v1/accounts/login")
+    def v1_account_login(payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(accounts_handlers.login(db_path, payload))
+
+    @app.post("/v1/accounts/logout")
+    def v1_account_logout(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.logout(db_path, _account_payload(request, payload))
+
+    @app.get("/v1/accounts/me")
+    def v1_account_me(request: _FastAPIRequest) -> dict[str, Any]:
+        return accounts_handlers.me(db_path, _account_payload(request, {}), {})
+
+    @app.post("/v1/accounts/token-request")
+    def v1_account_token_request(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.token_request(db_path, _account_payload(request, payload), {})
+
     # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
     @app.get("/v1/admin/dashboard")
     def v1_admin_dashboard(request: _FastAPIRequest) -> dict[str, Any]:
@@ -1107,6 +1222,18 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/dashboard")
     def portal_dashboard_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_dashboard())
+
+    @app.get("/portal/register")
+    def portal_register_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_register())
+
+    @app.get("/portal/login")
+    def portal_login_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_login())
+
+    @app.get("/portal/account")
+    def portal_account_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_account())
 
 
 def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
