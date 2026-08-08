@@ -459,6 +459,27 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 403, payload)
 
+    # ── 导航 ───────────────────────────────────────────────────────────────
+
+    def test_portal_nav_has_my_account(self) -> None:
+        """「我的」页一级导航保留 My Account（防迷失）；无令牌页链接。"""
+        _, payload, _ = _call_http(self.app, "GET", "/portal/account")
+        raw = payload.get("_raw", "")
+        self.assertIn(">My Account</a>", raw)
+        self.assertIn(">令牌申请</a>", raw)
+        self.assertNotIn("/portal/status", raw)
+        self.assertNotIn(">Merchant Portal<", raw)  # 导航无 Merchant Portal（title 后缀除外）
+
+    def test_home_nav_points_to_token_apply(self) -> None:
+        _, payload, _ = _call_http(self.app, "GET", "/portal")
+        raw = payload.get("_raw", "")
+        self.assertIn(">令牌申请</a>", raw)
+        self.assertIn("/portal/account", raw)
+
+    def test_status_page_removed(self) -> None:
+        status, _, _ = _call_http(self.app, "GET", "/portal/status")
+        self.assertEqual(status, 404, "令牌页已移除")
+
     # ── 页面 ───────────────────────────────────────────────────────────────
 
     def test_account_pages_serve_html(self) -> None:

@@ -355,11 +355,6 @@ RouteEntry(
     ),
 RouteEntry(
         {"GET"},
-        "/portal/status",
-        lambda db_path, payload, query, **kw: _portal_status(),
-    ),
-RouteEntry(
-        {"GET"},
         "/portal/dashboard",
         lambda db_path, payload, query, **kw: _portal_dashboard(),
     ),
@@ -573,10 +568,6 @@ def _portal_apply():
 
 def _portal_admin():
     return portal_handlers.portal_admin()
-
-
-def _portal_status():
-    return portal_handlers.portal_status()
 
 
 def _portal_dashboard():
@@ -1255,10 +1246,6 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/admin")
     def portal_admin_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_admin())
-
-    @app.get("/portal/status")
-    def portal_status_page() -> HTMLResponse:
-        return _portal_html(portal_handlers.portal_status())
 
     @app.get("/portal/dashboard")
     def portal_dashboard_page() -> HTMLResponse:
