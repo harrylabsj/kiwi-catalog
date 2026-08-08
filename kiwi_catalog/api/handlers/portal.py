@@ -138,7 +138,7 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
   padding: 7px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
   cursor: pointer; font-family: inherit; margin-left: 6px;
 }
-.token-box { background: #12251a; color: #7dd3a8; font-family: ui-monospace, Menlo, monospace; font-size: 0.92rem; padding: 12px 14px; border-radius: 10px; word-break: break-all; margin: 10px 0; }
+.token-box { background: var(--kiwi-100); color: var(--kiwi-900); border-left: 4px solid var(--kiwi-600); border-radius: 0 var(--radius) var(--radius) 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.92rem; padding: 12px 14px; word-break: break-all; margin: 10px 0; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
 .small { font-size: 0.83rem; color: var(--ink-soft); }
 .err { color: #b3261e; font-size: 0.9rem; margin-top: 10px; }
