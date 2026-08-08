@@ -202,7 +202,6 @@ _NAV = """
   <a class="nav-logo" href="/portal">Kiwi</a>
   <div class="nav-links">
     <a href="/portal" class="active">Merchant Portal</a>
-    <a href="/portal/apply">Token 申请</a>
     <a href="/portal/status">状态自查</a>
   </div>
 </div></nav>
@@ -224,82 +223,65 @@ _FOOTER = """
 
 
 def portal_home() -> dict[str, Any]:
+    """门户首页 = Token 申请（登录态表单；未登录引导登录）。
+
+    邮箱/电话不需要填写——注册与账户基本信息已提供，提交时自动带上。
+    """
     body = (
         _NAV
         + """
-<header class="hero"><div class="hero-inner">
-  <h1>Kiwi Merchant 门户</h1>
-  <p class="tagline">注册 Kiwi 商家身份，获取访问令牌，把产品目录接入 Kiwi 网络——Buyer Agent 就能直接找到你、跟你谈、向你买。</p>
-  <div class="hero-actions">
-    <a class="btn btn-solid" href="/portal/apply">申请商家令牌</a>
-    <a class="btn btn-ghost" href="/portal/status">状态自查</a>
-  </div>
-</div></header>
-<section class="section"><div class="section-inner">
-  <div class="kicker">How it works</div>
-  <h2>三步接入</h2>
-  <div class="grid grid-3">
-    <div class="card"><div class="card-num">1</div><h3>提交申请</h3><p>填写店铺域名、Agent 名称与联系邮箱。平台审核确认商家身份。</p></div>
-    <div class="card"><div class="card-num">2</div><h3>审核签发</h3><p>获批后得到商家 ID（<code>mkt_…</code>）与一次性访问令牌，仅展示一次。</p></div>
-    <div class="card"><div class="card-num">3</div><h3>发布产品</h3><p>用令牌注册 Agent、发布 Listing；遗失请联系运营轮换。</p></div>
-  </div>
-  <div class="notice"><p><strong>令牌安全：</strong>令牌只在签发时显示一次。申请通过后请立即保存；泄漏或遗失请联系运营在审核后台轮换。</p></div>
-</div></section>
-"""
-        + _FOOTER
-    )
-    return _page("Merchant Portal", body)
-
-
-def portal_apply() -> dict[str, Any]:
-    body = (
-        _NAV
-        + """
-<section class="section"><div class="section-inner">
+<section class="section center-page"><div class="section-inner">
   <div class="kicker">Token 申请</div>
   <h2>Token 申请</h2>
-  <p class="lead">提交以下信息，平台审核通过后签发商家 ID 与访问令牌。</p>
+  <p class="lead">申请商家令牌，平台审核通过后签发。令牌会显示在「我的」里。</p>
   <div class="card form-card">
-    <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
-    <input id="domain" placeholder="acme.example" autocomplete="off">
-    <label for="agent_name">商家名称</label>
-    <input id="agent_name" placeholder="Acme Merchant">
-    <label for="contact_email">联系邮箱</label>
-    <input id="contact_email" type="email" placeholder="ops@acme.example">
-    <label for="phone">电话联系方式（选填）</label>
-    <input id="phone" placeholder="+86 138 0000 0000">
-    <label for="purpose">用途说明（选填）</label>
-    <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
-    <button class="btn-form" id="submit">提交申请</button>
-    <div id="out"></div>
+    <label for="t_domain">店铺域名（如 acme.example）</label>
+    <input id="t_domain" placeholder="acme.example" autocomplete="off">
+    <label for="t_name">商家名称</label>
+    <input id="t_name" placeholder="Acme Merchant">
+    <label for="t_purpose">用途说明（选填）</label>
+    <textarea id="t_purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
+    <button class="btn-form" id="t_submit">提交申请</button>
+    <div id="t_out"></div>
   </div>
 </div></section>
 <script>
-document.getElementById('submit').addEventListener('click', () => {
-  const btn = document.getElementById('submit');
-  const out = document.getElementById('out');
+// 登录态检查：未登录进入登录流程（邮箱/电话自动从账户带出）
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+  if (!r.ok) { window.location.href = '/portal/login'; return; }
+  if (r.merchant_name) { document.getElementById('t_name').value = r.merchant_name; }
+});
+document.getElementById('t_submit').addEventListener('click', () => {
+  const btn = document.getElementById('t_submit');
+  const out = document.getElementById('t_out');
   btn.disabled = true;
-  postJson('/v1/merchants/applications', {
-    domain: document.getElementById('domain').value.trim(),
-    agent_name: document.getElementById('agent_name').value.trim(),
-    contact_email: document.getElementById('contact_email').value.trim(),
-    phone: document.getElementById('phone').value.trim(),
-    purpose: document.getElementById('purpose').value.trim(),
+  postJson('/v1/accounts/token-request', {
+    domain: document.getElementById('t_domain').value.trim(),
+    agent_name: document.getElementById('t_name').value.trim(),
+    purpose: document.getElementById('t_purpose').value.trim(),
   }).then(r => {
     if (r.ok) {
       out.className = 'ok';
-      out.textContent = '申请已提交，编号 #' + r.application.application_id + '。平台审核后将签发令牌。';
+      out.textContent = r.status === 'active' ? '你已有有效令牌，可在「我的」查看。' : '申请已提交，等待平台审核。';
+      setTimeout(() => go('/portal/account'), 1000);
     } else {
       out.className = 'err';
       out.textContent = r.error || '提交失败';
+      btn.disabled = false;
     }
-  }).finally(() => { btn.disabled = false; });
+  });
 });
 </script>
 """
         + _FOOTER
     )
-    return _page("商家申请", body)
+    return _account_page("Token 申请", body)
+
+
+def portal_apply() -> dict[str, Any]:
+    """/portal/apply 兼容旧路径——与首页（Token 申请）同内容。"""
+    return portal_home()
+
 
 
 def portal_admin() -> dict[str, Any]:
