@@ -164,6 +164,8 @@ CLI（`catalog merchant applications list/approve/reject`、`token rotate/revoke
 `status`——与 HTTP 共用 `services/merchant_tokens.py`，本地直连 SQLite 信任边界）
 + 测试（双栈全量 191）。
 
+Dashboard（2026-08-08）：运营后台 /portal/dashboard（admin token，env KIWI_CATALOG_PORTAL_ADMIN_ENABLED 默认关）——待审申请审批 + KPI 统计 + 14 天使用趋势（usage_metrics 埋点：buyer 搜索/listing 搜索/商家自查/商品发布）+ 商家列表与报告。生产已开启并验证。
+
 部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
 catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
 env / 重启 / 验证 / 回滚）见 `deploy/production.md`。
