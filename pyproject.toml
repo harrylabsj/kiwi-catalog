@@ -9,7 +9,8 @@ description = "Standalone Agent Catalog service (published from shopping-cli ext
 requires-python = ">=3.11"
 # cryptography：token 加密存储（Fernet）——标准库无可逆加密，商家凭证
 # 安全存储的必要例外（docs §account）
-dependencies = ["cryptography"]
+# jsonschema：register-input 契约硬拒（CD #8，schema 落盘 + additionalProperties:false）
+dependencies = ["cryptography", "jsonschema"]
 license = {file = "LICENSE"}
 
 [project.optional-dependencies]

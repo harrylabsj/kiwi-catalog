@@ -22,11 +22,15 @@ audit, and the §6.2 claim proof.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
+
+import jsonschema
+from jsonschema import ValidationError as SchemaValidationError
 
 from kiwi_catalog.agent_catalog.serializers import (
     catalog_agent_record,
@@ -392,6 +396,44 @@ def _verification_response(
 
 # ── Handlers ───────────────────────────────────────────────────────────────
 
+# 认证/幂等字段在校验前剥离（与 listings contracts.py 的 _AUTH_FIELDS 同模式）。
+_REGISTER_AUTH_FIELDS = {
+    "owner_token",
+    "_auth_token",
+    "admin_token",
+    "idempotency_key",
+    "_idempotency_key",
+}
+
+_REGISTER_INPUT_SCHEMA: jsonschema.Draft7Validator | None = None
+
+
+def _register_input_schema() -> jsonschema.Draft7Validator:
+    """模块级惰性加载 register-input.schema.json（CD #8 schema 硬拒落盘）。"""
+    global _REGISTER_INPUT_SCHEMA
+    if _REGISTER_INPUT_SCHEMA is None:
+        schema_path = (
+            Path(__file__).resolve().parent.parent.parent / "contracts" / "register-input.schema.json"
+        )
+        with open(schema_path, encoding="utf-8") as fh:
+            _REGISTER_INPUT_SCHEMA = jsonschema.Draft7Validator(json.load(fh))
+    return _REGISTER_INPUT_SCHEMA
+
+
+def _validate_register_input(payload: dict[str, Any]) -> None:
+    """register 输入契约硬校验（additionalProperties:false）。
+
+    完成定义 #8：注册输入只能是 schema 声明的公开字段——私有经营数据
+    （成本/底价/私密库存/凭据）在 schema 层拒绝，未知字段一律 422。
+    认证/幂等字段剥离后再校验；domain 的 hostname 形态由
+    normalize_canonical_domain 负责（schema 只查存在性）。
+    """
+    candidate = {k: v for k, v in (payload or {}).items() if k not in _REGISTER_AUTH_FIELDS}
+    try:
+        _register_input_schema().validate(candidate)
+    except SchemaValidationError as exc:
+        raise ValidationError(f"register payload invalid: {exc.message}") from exc
+
 
 def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/agent-catalog/agents/register (§10.2).
@@ -401,6 +443,9 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
     bounded in-process queue.  Idempotency claim/replay is real; per-actor and
     per-domain rate limits (§17.4) are enforced before any side effect.
     """
+    # CD #8 schema 硬拒（additionalProperties:false）——未知字段/私有字段
+    # 在幂等/限流预算之前 fail-fast。
+    _validate_register_input(payload)
     canonical = agent_catalog_writes.normalize_canonical_domain(require_field(payload, "domain"))
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
@@ -737,21 +782,11 @@ def suspend_catalog_agent(
     Suspends an agent (admin-only, idempotent).  A suspended agent keeps its
     catalog row but is excluded from verification promotion; the only way
     back is an explicit admin reinstate.
+
+    治理联动（DoD #12 owned Listings → SUSPENDED）已在 VerificationService.
+    suspend 内部统一实现（CLI/队列/HTTP 共用 service，单点生效），此处不再
+    传 after_work——避免与 service 内联动双写 audit。
     """
-    def _suspend_owned_listings(conn: Any, agent_id: str) -> None:
-        """治理联动（v0.4 DoD #12 标记半边）：owned ACTIVE Listings → SUSPENDED。
-
-        与 agent suspend 同一事务原子提交；search join 排除半边在
-        listings/search.py（两件事都做，评审 P2-11 定死）。
-        """
-        from kiwi_catalog.listings.policy import suspend_owned_listings
-
-        count = suspend_owned_listings(conn, agent_id)
-        if count:
-            append_catalog_audit(
-                conn, agent_id, "admin", "listings_suspended", {"count": count}
-            )
-
     return _moderation_action(
         db_path,
         catalog_agent_id,
@@ -759,7 +794,6 @@ def suspend_catalog_agent(
         endpoint=SUSPEND_ENDPOINT,
         action="suspend",
         reason=_payload_reason(payload),
-        after_work=_suspend_owned_listings,
     )
 
 
@@ -768,10 +802,10 @@ def reinstate_catalog_agent(
 ) -> dict[str, Any]:
     """POST /v1/agent-catalog/agents/{id}/reinstate (v3.0 moderation, §10.4 P2).
 
-    Admin-only reinstate: resets a suspended agent to DISCOVERED and
-    enqueues one verification task (kind="verify") so the re-verification
-    starts immediately — the pre-suspension status is never restored
-    automatically.  The enqueued task id is returned as ``verify_task_id``.
+    Admin-only reinstate: SUSPENDED → ACTIVE，**保留** verification_level
+    with freshness（三域模型：证据未失效，级别不应丢失；折叠投影恢复后回到
+    discovery 验证路径）。The enqueued task id is returned as
+    ``verify_task_id``.
     """
     response = _moderation_action(
         db_path,
