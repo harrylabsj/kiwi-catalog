@@ -26,6 +26,7 @@ shopping-cli repo until the repos diverge intentionally.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -454,8 +455,82 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     Exception mapping mirrors the fallback handle_request (403/404/409/429/
     400) so both stacks behave identically on the wire.
     """
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
     from kiwi_catalog.api import auth as api_auth
+    from kiwi_catalog.discovery.cache import compute_etag, etag_matches
+
+    @app.middleware("http")
+    async def _parity_middleware(request: _FastAPIRequest, call_next: Any) -> Any:
+        """审查 P2：FastAPI 栈补齐 fallback 的传输/JSON 资源上限与 GET 304 语义。
+
+        - body 大小上限（413）、JSON 解析失败（400）、非对象 body（400）、
+          validate_payload 深度/节点/字符串上限（400/413）——此前 FastAPI 栈
+          无任何限制（任意大/深 body 直入内存）；
+        - 空 body 视为 {}（与 fallback ``json.loads(... or "{}")`` 一致）；
+        - GET 200 响应带 etag，显式 If-None-Match 匹配 → 304（fallback §18）。
+        """
+        if request.method in ("POST", "PUT", "PATCH"):
+            maximum = max_request_body_bytes()
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > maximum:
+                        return JSONResponse(
+                            {"ok": False, "error": "request body is too large"},
+                            status_code=413,
+                        )
+                except ValueError:
+                    pass
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > maximum:
+                    return JSONResponse(
+                        {"ok": False, "error": "request body is too large"},
+                        status_code=413,
+                    )
+                chunks.append(chunk)
+            body = b"".join(chunks) or b"{}"
+            try:
+                parsed = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return JSONResponse(
+                    {"ok": False, "error": "invalid JSON request body"}, status_code=400
+                )
+            if not isinstance(parsed, dict):
+                return JSONResponse(
+                    {"ok": False, "error": "JSON request body must be an object"},
+                    status_code=400,
+                )
+            try:
+                validate_payload(parsed)
+            except PayloadTooLargeError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
+            except ValidationError as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            # stream() 已消费——把缓存 body 塞回 receive，让 FastAPI 依赖正常解析
+            async def _receive() -> dict[str, Any]:
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request._receive = _receive  # type: ignore[attr-defined]
+            request._stream_consumed = False  # type: ignore[attr-defined]
+
+        response = await call_next(request)
+
+        # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
+        if request.method == "GET" and response.status_code == 200:
+            body = b"".join([chunk async for chunk in response.body_iterator])
+            etag = compute_etag(body)
+            headers = dict(response.headers)
+            headers["etag"] = etag
+            if_none_match = request.headers.get("if-none-match", "")
+            if if_none_match and etag_matches(if_none_match, etag):
+                return Response(status_code=304, headers=headers)
+            return Response(
+                content=body, status_code=200, headers=headers, media_type=response.media_type
+            )
+        return response
 
     def _query_params_from_request(request: _FastAPIRequest) -> dict[str, str]:
         """Mirror fallback parse_qs(keep_blank_values=True) + last-value-wins.
@@ -505,6 +580,44 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.exception_handler(ShoppingCliError)
     def _shopping_error(_request: Any, exc: ShoppingCliError) -> JSONResponse:
         return _error_response(400, exc)
+
+    # ── 审查 P2：错误形状与 fallback 对齐 ───────────────────────────────
+    # fallback 的 404/405/400/500 都是 {"ok": false, "error": ...} 信封 +
+    # 明确文案；FastAPI 默认的 {"detail": ...} / 纯文本 500 让依赖 ok/error
+    # 信封的客户端在双栈切换后解析失败。
+
+    from fastapi.exceptions import RequestValidationError
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.exception_handler(RequestValidationError)
+    def _request_validation_error(
+        _request: Any, exc: RequestValidationError
+    ) -> JSONResponse:
+        # fallback 语义：请求体/参数不符合契约 → 400 信封（FastAPI 默认 422 detail）
+        first = exc.errors()[:3]
+        return JSONResponse(
+            {"ok": False, "error": f"invalid request: {json.dumps(first)}"},
+            status_code=400,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    def _http_exception(
+        request: _FastAPIRequest, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        if exc.status_code == 404:
+            message = f"No route for {request.method} {request.url.path}"
+        elif exc.status_code == 405:
+            message = f"Method not allowed for {request.method} {request.url.path}"
+        else:
+            message = str(exc.detail)
+        return JSONResponse({"ok": False, "error": message}, status_code=exc.status_code)
+
+    @app.exception_handler(Exception)
+    def _unhandled_exception(request: Any, exc: Exception) -> JSONResponse:
+        logging.getLogger(__name__).exception("unhandled request error: %r", exc)
+        return JSONResponse(
+            {"ok": False, "error": "internal server error"}, status_code=500
+        )
 
     @app.get("/health")
     def health() -> dict[str, Any]:

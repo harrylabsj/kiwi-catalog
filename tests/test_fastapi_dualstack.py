@@ -118,6 +118,59 @@ class FastApiDualStackTest(unittest.TestCase):
             resp = client.get("/v1/listings/search")
             self.assertEqual(resp.status_code, 200, resp.text)
 
+    def test_error_shapes_match_fallback(self) -> None:
+        """审查 P2：错误信封 {ok:false,error} + 状态码与 fallback 对齐。"""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            # 未知路由 → 404 信封（fallback 文案）
+            resp = client.get("/v1/does-not-exist")
+            self.assertEqual(resp.status_code, 404, resp.text)
+            self.assertEqual(resp.json(), {"ok": False, "error": "No route for GET /v1/does-not-exist"})
+            # 方法不允许 → 405 信封
+            resp = client.delete("/v1/agents/register")
+            self.assertEqual(resp.status_code, 405, resp.text)
+            self.assertIn("Method not allowed", resp.json()["error"])
+            # 非法 JSON body → 400 信封（FastAPI 默认是 422 detail）
+            resp = client.post(
+                "/v1/agents/register",
+                content=b"{not json",
+                headers={"content-type": "application/json"},
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertEqual(resp.json(), {"ok": False, "error": "invalid JSON request body"})
+
+    def test_body_limits_match_fallback(self) -> None:
+        """审查 P2：FastAPI 栈补齐 body 大小/深度上限（此前无限制）。"""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            # 深嵌套 body → 400（validate_payload 深度上限 16；嵌套数组先被
+            # 「must be an object」拦截，与 fallback 检查顺序一致）
+            deep = '{"a":' * 20 + "1" + "}" * 20
+            resp = client.post(
+                "/v1/agents/register",
+                content=deep,
+                headers={"content-type": "application/json"},
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertIn("nesting", resp.json()["error"])
+
+    def test_get_etag_and_304_match_fallback(self) -> None:
+        """审查 P2：GET 200 带 etag；显式 If-None-Match 匹配 → 304。"""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            first = client.get("/v1/listings/search")
+            self.assertEqual(first.status_code, 200, first.text)
+            etag = first.headers.get("etag")
+            self.assertTrue(etag, "GET 响应必须带 etag header")
+            revalidated = client.get(
+                "/v1/listings/search", headers={"if-none-match": etag}
+            )
+            self.assertEqual(revalidated.status_code, 304, revalidated.text)
+            self.assertEqual(revalidated.text, "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -68,8 +69,16 @@ def decode_json(value: str | None, default: Any) -> Any:
 
 def open_connection(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 审查 P2：数据目录/文件 0700/0600（CLAUDE.md 约定落地）——SQLite 库含
+    # owner token digest / 审计事件 / 影子表，共享机器上不得被其他本地用户读取。
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     conn = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # 只读文件系统/不可写场景：权限收紧失败不阻塞连接（fail-open 于可用性，
+        # 目录 0700 已挡住大部分暴露面）
+        pass
     try:
         conn.row_factory = sqlite3.Row
         conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
