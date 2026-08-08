@@ -269,8 +269,8 @@ def cmd_agent_catalog_suspend(args: argparse.Namespace) -> None:
 def cmd_agent_catalog_reinstate(args: argparse.Namespace) -> None:
     """Reinstate a suspended catalog agent (v3.0 moderation, §10.4 P2).
 
-    Resets the agent to DISCOVERED; re-verification is not automatic — run
-    ``kiwi-catalog agent catalog verify <id>`` to promote it again.
+    SUSPENDED → ACTIVE；保留 verification_level 与 freshness（三域模型：
+    证据未失效，级别不应丢失，折叠投影恢复后回到原级别）。
     """
     catalog_agent_id = str(args.catalog_agent_id).strip()
     reason = str(getattr(args, "reason", "") or "").strip()
