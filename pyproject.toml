@@ -26,3 +26,4 @@ include = ["kiwi_catalog*"]
 
 [tool.setuptools.package-data]
 kiwi_catalog = ["py.typed"]
+"kiwi_catalog.contracts" = ["*.json"]
