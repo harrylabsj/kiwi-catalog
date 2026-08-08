@@ -26,7 +26,7 @@ merchant 要向 kiwi-catalog 注册 Agent 并发布产品 listing，需要 owner
 | --- | --- |
 | Token 模型 | **随机 token 落库**（支持签发/轮换/吊销），HMAC 派生路径保留兼容 |
 | 门户承载 | **内嵌 kiwi-catalog 进程**（`/portal/*` 路由），secret 不出进程 |
-| 域名 | 官网静态层 + 子域名 `merchant.kiwi.harrylabsj.com`（动态门户） |
+| 域名 | 官网静态层 + 子域名 `catalog.kiwi.harrylabsj.com`（动态门户 + API，2026-08-08 生产实测已指向阿里云香港节点，Caddy 反代） |
 
 ## 3. 数据模型（schema v12）
 
@@ -145,7 +145,7 @@ DDL 同时进 `db/models.py::SCHEMA`（fresh 路径）与 `db/migrations.py` v12
 ## 7. 官网（kiwi 仓库 `docs/website/merchants.html`）
 
 - 新增「申请接入」区块：三步说明（提交申请 → 审核签发 → 用 token 发布产品）+
-  FAQ（token 是什么/怎么用/遗失怎么办）+ CTA 按钮 → `https://merchant.kiwi.harrylabsj.com/portal/apply`。
+  FAQ（token 是什么/怎么用/遗失怎么办）+ CTA 按钮 → `https://catalog.kiwi.harrylabsj.com/portal/apply`。
 - 官网保持纯静态（Cloudflare Pages 放不下动态逻辑）；门户子域名 CNAME 指向
   catalog 部署主机。域名迁移照 `docs/DEPLOY-website.md` 路径执行。
 
@@ -164,12 +164,12 @@ CLI（`catalog merchant applications list/approve/reject`、`token rotate/revoke
 `status`——与 HTTP 共用 `services/merchant_tokens.py`，本地直连 SQLite 信任边界）
 + 测试（双栈全量 191）。
 
-部署接线（方案 A 已定）：`merchant.kiwi.harrylabsj.com` → Cloudflare Tunnel →
-catalog 主机 127.0.0.1:8600。完整步骤见 `deploy/cloudflare-tunnel.md`（cloudflared
-安装 / ingress 配置 / DNS 路由 / systemd 常驻 / 验证清单 / 安全边界 / 回滚）。
-**执行前提**：catalog 已部署到主机 + 项目维护者在 Cloudflare 控制台完成登录授权。
+部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
+catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
+env / 重启 / 验证 / 回滚）见 `deploy/production.md`。
 
-后续（不在本次）：邮件交付（项目无邮件设施，MVP 靠一次性展示 + 轮换兜底）。
+后续（不在本次）：邮件交付（项目无邮件设施，MVP 靠一次性展示 + 轮换兜底）；
+catalog 监听收紧为 127.0.0.1（见 production.md 安全边界）。
 
 ## 10. 测试要点
 

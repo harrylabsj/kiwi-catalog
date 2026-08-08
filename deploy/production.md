@@ -1,0 +1,85 @@
+# kiwi-catalog 生产部署与升级（阿里云香港 + Caddy）
+
+- 状态：2026-08-08 核实。线上已运行旧版（`/v1/merchants/*`、`/portal/*` 404），
+  需按本文升级到 token 分发版。
+- 生产拓扑（已核实，curl -v 实测）：
+
+```
+https://catalog.kiwi.harrylabsj.com ──> Caddy（TLS 终结，via: 1.1 Caddy）
+    └──> 127.0.0.1:8600 ──> kiwi-catalog（systemd，uvicorn）
+            db: /var/lib/kiwi-catalog/catalog.sqlite
+```
+
+- 说明：TLS 由 Caddy 反代终结（非 Cloudflare Tunnel——2026-08-08 曾规划
+  tunnel 方案，实际部署用 Caddy，本文件为准）。
+
+## 环境事实（已核实）
+
+| 项 | 值 |
+| --- | --- |
+| 服务 | `kiwi-catalog.service`（`deploy/systemd/`，`--host 0.0.0.0 --port 8600`） |
+| 数据库 | `/var/lib/kiwi-catalog/catalog.sqlite`（`/health` 实测） |
+| 反代 | Caddy（`via: 1.1 Caddy`），`catalog.kiwi.harrylabsj.com` |
+| 配置 | `/etc/kiwi-catalog/env`（EnvironmentFile） |
+| 域名 | `catalog.kiwi.harrylabsj.com`（**生产唯一入口**；门户 `/portal/*` 与 API `/v1/*` 同域） |
+
+## 升级到 token 分发版（本次）
+
+### 1. 代码同步
+
+主机 `/opt/kiwi-catalog`（systemd unit 的 WorkingDirectory）：
+git pull 或 rsync 本仓库；装依赖 `pip install -e '.[api]'`（或 `uv pip install`）。
+
+### 2. 环境变量（/etc/kiwi-catalog/env）
+
+新代码需要两个 env（**缺失即 fail-closed**，门户 admin 页与签发端点拒绝）：
+
+```sh
+KIWI_CATALOG_ADMIN_TOKEN=<强随机值>        # 审核后台/签发/轮换/吊销
+KIWI_CATALOG_OWNER_TOKEN_SECRET=<强随机值>  # 存量 HMAC 派生 fallback（兼容旧调用方）
+# 可选：KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR=5（默认 5 次/时/邮箱）
+```
+
+> 若线上已有 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 且 merchant 在用 HMAC token，
+> **不要换 secret**（换了全量失效）。新增 admin token 即可。
+
+### 3. 重启
+
+```sh
+sudo systemctl restart kiwi-catalog
+# 首次启动自动跑迁移 v12（merchant_tokens / merchant_applications /
+# merchant_application_limits，幂等 create-if-not-exists + user_version 门，
+# 存量数据不破坏）
+journalctl -u kiwi-catalog -n 20 --no-pager   # 确认无迁移错误
+```
+
+### 4. 验证清单（升级后）
+
+```text
+[ ] curl -s https://catalog.kiwi.harrylabsj.com/health                → ok
+[ ] curl -s -o /dev/null -w '%{http_code}' \
+      https://catalog.kiwi.harrylabsj.com/portal/apply                → 200 + text/html + no-store
+[ ] curl -s https://catalog.kiwi.harrylabsj.com/v1/merchants/self     → 403（无 token，fail-closed 正常）
+[ ] 门户申请 → 提交成功返回 application_id
+[ ] admin 登录审核 → 批准签发 → 明文 token 一次性展示
+[ ] 用 token 调 /v1/agents/register + /v1/listings/publish → 200
+[ ] 官网 CTA（catalog.kiwi.harrylabsj.com/portal/apply）可点通
+```
+
+## 安全边界（升级后成立）
+
+- catalog 监听 0.0.0.0:8600（systemd unit 现状）——如主机无防火墙限制，
+  建议收紧为 `--host 127.0.0.1`（仅经 Caddy 进入；Caddy 同机反代不需要
+  跨主机监听）。改动：`systemctl edit kiwi-catalog` 覆盖 ExecStart 后重启。
+- admin token fail-closed：未配置即拒绝（不区分未配置与无效，防枚举探测）；
+- 明文 token 只在 approve/rotate 响应出现一次，门户页 no-store；
+- 申请面按邮箱限流。
+
+## 回滚
+
+```sh
+git checkout <旧 tag> && sudo systemctl restart kiwi-catalog
+# schema v12 表对旧代码透明（旧代码不读新表）；已签发的 merchant_tokens
+# 在旧版 HMAC 路径下不生效（随机 token 需新代码校验）——回滚后商家需等
+# 再次升级，勿在回滚期间宣称门户可用。
+```
