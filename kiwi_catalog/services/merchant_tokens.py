@@ -109,8 +109,17 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
     agent_name = str(row["agent_name"])
     merchant_id = new_platform_merchant_id(agent_name)
     now = now_iso()
-    # 账户基本信息（v16）：商家名称优先用账户已填值
+    # 账户基本信息（v16）：商家名称优先用账户已填值。
+    # 公开路径提交的工单 account_id=0——按 contact_email 兜底关联账号
+    #（邮箱唯一；找不到则保持匿名工单，token 仍签发，只是不关联账号）。
     account_id = int(row["account_id"] or 0)
+    if not account_id:
+        linked = conn.execute(
+            "select account_id, merchant_name from merchant_accounts where email = ?",
+            (str(row["contact_email"] or ""),),
+        ).fetchone()
+        if linked is not None:
+            account_id = int(linked["account_id"])
     display_name = agent_name
     if account_id:
         account_row = conn.execute(

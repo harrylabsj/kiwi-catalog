@@ -128,6 +128,16 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("Secure", set_cookie)
         return set_cookie.split(";")[0].split("=", 1)[1], code
 
+    def _approve_application_by_id(self, app_id: int) -> dict:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            f"/v1/merchants/applications/{app_id}/approve",
+            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        return payload
+
     def _request_token(self, session: str) -> None:
         """用商家信息申请令牌（建工单）。"""
         status, payload, _ = _call_http(
@@ -407,6 +417,33 @@ class AccountsApiTest(unittest.TestCase):
                 "select account_id from merchant_accounts where email = 'ops@acme.example')"
             ).fetchone()
         self.assertEqual(row["phone"], "+86 139")
+
+    # ── 公开路径申请 → 审批 → 账号关联 ────────────────────────────────────
+
+    def test_public_apply_links_account_on_approve(self) -> None:
+        """公开提交的工单（account_id=0）审批后按邮箱兜底关联账号。"""
+        session, _ = self._register()
+        # 公开路径提交（不带账号信息）
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/merchants/applications",
+            json.dumps(
+                {"domain": "public.example", "agent_name": "Public Shop",
+                 "contact_email": "ops@acme.example"}
+            ).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        app_id = payload["application"]["application_id"]
+        self._approve_application_by_id(app_id)
+        # 账号 merchant_id 回填
+        status, payload, _ = _call_http(
+            self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["merchant_id"].startswith("mkt_"))
+        self.assertIsNotNone(payload["token"])
+        self.assertEqual(payload["token"]["status"], "active")
 
     # ── 登出 ───────────────────────────────────────────────────────────────
 
