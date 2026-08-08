@@ -276,7 +276,7 @@ def _require_catalog_write_auth(conn: Any, agent: dict[str, Any], payload: dict[
     merchant_id = str(agent.get("merchant_id") or "").strip()
     if merchant_id:
         try:
-            api_auth.require_owner_token(payload, merchant_id)
+            api_auth.require_merchant_token(payload, merchant_id, conn)
             return f"merchant:{merchant_id}"
         except AuthError:
             pass
@@ -298,7 +298,7 @@ def _register_actor(conn: Any, payload: dict[str, Any], merchant_id: str) -> str
     except AuthError:
         pass
     if merchant_id:
-        api_auth.require_owner_token(payload, merchant_id)
+        api_auth.require_merchant_token(payload, merchant_id, conn)
         return f"merchant:{merchant_id}"
     return "cli"
 
@@ -322,7 +322,7 @@ def _claim_identity(conn: Any, agent: dict[str, Any], payload: dict[str, Any]) -
     merchant_id = str(payload.get("merchant_id") or agent.get("merchant_id") or "").strip()
     if not merchant_id:
         raise PermissionDenied("merchant_id is required to claim a catalog agent")
-    api_auth.require_owner_token(payload, merchant_id)
+    api_auth.require_merchant_token(payload, merchant_id, conn)
     return merchant_id, f"merchant:{merchant_id}"
 
 
@@ -422,7 +422,7 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
             ):
                 bound = str(existing_row.get("merchant_id") or "").strip()
                 if bound:
-                    api_auth.require_owner_token(payload, bound)
+                    api_auth.require_merchant_token(payload, bound, conn)
                 else:
                     api_auth.require_admin_token(payload)
             result = agent_catalog_writes.register_catalog_agent(

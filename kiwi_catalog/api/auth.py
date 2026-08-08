@@ -32,10 +32,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import sqlite3
 from typing import Any
 
 from kiwi_catalog.core.errors import AuthError
-from kiwi_catalog.core.tokens import token_matches
+from kiwi_catalog.core.tokens import token_digest, token_matches
 
 _OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 _ADMIN_TOKEN_ENV = "KIWI_CATALOG_ADMIN_TOKEN"
@@ -86,7 +87,7 @@ def _owner_secret() -> str:
 def owner_token(merchant_id: str) -> str:
     """Derive the catalog-owner token for *merchant_id* (HMAC-SHA256)."""
     secret = _owner_secret()
-    material = f"kiwi-catalog-owner:{merchant_id}".encode("utf-8")
+    material = f"kiwi-catalog-owner:{merchant_id}".encode()
     return hmac.new(secret.encode("utf-8"), material, hashlib.sha256).hexdigest()
 
 
@@ -110,3 +111,29 @@ def require_owner_token(payload: dict[str, Any], merchant_id: str) -> None:
         raise AuthError("invalid owner token") from None
     if not token_matches(presented, expected):
         raise AuthError("invalid owner token")
+
+
+def require_merchant_token(
+    payload: dict[str, Any], merchant_id: str, conn: sqlite3.Connection | None = None
+) -> None:
+    """Dual-path merchant credential check (docs §5).
+
+    - 随机 token 落库路径（v12）：merchant_tokens 表 active 行，SHA-256
+      恒时比较——支持签发/轮换/吊销；
+    - 未命中 fallback HMAC 派生路径（require_owner_token）——存量调用方/
+      CLI/测试兼容。
+
+    *conn* 缺省时只走 HMAC fallback（无 DB 的调用点行为不变）。
+    """
+    presented = str((payload or {}).get("owner_token") or "")
+    if presented and conn is not None:
+        row = conn.execute(
+            "select token_hash, status from merchant_tokens where merchant_id = ?",
+            (merchant_id,),
+        ).fetchone()
+        if row is not None and str(row["status"]) == "active":
+            digest = token_digest(presented)
+            if token_matches(digest, str(row["token_hash"])):
+                return
+    # 无 active 随机 token（或未命中）→ HMAC 派生路径（含未配置 fail-closed）
+    require_owner_token(payload, merchant_id)

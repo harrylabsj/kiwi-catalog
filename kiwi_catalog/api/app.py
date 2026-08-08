@@ -34,11 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog import VERSION
-from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
+from kiwi_catalog.api.handlers import merchants as merchants_handlers
+from kiwi_catalog.api.handlers import portal as portal_handlers
+from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
@@ -228,6 +230,73 @@ RouteEntry(
             db_path, listing_id, payload
         ),
     ),
+# ── /v1/merchants（token 分发，docs/kiwi-catalog-token-portal-design-v0.1 §4）──
+# 顺序约束：/v1/merchants/applications 先于 /v1/merchants/{merchant_id}/rotate
+#（_match_path 顺序匹配，全路径正则无参数冲突；method 也不同）。
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/applications",
+        lambda db_path, payload, query, **kw: _v1_submit_application(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchants/applications",
+        lambda db_path, payload, query, **kw: _v1_list_applications(db_path, payload, query),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/applications/{application_id}/approve",
+        lambda db_path, payload, query, application_id: _v1_approve_application(
+            db_path, application_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/applications/{application_id}/reject",
+        lambda db_path, payload, query, application_id: _v1_reject_application(
+            db_path, application_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/{merchant_id}/rotate",
+        lambda db_path, payload, query, merchant_id: _v1_rotate_token(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/{merchant_id}/revoke",
+        lambda db_path, payload, query, merchant_id: _v1_revoke_token(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchants/self",
+        lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
+    ),
+# ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
+RouteEntry(
+        {"GET"},
+        "/portal",
+        lambda db_path, payload, query, **kw: _portal_home(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/apply",
+        lambda db_path, payload, query, **kw: _portal_apply(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/admin",
+        lambda db_path, payload, query, **kw: _portal_admin(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/status",
+        lambda db_path, payload, query, **kw: _portal_status(),
+    ),
 )
 
 def _match_path(template: str, path: str) -> dict[str, str] | None:
@@ -329,6 +398,56 @@ def _v1_search_listings(db_path, payload, query):
     return listings_handlers.v1_search_listings(db_path, query or {})
 
 
+# ── /v1/merchants wrapper（token 分发）────────────────────────────────────
+
+
+def _v1_submit_application(db_path, payload):
+    return merchants_handlers.submit_application(db_path, payload)
+
+
+def _v1_list_applications(db_path, payload, query):
+    return merchants_handlers.list_applications(db_path, payload, query or {})
+
+
+def _v1_approve_application(db_path, application_id, payload):
+    return merchants_handlers.approve_application(db_path, application_id, payload)
+
+
+def _v1_reject_application(db_path, application_id, payload):
+    return merchants_handlers.reject_application(db_path, application_id, payload)
+
+
+def _v1_rotate_token(db_path, merchant_id, payload):
+    return merchants_handlers.rotate_token(db_path, merchant_id, payload)
+
+
+def _v1_revoke_token(db_path, merchant_id, payload):
+    return merchants_handlers.revoke_token(db_path, merchant_id, payload)
+
+
+def _v1_merchant_self(db_path, payload, query):
+    return merchants_handlers.self_status(db_path, payload, query or {})
+
+
+# ── /portal wrapper（门户页面）────────────────────────────────────────────
+
+
+def _portal_home():
+    return portal_handlers.portal_home()
+
+
+def _portal_apply():
+    return portal_handlers.portal_apply()
+
+
+def _portal_admin():
+    return portal_handlers.portal_admin()
+
+
+def _portal_status():
+    return portal_handlers.portal_status()
+
+
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):
     return listings_handlers.v1_get_listing(db_path, listing_id)
 
@@ -411,7 +530,7 @@ def handle_request(
         return 400, {"ok": False, "error": str(exc)}
     except ShoppingCliError as exc:
         return 400, {"ok": False, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001 —— 500 必须带日志（此前完全静默，DB 类
+    except Exception as exc:
         # 错误（如 schema 漂移/遗留表引用）无法定位。
         logging.getLogger(__name__).exception("unhandled request error: %r", exc)
         return 500, {"ok": False, "error": "internal server error"}
@@ -456,6 +575,7 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     400) so both stacks behave identically on the wire.
     """
     from fastapi.responses import JSONResponse, Response
+
     from kiwi_catalog.api import auth as api_auth
     from kiwi_catalog.discovery.cache import compute_etag, etag_matches
 
@@ -595,8 +715,19 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> JSONResponse:
         # fallback 语义：请求体/参数不符合契约 → 400 信封（FastAPI 默认 422 detail）
         first = exc.errors()[:3]
+        # 非 JSON body（如 form 编码）时 FastAPI 的 input 字段是 bytes——
+        # 不 default=str 会在错误信封序列化时二次抛错变 500（冒烟实测）
         return JSONResponse(
-            {"ok": False, "error": f"invalid request: {json.dumps(first)}"},
+            {
+                "ok": False,
+                "error": "invalid request: "
+                + json.dumps(
+                    first,
+                    default=lambda o: o.decode("utf-8", "replace")
+                    if isinstance(o, bytes)
+                    else str(o),
+                ),
+            },
             status_code=400,
         )
 
@@ -817,6 +948,99 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _v1_reinstate_listing(
             db_path, listing_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    # ── /v1/merchants（token 分发，docs §4；门户 HTML 页 fallback-only）────
+
+    @app.post("/v1/merchants/applications")
+    def v1_submit_application(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_submit_application(
+            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.get("/v1/merchants/applications")
+    def v1_list_applications(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_list_applications(db_path, {}, _query_params_from_request(request))
+
+    @app.post("/v1/merchants/applications/{application_id}/approve")
+    def v1_approve_application(
+        application_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_approve_application(
+            db_path, application_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/merchants/applications/{application_id}/reject")
+    def v1_reject_application(
+        application_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_reject_application(
+            db_path, application_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/merchants/{merchant_id}/rotate")
+    def v1_rotate_token(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_rotate_token(
+            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/merchants/{merchant_id}/revoke")
+    def v1_revoke_token(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_revoke_token(
+            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.get("/v1/merchants/self")
+    def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_merchant_self(db_path, {}, _query_params_from_request(request))
+
+    # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
+    from fastapi.responses import HTMLResponse
+
+    _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
+
+    @app.get("/portal")
+    def portal_home_page() -> HTMLResponse:
+        return HTMLResponse(
+            portal_handlers.portal_home()["__html__"], headers=_PORTAL_HTML_HEADERS
+        )
+
+    @app.get("/portal/apply")
+    def portal_apply_page() -> HTMLResponse:
+        return HTMLResponse(
+            portal_handlers.portal_apply()["__html__"], headers=_PORTAL_HTML_HEADERS
+        )
+
+    @app.get("/portal/admin")
+    def portal_admin_page() -> HTMLResponse:
+        return HTMLResponse(
+            portal_handlers.portal_admin()["__html__"], headers=_PORTAL_HTML_HEADERS
+        )
+
+    @app.get("/portal/status")
+    def portal_status_page() -> HTMLResponse:
+        return HTMLResponse(
+            portal_handlers.portal_status()["__html__"], headers=_PORTAL_HTML_HEADERS
         )
 
 

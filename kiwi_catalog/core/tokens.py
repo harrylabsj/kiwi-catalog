@@ -23,7 +23,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 import string
+
+MERCHANT_TOKEN_PREFIX = "mkt_"
+
+
+def generate_merchant_token() -> str:
+    """Random merchant owner token (docs/kiwi-catalog-token-portal-design-v0.1 §3).
+
+    ``mkt_`` + 32 随机字节 urlsafe base64（≈43 字符）。明文只在签发/轮换时
+    返回一次，库中只存 SHA-256 摘要（token_digest）。
+    """
+    return MERCHANT_TOKEN_PREFIX + secrets.token_urlsafe(32)
 
 
 def token_digest(token: str) -> str:
