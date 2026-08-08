@@ -1131,6 +1131,14 @@ class VerificationQueueShutdownError(ShoppingCliError):
     """Raised when enqueueing after :meth:`VerificationQueue.shutdown`."""
 
 
+class VerificationQueueLedgerError(ShoppingCliError):
+    """Raised when the persistent ledger write fails at enqueue time.
+
+    审查 P2：enqueue 的 ledger 写失败必须抛类型化错误（而不是裸 sqlite3
+    异常冒泡）——调用方据此知道任务未入队、可安全重试。
+    """
+
+
 class VerificationQueue:
     """Bounded in-process verification queue (§25 Phase 2, v3.0-P4).
 
@@ -1322,6 +1330,19 @@ class VerificationQueue:
                     task_id,
                 ),
             )
+            # 审查 P2：惰性清理终态行（键空间此前只增不删；finished_at 是
+            # epoch REAL，与 _now() 同单位）
+            self._finish_count = getattr(self, "_finish_count", 0) + 1
+            if self._finish_count % 256 == 0:
+                try:
+                    self._db_conn.execute(
+                        "delete from verification_queue_tasks"
+                        " where status in ('completed','failed','timeout')"
+                        " and finished_at < ?",
+                        (self._now() - 7 * 86400,),
+                    )
+                except sqlite3.Error:
+                    pass  # 清理失败不影响任务结果写
             self._db_conn.commit()
 
     def _ledger_result(self, task_id: str) -> VerificationTaskResult | None:
@@ -1384,7 +1405,17 @@ class VerificationQueue:
         )
         with self._results_cv:
             self._tasks[task_id] = task
-        self._persist_insert(task)
+        try:
+            self._persist_insert(task)
+        except Exception as exc:
+            # 审查 P2：ledger 写失败必须回滚内存条目——否则 _tasks 留下无人
+            # 消费的孤儿任务，wait(task_id) 永久挂死。抛类型化错误，调用方
+            # 可安全重试（register 幂等键机制保证不产生重复副作用）。
+            with self._results_cv:
+                self._tasks.pop(task_id, None)
+            raise VerificationQueueLedgerError(
+                f"failed to persist verification task {task_id}: {exc}"
+            ) from exc
         try:
             self._pending.put_nowait(task)
         except queue.Full as exc:

@@ -278,6 +278,11 @@ create index if not exists idx_commerce_listings_updated
 
     """,
     """
+create index if not exists idx_commerce_listings_fresh_until
+        on commerce_listings(fresh_until) where listing_freshness_state = 'FRESH'
+
+    """,
+    """
 create unique index if not exists idx_commerce_listings_product_ref_unique
         on commerce_listings(owner_agent_id, listing_type, source_product_ref)
         where source_product_ref is not null

@@ -33,6 +33,7 @@ actually serve the standard well-known locations over HTTPS.
 from __future__ import annotations
 
 import re
+import sqlite3
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
@@ -171,20 +172,25 @@ def register_catalog_agent(
         raise ConflictError(f"domain {canonical} is already registered")
 
     catalog_agent_id = str(existing["catalog_agent_id"]) if existing else new_catalog_agent_id()
-    upsert_catalog_agent(
-        conn,
-        catalog_agent_id=catalog_agent_id,
-        merchant_id=merchant_id,
-        hosted_runtime_agent_id="",
-        display_name=display_name or canonical,
-        provider_name="",
-        canonical_domain=canonical,
-        agent_type="commerce",
-        source_type="self_registered",
-        lifecycle_status="active",
-        verification_status="discovered",
-        hosting_mode=normalize_hosting_mode(hosting_mode) or "direct",
-    )
+    try:
+        upsert_catalog_agent(
+            conn,
+            catalog_agent_id=catalog_agent_id,
+            merchant_id=merchant_id,
+            hosted_runtime_agent_id="",
+            display_name=display_name or canonical,
+            provider_name="",
+            canonical_domain=canonical,
+            agent_type="commerce",
+            source_type="self_registered",
+            lifecycle_status="active",
+            verification_status="discovered",
+            hosting_mode=normalize_hosting_mode(hosting_mode) or "direct",
+        )
+    except sqlite3.IntegrityError as exc:
+        # 审查 P2：check-then-act 竞态窗口（并发同域注册）由 migration v11
+        # 的部分唯一索引兜底——映射为 ConflictError 而非未类型化 500。
+        raise ConflictError(f"domain {canonical} is already registered (concurrent)") from exc
     # merchants 影子行自维护（D4 修复）：搜索结果的 merchant 投影依赖它；
     # 无影子行时 projection 为空串、schema 校验失败（minLength 1）。
     if merchant_id:
@@ -319,7 +325,15 @@ def claim_catalog_agent(
     if current_merchant and current_merchant != merchant_id:
         raise ConflictError(f"catalog agent {catalog_agent_id} is already claimed by merchant {current_merchant}")
 
-    set_catalog_agent_merchant(conn, catalog_agent_id, merchant_id)
+    try:
+        set_catalog_agent_merchant(conn, catalog_agent_id, merchant_id)
+    except sqlite3.IntegrityError as exc:
+        # 审查 P2：claim 的「一商家一 agent」是读-改-写竞态（两个 merchant
+        # 并发认领同一 agent / 同 merchant 并发认领两个 agent），由迁移 v7
+        # 部分唯一索引兜底——映射为 ConflictError 而非未类型化 500。
+        raise ConflictError(
+            f"merchant {merchant_id} already has a catalog agent (concurrent claim)"
+        ) from exc
     append_catalog_audit(
         conn,
         catalog_agent_id,

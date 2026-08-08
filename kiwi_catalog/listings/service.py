@@ -137,19 +137,41 @@ def publish_listing(
     }
 
     if existing is None:
-        row = repo.insert_listing(
-            conn,
-            listing_id=new_listing_id(),
-            listing_type=listing_type,
-            owner_agent_id=owner_agent_id,
-            merchant_id=merchant_id,
-            listing_digest=digest,
-            fresh_until=fresh_until,
-            created_at=timestamp,
-            updated_at=timestamp,
-            **content_fields,
-        )
         created = True
+        try:
+            row = repo.insert_listing(
+                conn,
+                listing_id=new_listing_id(),
+                listing_type=listing_type,
+                owner_agent_id=owner_agent_id,
+                merchant_id=merchant_id,
+                listing_digest=digest,
+                fresh_until=fresh_until,
+                created_at=timestamp,
+                updated_at=timestamp,
+                **content_fields,
+            )
+        except sqlite3.IntegrityError:
+            # 审查 P2：check-then-act 竞态窗口（两个连接同时读到「不存在」，
+            # 后到者撞部分唯一索引）——重读一次走 update 半边，干净的行级
+            # upsert 而非 500。
+            raced = (
+                repo.get_listing_by_upsert_key(conn, listing_type, owner_agent_id, str(upsert_key))
+                if upsert_key
+                else None
+            )
+            if raced is None:
+                raise
+            existing = raced
+            created = False
+            row = repo.update_listing(
+                conn,
+                str(existing["listing_id"]),
+                updated_at=timestamp,
+                fresh_until=fresh_until,
+                listing_digest=digest,
+                **content_fields,
+            )
     else:
         row = repo.update_listing(
             conn,

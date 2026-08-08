@@ -30,10 +30,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from kiwi_catalog.core.errors import RateLimitError
+
+# 审查 P2：过期窗口行惰性清理频率与保留期。window_start 是 ISO 文本，
+# 字符串比较即时间序；表键空间 = 唯一 actor/domain × 保留期内窗口数。
+_RATE_LIMIT_RETENTION_DAYS = 7
+_RATE_LIMIT_PRUNE_EVERY = 128
 
 
 class RateLimitBackend(Protocol):
@@ -63,8 +69,13 @@ class SQLiteRateLimitBackend:
         self._conn = conn
         self._table = table
         self._key_column = key_column
+        self._consume_count = 0
 
     def consume(self, *, key: str, window_start: str, limit: int) -> bool:
+        # 审查 P2：惰性清理——每 N 次消费顺带删过期窗口行（键空间此前只增不删）
+        self._consume_count += 1
+        if self._consume_count % _RATE_LIMIT_PRUNE_EVERY == 0:
+            self._prune_expired_windows()
         cursor = self._conn.execute(
             f"""
             insert into {self._table}({self._key_column}, window_start, request_count, updated_at)
@@ -77,6 +88,16 @@ class SQLiteRateLimitBackend:
             (key, window_start, datetime.now().isoformat(), limit),
         )
         return cursor.rowcount == 1
+
+    def _prune_expired_windows(self) -> None:
+        cutoff = (datetime.now() - timedelta(days=_RATE_LIMIT_RETENTION_DAYS)).isoformat()
+        try:
+            self._conn.execute(
+                f"delete from {self._table} where window_start < ?", (cutoff,)
+            )
+        except sqlite3.Error:
+            # 清理失败不影响限流主路径（下一次消费再试）
+            pass
 
 
 def fixed_window_start(current: datetime, window_seconds: int) -> str:

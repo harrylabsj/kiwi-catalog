@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 @dataclass(frozen=True)
@@ -268,7 +268,24 @@ def migration_007_merchant_single_agent(conn: sqlite3.Connection) -> None:
     弱引用 schema 下 merchant_id 是普通列——本索引从数据层兜底
     「一个商家只能有一个 catalog agent」，服务层另有显式校验
     （ConflictError 而非 IntegrityError）。
+
+    审查 P2：建索引前检测历史重复绑定——旧库若已存在重复，直接建索引会
+    硬失败让整条迁移链回滚、服务无法启动且无任何诊断；改为 fail-closed
+    给出数据清单。
     """
+    duplicates = conn.execute(
+        "select merchant_id, count(*) as n, group_concat(catalog_agent_id, ',') as ids"
+        " from catalog_agents where merchant_id != ''"
+        " group by merchant_id having count(*) > 1"
+    ).fetchall()
+    if duplicates:
+        detail = "; ".join(
+            f"{row['merchant_id']}(n={row['n']}: {row['ids']})" for row in duplicates
+        )
+        raise RuntimeError(
+            "cannot create merchant unique index — duplicate merchant bindings exist: "
+            + detail
+        )
     conn.execute(
         "create unique index if not exists idx_catalog_agents_merchant_unique"
         " on catalog_agents(merchant_id) where merchant_id != ''"
@@ -299,6 +316,9 @@ def migration_008_three_state_domains(conn: sqlite3.Connection) -> None:
     回填：legacy 的 stale/unreachable 归 freshness，suspended/rejected 归
     administrative，阶梯值归 verification_level；折叠结果与旧值一致。
     回填在 migration 运行窗口内是安全的（user_version 门保证每库只跑一次）。
+
+    审查 P2：回填加 WHERE 守卫——只回填仍持默认值（未被中间版本写入）的行；
+    中间版本已写入真实三域值的行不得被 legacy 推导值覆盖（数据丢失不可恢复）。
     """
     new_columns: list[tuple[str, str]] = [
         (
@@ -336,6 +356,9 @@ def migration_008_three_state_domains(conn: sqlite3.Connection) -> None:
             when verification_status = 'suspended' then 'suspended'
             when verification_status = 'rejected' then 'rejected'
             else 'active' end
+        where verification_level = 'discovered'
+          and freshness_state = 'fresh'
+          and administrative_state = 'active'
         """
     )
 
@@ -446,6 +469,40 @@ _COMMERCE_LISTINGS_DDL = [
 ]
 
 
+def migration_011_search_indexes_and_domain_unique(conn: sqlite3.Connection) -> None:
+    """审查 P2：分页/翻转索引 + 一域一 agent 数据层兜底。
+
+    - idx_commerce_listings_fresh_until（partial，FRESH 行）：STALE 惰性翻转
+      （每次读/搜索执行 ``fresh_until < now AND state='FRESH'`` 的 UPDATE）
+      此前全表扫描 + WAL 写放大，匿名读洪泛 = 写锁竞争放大器；
+    - idx_catalog_agents_canonical_domain_unique（partial，非空域）：
+      canonical_domain 并发注册重复行的数据层兜底（服务层 check-then-act
+      有竞态窗口，曾产生永久重复行）。建索引前检测历史重复——fail-closed
+      给出数据清单而非静默失败（v7 merchant 唯一索引的教训）。
+    """
+    conn.execute(
+        "create index if not exists idx_commerce_listings_fresh_until"
+        " on commerce_listings(fresh_until) where listing_freshness_state = 'FRESH'"
+    )
+    duplicates = conn.execute(
+        "select canonical_domain, count(*) as n,"
+        " group_concat(catalog_agent_id, ',') as ids"
+        " from catalog_agents where canonical_domain != ''"
+        " group by canonical_domain having count(*) > 1"
+    ).fetchall()
+    if duplicates:
+        detail = "; ".join(
+            f"{row['canonical_domain']}(n={row['n']}: {row['ids']})" for row in duplicates
+        )
+        raise RuntimeError(
+            "cannot create canonical_domain unique index — duplicate domains exist: " + detail
+        )
+    conn.execute(
+        "create unique index if not exists idx_catalog_agents_canonical_domain_unique"
+        " on catalog_agents(canonical_domain) where canonical_domain != ''"
+    )
+
+
 def migration_010_commerce_listings(conn: sqlite3.Connection) -> None:
     """Listing 域（产品文档 kiwi-catalog v0.4；升级计划 §3）。
 
@@ -468,6 +525,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "three_state_domains", migration_008_three_state_domains),
     Migration(9, "shadow_tables", migration_009_shadow_tables),
     Migration(10, "commerce_listings", migration_010_commerce_listings),
+    Migration(11, "search_indexes_and_domain_unique", migration_011_search_indexes_and_domain_unique),
 )
 
 

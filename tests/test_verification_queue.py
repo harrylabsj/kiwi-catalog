@@ -157,6 +157,27 @@ class VerificationQueueRunawayTest(unittest.TestCase):
         self.assertEqual(second.verification_status, "profile_valid")
         q.shutdown(wait=False)
 
+    def test_enqueue_ledger_failure_leaves_no_orphan_task(self) -> None:
+        """审查 P2：_persist_insert 失败 → 抛类型化 VerificationQueueLedgerError
+        且内存 _tasks 回滚——wait() 不得永久挂死、无孤儿条目。"""
+        from kiwi_catalog.services.agent_verification import (
+            VerificationQueueLedgerError,
+        )
+
+        q = _make_queue(self.db, lambda: _StubService(), timeout=1.0)
+
+        def broken_insert(task):
+            raise sqlite3.OperationalError("database is locked (simulated)")
+
+        with mock.patch.object(q, "_persist_insert", side_effect=broken_insert):
+            with self.assertRaises(VerificationQueueLedgerError):
+                q.enqueue("cagt_orphan")
+        self.assertEqual(len(q._tasks), 0, "失败后不得遗留内存孤儿条目")
+        # 恢复后正常入队（无残留状态污染）
+        ok = q.enqueue("cagt_ok", wait=True, timeout=2.0)
+        self.assertEqual(ok.status, "completed")
+        q.shutdown(wait=False)
+
     def test_worker_survives_unexpected_error_and_continues(self) -> None:
         """单任务意外异常不得让 worker 循环退出。"""
         calls = {"n": 0}
