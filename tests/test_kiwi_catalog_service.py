@@ -116,6 +116,43 @@ class KiwiCatalogServiceTest(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(len(body["results"]), 1)
 
+    def test_register_rejects_unknown_fields_schema_hard_rejection(self) -> None:
+        # CD #8：register-input.schema.json additionalProperties:false ——
+        # 私有经营数据（floor_price / cost / 私密库存）与未知字段在 schema
+        # 层拒绝（422），即使带了合法 domain。
+        status, body = _request(
+            self.app, "POST", "/v1/agent-catalog/agents/register",
+            {
+                "domain": "merchant.example",
+                "idempotency_key": "reg-private-1",
+                "floor_price": {"currency": "CNY", "amount_minor": 100},
+            },
+        )
+        # 项目约定 ValidationError → 400（双栈一致；422 是 FastAPI 默认形状）
+        self.assertEqual(status, 400, body)
+        self.assertIn("register payload invalid", body.get("error", ""))
+
+        status, body = _request(
+            self.app, "POST", "/v1/agent-catalog/agents/register",
+            {"domain": "merchant.example", "idempotency_key": "reg-unknown-1", "bogus_field": "x"},
+        )
+        self.assertEqual(status, 400, body)
+
+        # 认证/幂等字段剥离后合法注册不受影响
+        status, body = _request(
+            self.app, "POST", "/v1/agent-catalog/agents/register",
+            {
+                "domain": "merchant.example",
+                "idempotency_key": "reg-legit-1",
+                "owner_token": "whatever-token",
+                "display_name": "Acme",
+                "hosting_mode": "direct",
+                "capabilities": ["com.example.shopping.negotiation"],
+            },
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["catalog_agent"]["catalog_agent_id"])
+
     def test_marketplace_routes_are_cut(self) -> None:
         for path in ("/merchants", "/products", "/negotiation/pending-messages", "/conversations"):
             status, body = _request(self.app, "GET", path)

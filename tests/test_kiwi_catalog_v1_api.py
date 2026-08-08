@@ -134,7 +134,8 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
             ).encode(),
         )
         self.assertEqual(status, 400)
-        self.assertIn("handoff_destination_types", str(payload.get("error", "")))
+        # schema 硬拒（register-input.schema.json 词表校验）——非法词表值被拒
+        self.assertIn("supports_external_checkout", str(payload.get("error", "")))
 
     def test_search_filters_by_three_domains_and_handoff(self) -> None:
         from kiwi_catalog.api.handlers import agent_catalog as handlers_mod

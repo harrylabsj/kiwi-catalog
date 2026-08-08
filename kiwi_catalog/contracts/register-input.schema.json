@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "kiwi-catalog register input",
+  "description": "POST /v1/agent-catalog/agents/register（与 /v1/agents/register 共用写路径）的输入契约（完成定义 #8：Merchant private data 不进入 kiwi-catalog）。additionalProperties:false 硬拒未知字段——注册输入只能是本 schema 声明的公开字段，私有经营数据（成本/底价/私密库存/凭据）在 schema 层拒绝。认证/幂等字段（owner_token / _auth_token / admin_token / idempotency_key / _idempotency_key）在 schema 校验前剥离。domain 为 bare hostname（merchant.example），hostname 形态由 normalize_canonical_domain 校验；hosting_mode 允许 alias（direct_only/hosted_only 归一化）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["domain"],
+  "properties": {
+    "domain": { "type": "string", "minLength": 1 },
+    "agent_card_url": { "type": "string", "minLength": 1 },
+    "ucp_profile_url": { "type": "string", "minLength": 1 },
+    "merchant_id": { "type": "string", "minLength": 1 },
+    "display_name": { "type": "string", "minLength": 1 },
+    "hosting_mode": {
+      "enum": ["direct", "hosted", "hybrid", "unknown", "direct_only", "hosted_only"]
+    },
+    "handoff_destination_types": {
+      "description": "KTH destination_type 精确词表（单一来源，禁止 supports_* 平行词表）",
+      "type": "array",
+      "items": {
+        "enum": [
+          "ucp_checkout",
+          "ucp_order",
+          "external_checkout_url",
+          "merchant_checkout_session",
+          "platform_deep_link",
+          "buyer_erp_request",
+          "procurement_request",
+          "purchase_order_draft",
+          "quote_document",
+          "merchant_contact",
+          "sales_handoff"
+        ]
+      }
+    },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["skill_id", "name"],
+        "properties": {
+          "skill_id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}
