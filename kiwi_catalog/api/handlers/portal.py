@@ -202,7 +202,7 @@ _NAV = """
   <a class="nav-logo" href="/portal">Kiwi</a>
   <div class="nav-links">
     <a href="/portal" class="active">Merchant Portal</a>
-    <a href="/portal/status">状态自查</a>
+    <a href="/portal/status">令牌</a>
   </div>
 </div></nav>
 """
@@ -370,40 +370,60 @@ document.getElementById('list').addEventListener('click', e => {
 
 
 def portal_status() -> dict[str, Any]:
+    """"令牌"页（登录态）：显示我的令牌——只读展示 + 复制，不可修改。
+
+    登录即身份（无需输入令牌）；未登录进入登录流程。令牌如需更换，
+    联系运营轮换（运营后台/CLI 操作）。
+    """
     body = (
         _NAV
         + """
-<section class="section"><div class="section-inner">
-  <div class="kicker">Status</div>
-  <h2>状态自查</h2>
-  <p class="lead">输入你的商家令牌，查看名下 Agent 与产品状态。</p>
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">令牌</div>
+  <h2>令牌</h2>
+  <p class="lead">你的商家令牌。只读展示，不能修改；如需更换请联系运营轮换。</p>
   <div class="card form-card">
-    <label for="owner_token">你的令牌</label>
-    <input id="owner_token" type="password" placeholder="mkt_…" autocomplete="off">
-    <button class="btn-form" id="check">查询</button>
+    <div id="no_token" style="display:none">
+      <p class="muted">还没有令牌。<a href="/portal">去申请令牌</a></p>
+    </div>
+    <div id="token_view" style="display:none">
+      <p class="small">商家令牌（mkt_…）</p>
+      <div class="token-box" id="my_token"></div>
+      <button class="btn-mini" id="copy_token">复制令牌</button>
+      <div id="token_meta" style="margin-top:12px"></div>
+      <p class="small muted" style="margin-top:14px">令牌不能修改。遗失或泄漏请联系运营轮换（新令牌同样显示在这里）。</p>
+    </div>
     <div id="out"></div>
   </div>
 </div></section>
 <script>
-document.getElementById('check').addEventListener('click', () => {
-  const token = document.getElementById('owner_token').value.trim();
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+  if (!r.ok) { window.location.href = '/portal/login'; return; }
+  if (r.token && r.token.status === 'active') {
+    document.getElementById('token_view').style.display = 'block';
+    document.getElementById('my_token').textContent = r.token.token;
+    const meta = document.getElementById('token_meta');
+    let html = '<p class="small">签发 ' + (r.token.issued_at || '').slice(0, 10)
+      + (r.token.rotated_at ? ' · 最近轮换 ' + r.token.rotated_at.slice(0, 10) : '')
+      + '</p>';
+    html += '<p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>';
+    meta.innerHTML = html;
+  } else {
+    document.getElementById('no_token').style.display = 'block';
+  }
+});
+document.getElementById('copy_token').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('my_token').textContent.trim());
   const out = document.getElementById('out');
-  getJson('/v1/merchants/self?owner_token=' + encodeURIComponent(token)).then(r => {
-    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '查询失败'; return; }
-    out.className = 'ok';
-    out.innerHTML = '<strong>商家 ID：</strong><span class="mono">' + r.merchant_id + '</span><br>'
-      + '<strong>令牌状态：</strong>' + r.token_status + '（签发 ' + r.issued_at
-      + (r.rotated_at ? '，最近轮换 ' + r.rotated_at : '')
-      + (r.revoked_at ? '，已吊销 ' + r.revoked_at : '') + '）<br>'
-      + '<strong>Agent 数：</strong>' + r.agents_count
-      + '　<strong>产品数：</strong>' + r.listings_count;
-  });
+  out.className = 'ok';
+  out.textContent = '已复制到剪贴板';
 });
 </script>
 """
         + _FOOTER
     )
-    return _page("状态自查", body)
+    return _account_page("令牌", body)
+
 
 
 def portal_dashboard() -> dict[str, Any]:
