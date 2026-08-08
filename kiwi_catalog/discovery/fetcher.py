@@ -51,6 +51,7 @@ import ipaddress
 import json
 import socket
 import ssl
+import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -86,6 +87,9 @@ _VerifiedIPStore = dict[tuple[str, int], str]
 _DEFAULT_JSON_MAX_DEPTH = 20
 _DEFAULT_JSON_MAX_NODES = 10_000
 _DEFAULT_FETCH_TIMEOUT = 10.0
+# 审查 P2（慢滴漏）：单次 socket 操作超时之上再加总时长上限——1 B/s 滴漏
+# 响应体在 timeout 内永不超时，可把 fetch 线程钉住数天（1 MiB ≈ 12 天）。
+_MAX_FETCH_DURATION_SECONDS = 30.0
 
 
 # ── Errors ────────────────────────────────────────────────────────────────────
@@ -222,6 +226,29 @@ def _resolve_and_validate(hostname: str, port: int) -> ipaddress.IPv4Address | i
 # ── DNS-rebinding-proof HTTPS connection ──────────────────────────────────────
 
 
+class _ProtectedHTTPConnection(http.client.HTTPConnection):
+    """HTTP connection to a pre-validated IP address.
+
+    审查 P2（http 支持真实化）：permissive_local 策略声明支持 http://，但
+    opener 从未注册 HTTPHandler——所有 http 请求走 UnknownHandler 恒失败
+    （``unknown url type: http``）。此连接与 HTTPS 侧同防 DNS rebinding：
+    直连已验证 IP，不让 OS resolver 二次选址。无 TLS 包装。
+    """
+
+    def __init__(self, host: str, verified_ip: str, **kwargs: Any) -> None:
+        self._ssrf_verified_ip = str(verified_ip)
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._ssrf_verified_ip, self.port),
+            self.timeout,
+        )
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self._tunnel_host:  # type: ignore[attr-defined]
+            self._tunnel()  # type: ignore[attr-defined]
+
+
 class _ProtectedHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS connection that connects to a pre-validated IP address.
 
@@ -317,15 +344,9 @@ def _build_opener(
     # Pre-populated with the initial URL's mapping so the first request works.
     ip_store: _VerifiedIPStore = {(initial_hostname, initial_port): str(initial_verified_ip)}
 
-    # Custom HTTPS handler that looks up verified IPs from the shared store.
-    class _Handler(urllib.request.HTTPSHandler):
-        def https_open(self, req):
-            # Determine the hostname and port for the current request.
-            parsed = urllib.parse.urlparse(req.full_url)
-            req_hostname = parsed.hostname
-            req_port = _port_of(parsed, "https")
-            assert req_hostname is not None  # req.full_url always has a hostname
-
+    # Custom HTTPS/HTTP handlers that look up verified IPs from the shared store.
+    class _Handler(urllib.request.HTTPSHandler, urllib.request.HTTPHandler):
+        def _verified_connection(self, req_hostname: str, req_port: int, scheme: str):
             # Look up the verified IP for this host:port.
             # Fail-closed: a host not in the store is a sign that it was never
             # validated and the connection must be blocked.
@@ -335,11 +356,37 @@ def _build_opener(
                     f"No verified IP for {req_hostname}:{req_port} — "
                     f"connection blocked (fail-closed)"
                 )
+            if scheme == "https":
+                return lambda host, **kw: _ProtectedHTTPSConnection(
+                    host, verified_ip=verified_ip, **kw
+                )
+            # 审查 P2（http 支持真实化）：permissive_local 声明的 http:// 走
+            # 同样的 verified-IP 直连（防 DNS rebinding），不再 UnknownHandler
+            # 恒失败。默认 require_https 策略在 scheme 校验层已拦截 http。
+            return lambda host, **kw: _ProtectedHTTPConnection(
+                host, verified_ip=verified_ip, **kw
+            )
 
+        def https_open(self, req):
+            # Determine the hostname and port for the current request.
+            parsed = urllib.parse.urlparse(req.full_url)
+            req_hostname = parsed.hostname
+            req_port = _port_of(parsed, "https")
+            assert req_hostname is not None  # req.full_url always has a hostname
             return self.do_open(
-                lambda host, **kw: _ProtectedHTTPSConnection(host, verified_ip=verified_ip, **kw),
+                self._verified_connection(req_hostname, req_port, "https"),
                 req,
                 context=self._context,  # type: ignore[attr-defined]
+            )
+
+        def http_open(self, req):
+            parsed = urllib.parse.urlparse(req.full_url)
+            req_hostname = parsed.hostname
+            req_port = _port_of(parsed, "http")
+            assert req_hostname is not None  # req.full_url always has a hostname
+            return self.do_open(
+                self._verified_connection(req_hostname, req_port, "http"),
+                req,
             )
 
     redirect_handler = _SSRFRedirectHandler(redirect_limit, redirect_validator, ip_store)
@@ -349,8 +396,6 @@ def _build_opener(
     opener.add_handler(urllib.request.UnknownHandler())
     opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
     opener.add_handler(redirect_handler)
-    # Note: we intentionally do NOT add HTTPHandler — HTTP is blocked at the
-    # scheme-validation layer when require_https=True.
     opener.add_handler(urllib.request.HTTPErrorProcessor())
     return opener
 
@@ -556,7 +601,11 @@ class ProfileFetcher:
             # read under the same byte limit as success bodies — 恶意源站返回
             # 超大 4xx 错误体时，无上限的 exc.read() 是请求线程内存 DoS。
             try:
-                body_bytes = _read_limited(exc, self._policy.max_profile_bytes)
+                body_bytes = _read_limited(
+                    exc,
+                    self._policy.max_profile_bytes,
+                    deadline=_time.monotonic() + _MAX_FETCH_DURATION_SECONDS,
+                )
             except FetchLimitError:
                 body_bytes = b""
             return FetchResult(
@@ -688,7 +737,11 @@ class ProfileFetcher:
 
         # Stream-read with byte limit
         max_bytes = self._policy.max_profile_bytes
-        raw_bytes = _read_limited(response, max_bytes)
+        raw_bytes = _read_limited(
+            response,
+            max_bytes,
+            deadline=_time.monotonic() + _MAX_FETCH_DURATION_SECONDS,
+        )
 
         # Parse JSON with structure limits
         body = ""
@@ -728,16 +781,26 @@ class ProfileFetcher:
 # ── Streaming body read with hard byte limit ──────────────────────────────────
 
 
-def _read_limited(response: http.client.HTTPResponse, max_bytes: int) -> bytes:
+def _read_limited(
+    response: http.client.HTTPResponse,
+    max_bytes: int,
+    *,
+    deadline: float | None = None,
+) -> bytes:
     """Read the response body in chunks, truncating at *max_bytes*.
 
-    Raises FetchLimitError if the body exceeds the limit.
+    Raises FetchLimitError if the body exceeds the limit or the total read
+    exceeds *deadline* (monotonic clock) — 审查 P2（慢滴漏）：socket timeout
+    只约束单次 read，1 B/s 滴漏源站可把请求线程钉住数天；总时长上限保证
+    fetch 线程按秒级回收。
     """
     chunks: list[bytes] = []
     total = 0
     chunk_size = 8192
 
     while True:
+        if deadline is not None and _time.monotonic() > deadline:
+            raise FetchLimitError("Response body read exceeded the total fetch duration")
         remaining = max_bytes - total + 1  # +1 to detect overflow
         read_size = min(chunk_size, max(remaining, 1))
         chunk = response.read(read_size)

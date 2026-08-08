@@ -1319,7 +1319,7 @@ class VerificationQueue:
                 "update verification_queue_tasks"
                 " set status = ?, verification_status = ?, error = ?,"
                 " result_json = ?, finished_at = ?, updated_at = ?"
-                " where task_id = ?",
+                " where task_id = ? and status = 'running'",
                 (
                     status,
                     verification_status,
@@ -1394,6 +1394,33 @@ class VerificationQueue:
             raise VerificationQueueShutdownError("verification queue is shut down")
         if kind not in self._KINDS:
             raise ValueError(f"unknown verification task kind: {kind!r}")
+        # 审查 P2：同 agent 任务去重——已有 pending/running 任务时复用，不
+        # 新建。并发任务各自基于入口处陈旧快照读-改-写，后写者可把已晋升
+        # 级别回退（队列任务 + 同步 /verify 请求并发时的真实竞态）。
+        # finished 的旧任务（已进 _results）不拦截新一轮验证。
+        with self._results_cv:
+            existing_id = next(
+                (
+                    task_id
+                    for task_id, task in self._tasks.items()
+                    if task.catalog_agent_id == catalog_agent_id
+                    and task_id not in self._results
+                ),
+                None,
+            )
+        if existing_id is not None:
+            existing_task = self._tasks[existing_id]
+            if wait:
+                return self.wait(existing_id, timeout=timeout)
+            return VerificationTaskResult(
+                task_id=existing_id,
+                catalog_agent_id=catalog_agent_id,
+                kind=kind,
+                status="enqueued",
+                verification_status="",
+                enqueued_at=existing_task.enqueued_at,
+                finished_at=self._now(),
+            )
         task_id = f"vt-{next(self._id_seq):06d}-{uuid.uuid4().hex[:6]}"
         enqueued_at = self._now()
         task = VerificationTask(
@@ -1641,10 +1668,14 @@ class VerificationQueue:
                 res = service.suspend(task.catalog_agent_id, actor=task.actor)
             else:
                 res = service.verify(task.catalog_agent_id, actor=task.actor)
-            # The task owns a fresh connection opened with the default
-            # isolation level — commit before reporting success so a
-            # persistence failure surfaces as status == "failed" rather than
-            # being silently rolled back on close.
+            # 审查 P2（超时语义）：supervisor 已置 cancelled 时不得 commit——
+            # 此前 runner 先 commit 后查 cancelled，timeout 已返回后 catalog
+            # 状态仍被推进（调用方按「timeout=未执行」重试会叠加重叠验证）。
+            # 不 commit → 连接关闭时回滚，catalog 三域/审计保持原样
+            # （_load_profiles 的快照缓存可能已刷新——文档化语义：timeout
+            # = catalog 状态不被推进，快照缓存可能已刷新）。
+            if cancelled.is_set():
+                return
             commit = getattr(service, "commit", None)
             if commit is not None:
                 commit()

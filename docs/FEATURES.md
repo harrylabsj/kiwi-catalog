@@ -114,7 +114,27 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
   JSON 深度/节点双限；
 - **条件请求**：带 etag/last-modified 抓取，304 → 复用最新快照的 raw JSON
   （内容未变不重新解析、不失败）；
-- secret 扫描：profile 含 secret-like 字段即拒绝，绝不落库。
+- secret 扫描：profile 含 secret-like 字段即拒绝，绝不落库（扫描命中
+  64 上限同样 fail-closed——第 65 个起不静默放行）。
+
+### 3.5 信任模型与证据语义（消费方必读）
+
+verified 级别是**自证语义**，消费方须按证据强度理解（审查 P2 明确化）：
+
+- **domain_verified**：仅证明「canonical 域上两个 well-known 路径返回
+  200/304」——响应体**不解析、不与声明 URL 内容比对**。任何返回 200 的
+  服务器（含 catch-all/错误兜底页）都能通过。域控制是本 MVP 的身份锚点，
+  不是内容公证。
+- **agent_verified**：身份绑定在解析阶段由 `assert_same_domain` 强制
+  （card/ucp 内容声明的 url 必须与抓取源同域）——评估器基本是复检。
+- **commerce_verified**：**纯自证**——UCP 自报的任意非 a2a/ucp namespace
+  能力字符串（默认归入 agent 自身域名 namespace）+ §5.1 hosting 不变式
+  （hosted 需非空 runtime agent id）。无端点存活探测、无外部证明。
+
+含义：`commerce_verified` 描述「该 agent 声称并托管了商业能力」，不是
+「其商业能力经第三方验证」。/v1/agents 的 `verification_level`、搜索排序
+rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP endpoints
+的存活探测以提升证据强度。
 
 ## 4. 治理与安全
 
@@ -185,10 +205,12 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 ## 8. 测试与已知边界
 
-- 118 passed / 6 skipped（FastAPI 条件 skip）；覆盖：三态域迁移与折叠、
-  幂等/限流、SSRF fetcher、影子表、仓库抽象防接口漂移、验证队列执行模型、
-  迁移路径与 fresh SCHEMA 一致、Listing 域（publish 契约/幂等 upsert/
-  搜索/新鲜度惰性翻转/agent 治理联动/dualstack 路由）。
+- 159 passed（FastAPI 条件 skip）；覆盖：三态域迁移与折叠、幂等/限流、
+  SSRF fetcher（含 http 接线/深嵌套/非法端口/慢滴漏时长上限）、secret
+  扫描 cap、影子表、仓库抽象防接口漂移、验证队列执行模型（超时/去重/
+  ledger 失败）、迁移守卫（v7 重复检测/v8 回填守卫/v11 唯一索引）、
+  权限 0700/0600、Listing 域（publish 契约/幂等 upsert/搜索/新鲜度惰性
+  翻转/agent 治理联动/dualstack 对齐）。
 - **未实现/接缝**：PG+Redis 多实例限流（P3/P5）；验证阶梯的第三方互操作
   证据（wire 级）；`agent_trust_observations` 的写入方（表已建，消费在
   后续版本）；`reported_external_conversion` 类外部成交指标不在本服务范围；

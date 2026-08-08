@@ -157,6 +157,25 @@ class VerificationQueueRunawayTest(unittest.TestCase):
         self.assertEqual(second.verification_status, "profile_valid")
         q.shutdown(wait=False)
 
+    def test_enqueue_dedups_inflight_task_per_agent(self) -> None:
+        """审查 P2：同 agent 已有 pending/running 任务时复用 task_id——
+        并发 verify 不再基于陈旧快照回退级别。"""
+        q = _make_queue(self.db, lambda: _StubService(delay=0.2), timeout=1.0)
+        first = q.enqueue("cagt_dup", wait=False)
+        self.assertEqual(first.status, "enqueued")
+        second = q.enqueue("cagt_dup", wait=False)
+        self.assertEqual(second.status, "enqueued")
+        self.assertEqual(second.task_id, first.task_id, "同 agent 在途任务必须复用")
+        # 另一 agent 不受影响
+        other = q.enqueue("cagt_other", wait=False)
+        self.assertNotEqual(other.task_id, first.task_id)
+        # 任务完成后可再排（_results 中的旧任务不拦截）
+        finished = q.enqueue("cagt_dup", wait=True, timeout=2.0)
+        self.assertEqual(finished.status, "completed")
+        again = q.enqueue("cagt_dup", wait=True, timeout=2.0)
+        self.assertNotEqual(again.task_id, finished.task_id)
+        q.shutdown(wait=False)
+
     def test_enqueue_ledger_failure_leaves_no_orphan_task(self) -> None:
         """审查 P2：_persist_insert 失败 → 抛类型化 VerificationQueueLedgerError
         且内存 _tasks 回滚——wait() 不得永久挂死、无孤儿条目。"""

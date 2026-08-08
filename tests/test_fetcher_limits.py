@@ -49,6 +49,58 @@ class PortHelperTest(unittest.TestCase):
         self.assertEqual(_port_of(urllib.parse.urlparse("http://h.example/"), "http"), 80)
 
 
+class HttpSchemeSupportTest(unittest.TestCase):
+    def test_http_scheme_has_a_real_handler(self) -> None:
+        """审查 P2（http 支持真实化）：opener 必须注册 HTTP 处理器——此前
+        恒走 UnknownHandler（``unknown url type: http``），permissive_local
+        声明的 http:// 实际永远失败。
+
+        SSRF 校验器用 stub（blocklist 对 loopback 是绝对策略，即便
+        permissive_local 也拦截——此处只验证协议接线，不绕过校验语义）。
+        """
+        import http.server
+        import ipaddress
+        import threading
+
+        from kiwi_catalog.discovery.fetcher import _build_opener
+
+        body = b'{"name": "local-agent", "version": "1.0"}'
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: Any) -> None:  # noqa: A002
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+
+            def _stub_validator(_url: str) -> ipaddress.IPv4Address:
+                return ipaddress.IPv4Address("127.0.0.1")
+
+            opener = _build_opener(
+                initial_verified_ip="127.0.0.1",
+                initial_hostname="127.0.0.1",
+                initial_port=port,
+                redirect_limit=5,
+                redirect_validator=_stub_validator,
+            )
+            with opener.open(f"http://127.0.0.1:{port}/card.json", timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.read(), body)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class DeepNestedJsonTest(unittest.TestCase):
     def test_deeply_nested_json_maps_to_fetch_limit_error(self) -> None:
         """审查 P1-2：深度防护在 parse 之后，解析阶段的 RecursionError 必须
