@@ -1,7 +1,7 @@
 # kiwi-catalog 功能文档
 
-> 状态：对应 `main` 分支当前实现（2026-08-07，118 passed / 6 skipped；
-> v0.4 Product-first Commerce Discovery 已落地）。
+> 状态：对应 `main` 分支当前实现（2026-08-08，214 passed / 9 skipped；
+> v0.4 Product-first Commerce Discovery + 商家接入/账号体系已落地）。
 > 本文描述**已实现**的功能面，不含设计文档中规划但未落地的部分
 > （如 PG/Redis 多实例限流、验证阶梯的第三方互操作证据、FTS/vector 搜索）。
 
@@ -47,7 +47,7 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | POST | `/v1/agent-catalog/agents/{id}/verify` | 同步跑验证阶梯 |
 | POST | `/v1/agent-catalog/agents/{id}/claim` | owner 认领（domain-control / hosted 身份证明） |
 | POST | `/v1/agent-catalog/agents/{id}/suspend` | admin 处置：挂起 |
-| POST | `/v1/agent-catalog/agents/{id}/reinstate` | admin 处置：恢复（重置为 discovered + 重验证） |
+| POST | `/v1/agent-catalog/agents/{id}/reinstate` | admin 处置：恢复（保留 verification_level 与 freshness；折叠状态重验证，证据未失效不丢级别） |
 | GET | `/v1/agents` | 列出（v1 面，三态域过滤） |
 | GET | `/v1/agents/search` | 搜索（v1 面：三态域 + KTH destination_type 词表过滤） |
 | GET | `/v1/agents/{id}` | 单个 agent（v1 面） |
@@ -162,7 +162,7 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 
 ## 5. 数据模型
 
-14 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v10，
+20 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v16，
 两路径产出同一表集合，有测试锁定）：
 
 - **catalog 域**：catalog_agents（含三域列 + handoff_destination_types）、
@@ -205,7 +205,7 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 ## 8. 测试与已知边界
 
-- 159 passed（FastAPI 条件 skip）；覆盖：三态域迁移与折叠、幂等/限流、
+- 214 passed / 9 skipped（FastAPI 条件 skip，2026-08-08 实测）；覆盖：三态域迁移与折叠、幂等/限流、
   SSRF fetcher（含 http 接线/深嵌套/非法端口/慢滴漏时长上限）、secret
   扫描 cap、影子表、仓库抽象防接口漂移、验证队列执行模型（超时/去重/
   ledger 失败）、迁移守卫（v7 重复检测/v8 回填守卫/v11 唯一索引）、
