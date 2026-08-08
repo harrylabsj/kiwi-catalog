@@ -159,10 +159,13 @@ DDL 同时进 `db/models.py::SCHEMA`（fresh 路径）与 `db/migrations.py` v12
 
 ## 9. MVP 范围与后续
 
-MVP（本次落地）：schema v12 + auth 双路径 + §4 六端点 + §6 四页面 + 官网 CTA + 测试。
+MVP（本次落地）：schema v12 + auth 双路径 + §4 七端点 + §6 四页面 + 官网 CTA +
+CLI（`catalog merchant applications list/approve/reject`、`token rotate/revoke`、
+`status`——与 HTTP 共用 `services/merchant_tokens.py`，本地直连 SQLite 信任边界）
++ 测试（双栈全量 191）。
 
-后续（不在本次）：CLI `catalog merchant-*` 管理命令；邮件交付（项目无邮件设施，
-MVP 靠一次性展示 + 轮换兜底）；FastAPI 双栈门户页对齐；Cloudflare 子域名 DNS/反代接线。
+后续（不在本次）：邮件交付（项目无邮件设施，MVP 靠一次性展示 + 轮换兜底）；
+Cloudflare 子域名 `merchant.kiwi.harrylabsj.com` DNS/反代接线。
 
 ## 10. 测试要点
 

@@ -26,7 +26,6 @@ import argparse
 import sys
 
 from kiwi_catalog import VERSION
-from kiwi_catalog.cli_common import non_negative_int, positive_int
 from kiwi_catalog.cli_agent_catalog_commands import (
     cmd_agent_catalog_claim,
     cmd_agent_catalog_doctor,
@@ -38,6 +37,15 @@ from kiwi_catalog.cli_agent_catalog_commands import (
     cmd_agent_catalog_stats,
     cmd_agent_catalog_suspend,
     cmd_agent_catalog_verify,
+)
+from kiwi_catalog.cli_common import positive_int
+from kiwi_catalog.cli_merchant_commands import (
+    cmd_merchant_applications_approve,
+    cmd_merchant_applications_list,
+    cmd_merchant_applications_reject,
+    cmd_merchant_status,
+    cmd_merchant_token_revoke,
+    cmd_merchant_token_rotate,
 )
 from kiwi_catalog.config import DEFAULT_DB_PATH
 from kiwi_catalog.core.errors import ShoppingCliError
@@ -117,6 +125,46 @@ def build_parser() -> argparse.ArgumentParser:
     agent_catalog_doctor = agent_catalog_sub.add_parser("doctor", help="Local catalog health check (§24); exits 1 on issues")
     agent_catalog_doctor.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_doctor.set_defaults(func=cmd_agent_catalog_doctor)
+
+    # ── catalog merchant（token 分发管理，docs/kiwi-catalog-token-portal-design-v0.1）──
+    # catalog 的 subparsers 已存在（agent_catalog_command）——merchant 作为
+    # 其一个子命令，再嵌套 applications/token/status 两级。
+    merchant = agent_catalog_sub.add_parser("merchant", help="Merchant token distribution (applications / token / status)")
+    merchant_cmd = merchant.add_subparsers(dest="merchant_command", required=True)
+
+    applications = merchant_cmd.add_parser("applications", help="Application work queue (list/approve/reject)")
+    applications_cmd = applications.add_subparsers(dest="applications_command", required=True)
+    applications_list = applications_cmd.add_parser("list", help="List merchant applications (default pending)")
+    applications_list.add_argument("--status", default="", help="Filter: pending|approved|rejected (empty = all)")
+    applications_list.add_argument("--limit", type=positive_int, default=50, help="Max rows (1-100)")
+    applications_list.add_argument("--format", choices=["text", "json"], default="text")
+    applications_list.set_defaults(func=cmd_merchant_applications_list)
+    applications_approve = applications_cmd.add_parser("approve", help="Approve an application and issue merchant token (plaintext shown once)")
+    applications_approve.add_argument("application_id", type=positive_int, help="Application id (e.g. 1)")
+    applications_approve.add_argument("--format", choices=["text", "json"], default="text")
+    applications_approve.set_defaults(func=cmd_merchant_applications_approve)
+    applications_reject = applications_cmd.add_parser("reject", help="Reject an application with an optional note")
+    applications_reject.add_argument("application_id", type=positive_int, help="Application id (e.g. 1)")
+    applications_reject.add_argument("--note", default="", help="Rejection reason (recorded)")
+    applications_reject.add_argument("--format", choices=["text", "json"], default="text")
+    applications_reject.set_defaults(func=cmd_merchant_applications_reject)
+
+    token = merchant_cmd.add_parser("token", help="Merchant token lifecycle (rotate/revoke)")
+    token_cmd = token.add_subparsers(dest="token_command", required=True)
+    token_rotate = token_cmd.add_parser("rotate", help="Rotate a merchant token (old one invalidated; plaintext shown once)")
+    token_rotate.add_argument("merchant_id", help="Merchant id (e.g. mkt_...)")
+    token_rotate.add_argument("--format", choices=["text", "json"], default="text")
+    token_rotate.set_defaults(func=cmd_merchant_token_rotate)
+    token_revoke = token_cmd.add_parser("revoke", help="Revoke a merchant token (idempotent; writes fail-closed afterwards)")
+    token_revoke.add_argument("merchant_id", help="Merchant id (e.g. mkt_...)")
+    token_revoke.add_argument("--format", choices=["text", "json"], default="text")
+    token_revoke.set_defaults(func=cmd_merchant_token_revoke)
+
+    merchant_status = merchant_cmd.add_parser("status", help="Merchant self-check: token is identity; or --merchant-id for any merchant (local trust)")
+    merchant_status.add_argument("--token", default="", help="Your merchant token (mkt_...); resolves identity server-side")
+    merchant_status.add_argument("--merchant-id", default="", dest="merchant_id", help="Query any merchant by id (local CLI trust boundary)")
+    merchant_status.add_argument("--format", choices=["text", "json"], default="text")
+    merchant_status.set_defaults(func=cmd_merchant_status)
 
 
     return parser
