@@ -76,6 +76,7 @@ from kiwi_catalog.agent_catalog.state_domains import (
     VerificationLevelStateMachine,
 )
 from kiwi_catalog.core.errors import ShoppingCliError, ValidationError
+from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
 from kiwi_catalog.db.session import SQLITE_BUSY_TIMEOUT_MS, encode_json, now_iso
 from kiwi_catalog.discovery._validation import ProfileValidationError
 from kiwi_catalog.discovery.agent_card import AgentCardParser, AgentCardResult
@@ -1195,10 +1196,23 @@ class VerificationQueue:
             # 与 open_connection 的 5s busy timeout 对齐（否则并发写等待行为不一致，
             # 多 worker 部署下 SQLITE_BUSY 概率性失败）。
             self._db_conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+            # 审查 P3：裸连接不跑迁移——未迁移库会在 _recover_pending_tasks 的
+            # SELECT 上 no such table 崩。fail-closed 给出明确诊断（应用内路径
+            # 先经 db.session.open_connection 迁移，只有 CLI/嵌入直用才踩中）。
+            version_row = self._db_conn.execute("pragma user_version").fetchone()
+            ledger_version = int(version_row[0] or 0) if version_row is not None else 0
+            if ledger_version < CURRENT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"verification queue requires schema v{CURRENT_SCHEMA_VERSION}, "
+                    f"found v{ledger_version}; open the database through "
+                    f"kiwi_catalog.db.session.open_connection first (it runs migrations)"
+                )
 
         self._results: dict[str, VerificationTaskResult] = {}
         self._tasks: dict[str, VerificationTask] = {}
         self._shutdown = threading.Event()
+        # 审查 P3：enqueue（检查+put）与 shutdown（置位+放哨兵）互斥锁
+        self._enqueue_lock = threading.Lock()
 
         # Crash recovery: pending/running rows from a previous process are
         # re-enqueued so no task is lost across a restart.  Recovered count
@@ -1452,7 +1466,19 @@ class VerificationQueue:
                 f"failed to persist verification task {task_id}: {exc}"
             ) from exc
         try:
-            self._pending.put_nowait(task)
+            # 审查 P3（enqueue/shutdown 竞态）：检查 _shutdown 与 put 必须在
+            # 与 shutdown() 的「置位+放哨兵」同一把锁内原子完成——否则检查通过
+            # 后 shutdown 先置位放哨兵、本任务再入队落在哨兵之后无人消费，
+            # wait() 永久挂死。
+            with self._enqueue_lock:
+                if self._shutdown.is_set():
+                    self._persist_delete(task_id)
+                    with self._results_cv:
+                        self._tasks.pop(task_id, None)
+                    raise VerificationQueueShutdownError(
+                        "verification queue is shut down"
+                    )
+                self._pending.put_nowait(task)
         except queue.Full as exc:
             self._persist_delete(task_id)
             with self._results_cv:
@@ -1533,12 +1559,25 @@ class VerificationQueue:
         """Stop accepting new tasks and (optionally) wait for workers to exit."""
         if self._shutdown.is_set():
             return
-        self._shutdown.set()
-        for _ in self._workers:
-            self._pending.put(None)
+        # 审查 P3：置位 + 放哨兵与 enqueue 的「检查+put」互斥（_enqueue_lock）——
+        # 否则哨兵之后仍可能入队无人消费的任务。
+        with self._enqueue_lock:
+            self._shutdown.set()
+            for _ in self._workers:
+                self._pending.put(None)
         if wait:
             for worker in self._workers:
                 worker.join(timeout=timeout)
+            # 审查 P3：仅在所有 worker 退出后关 ledger 连接（此前连接随进程
+            # 泄漏；wait=False 时不 close——在途任务仍要写 ledger）。close 与
+            # enqueue 清理路径互斥（_enqueue_lock），避免撞已关闭连接。
+            with self._enqueue_lock:
+                if self._db_conn is not None:
+                    try:
+                        self._db_conn.close()
+                    except sqlite3.Error:
+                        pass
+                    self._db_conn = None
 
     def __enter__(self) -> "VerificationQueue":
         return self

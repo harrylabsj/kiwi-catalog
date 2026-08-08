@@ -100,6 +100,10 @@ class VerificationQueueRunawayTest(unittest.TestCase):
             )
             """
         )
+        # 审查 P3：队列构造要求已迁移 schema——手工建表后必须对齐 user_version
+        from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
+
+        conn.execute(f"pragma user_version = {CURRENT_SCHEMA_VERSION}")
         conn.commit()
         conn.close()
 
@@ -156,6 +160,49 @@ class VerificationQueueRunawayTest(unittest.TestCase):
         self.assertEqual(second.status, "completed")
         self.assertEqual(second.verification_status, "profile_valid")
         q.shutdown(wait=False)
+
+    def test_queue_rejects_unmigrated_database(self) -> None:
+        """审查 P3：未迁移库构造队列 → 明确 RuntimeError（此前 no such table 崩）。"""
+        tmp = Path(tempfile.mkdtemp())
+        raw = tmp / "raw.sqlite"
+        conn = sqlite3.connect(raw)
+        conn.commit()
+        conn.close()
+        with self.assertRaises(RuntimeError) as ctx:
+            _make_queue(raw, lambda: _StubService())
+        self.assertIn("schema", str(ctx.exception))
+
+    def test_enqueue_during_shutdown_never_orphans(self) -> None:
+        """审查 P3：enqueue 与 shutdown 竞态不允许孤儿任务——成功入队必被
+        处理（结果落 _results），拒绝则无残留（_tasks 已清理）。"""
+        import threading
+
+        from kiwi_catalog.services.agent_verification import (
+            VerificationQueueShutdownError,
+        )
+
+        for _ in range(20):
+            q = _make_queue(self.db, lambda: _StubService(), timeout=1.0)
+            outcomes: list[Any] = []
+
+            def _enqueuer() -> None:
+                try:
+                    outcomes.append(q.enqueue("cagt_race", wait=True, timeout=0.5))
+                except VerificationQueueShutdownError:
+                    outcomes.append("shutdown")
+                except Exception as exc:  # noqa: BLE001 — 断言非预期异常
+                    outcomes.append(exc)
+
+            thread = threading.Thread(target=_enqueuer)
+            thread.start()
+            q.shutdown(wait=False)
+            thread.join(2.0)
+            q.shutdown(wait=True, timeout=1.0)
+            for outcome in outcomes:
+                self.assertNotIsInstance(outcome, Exception, outcome)
+            with q._results_cv:
+                orphaned = [tid for tid in q._tasks if tid not in q._results]
+            self.assertEqual(orphaned, [], "竞态下不得遗留孤儿任务")
 
     def test_enqueue_dedups_inflight_task_per_agent(self) -> None:
         """审查 P2：同 agent 已有 pending/running 任务时复用 task_id——
