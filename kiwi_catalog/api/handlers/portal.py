@@ -714,13 +714,6 @@ def portal_account() -> dict[str, Any]:
   <div class="kicker">My Account</div>
   <h2>我的</h2>
   <div id="out"></div>
-  <div id="not_logged" style="display:none">
-    <div class="card form-card">
-      <p class="lead">登录后查看你的商家令牌与申请状态。</p>
-      <p style="margin-top:16px"><a class="btn btn-solid" href="/portal/login">登录</a>
-      <a class="btn btn-ghost" href="/portal/register">注册商家账号</a></p>
-    </div>
-  </div>
   <div id="content" style="display:none">
     <div class="card form-card">
       <div id="profile"></div>
@@ -735,7 +728,8 @@ function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&
 function loadMe() {
   fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
     if (!r.ok) {
-      document.getElementById('not_logged').style.display = 'block';
+      // 未登录：直接进入登录流程（登录页含注册入口）
+      window.location.href = '/portal/login';
       return;
     }
     document.getElementById('content').style.display = 'block';
