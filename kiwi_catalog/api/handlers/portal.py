@@ -751,7 +751,10 @@ function loadMe() {
         + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
         + (r.token.revoked_at ? ' · 已吊销 ' + esc(r.token.revoked_at.slice(0, 10)) : '')
         + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>'
-        + '<button class="btn-mini" onclick="navigator.clipboard.writeText(document.querySelector(\'.token-box\').textContent.trim())">复制令牌</button>';
+        + '<button class="btn-mini" id="copy_token">复制令牌</button>';
+      document.getElementById('copy_token').addEventListener('click', () => {
+        navigator.clipboard.writeText(document.querySelector('.token-box').textContent.trim());
+      });
       rt.style.display = 'none';
     } else if (r.application && r.application.status === 'pending') {
       tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
