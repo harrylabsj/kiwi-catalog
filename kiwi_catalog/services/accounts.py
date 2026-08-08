@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kiwi_catalog.core.errors import ConflictError, ValidationError
-from kiwi_catalog.core.tokens import token_digest
+from kiwi_catalog.core.tokens import token_digest, token_matches
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
 
@@ -105,21 +105,124 @@ def decrypt_merchant_token(encrypted: str) -> str:
         return ""
 
 
+# ── 邮箱验证（验证码 + SMTP 发送）────────────────────────────────────────
+
+
+def _verification_mode() -> str:
+    """邮件验证模式：smtp（生产发邮件）/ console（开发：验证码随注册响应
+    返回）/ 其他或未配置 → fail-closed（注册拒绝，见 register_account）。"""
+    return str(os.environ.get("KIWI_CATALOG_EMAIL_VERIFICATION_MODE") or "").strip().lower()
+
+
+def generate_verification_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def store_verification_code(
+    conn: sqlite3.Connection, account_id: int, code: str
+) -> None:
+    """验证码 SHA-256 落库 + 15 分钟过期（不存明文）。"""
+    expires_at = (
+        datetime.now(UTC) + timedelta(minutes=15)
+    ).replace(microsecond=0).isoformat()
+    conn.execute(
+        "update merchant_accounts set verification_code_hash = ?,"
+        " verification_expires_at = ?, updated_at = ? where account_id = ?",
+        (token_digest(code), expires_at, now_iso(), account_id),
+    )
+
+
+def send_verification_email(email: str, code: str) -> None:
+    """发送验证邮件（标准库 smtplib；SMTP 凭据走 env）。
+
+    env：KIWI_CATALOG_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM。
+    发送失败抛 RuntimeError（注册事务回滚）。
+    """
+    host = os.environ.get("KIWI_CATALOG_SMTP_HOST") or ""
+    if not host:
+        raise RuntimeError("SMTP is not configured")
+    import smtplib
+    from email.message import EmailMessage
+
+    port = int(os.environ.get("KIWI_CATALOG_SMTP_PORT") or "587")
+    user = os.environ.get("KIWI_CATALOG_SMTP_USER") or ""
+    password = os.environ.get("KIWI_CATALOG_SMTP_PASSWORD") or ""
+    from_addr = os.environ.get("KIWI_CATALOG_SMTP_FROM") or user
+
+    message = EmailMessage()
+    message["Subject"] = "Kiwi 商家账号邮箱验证码"
+    message["From"] = from_addr
+    message["To"] = email
+    message.set_content(
+        f"你的 Kiwi 商家账号验证码是：{code}\n\n15 分钟内有效。如果不是你注册的，请忽略此邮件。"
+    )
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        smtp.starttls()
+        if user:
+            smtp.login(user, password)
+        smtp.send_message(message)
+
+
+def issue_verification(
+    conn: sqlite3.Connection, account_id: int, email: str
+) -> str:
+    """生成验证码、落库、按模式发送。console 模式返回验证码明文（开发用）；
+    smtp 模式返回空串（验证码只进邮箱）。"""
+    code = generate_verification_code()
+    store_verification_code(conn, account_id, code)
+    mode = _verification_mode()
+    if mode == "console":
+        return code
+    if mode == "smtp":
+        send_verification_email(email, code)
+        return ""
+    raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
+
+
+def verify_email_code(
+    conn: sqlite3.Connection, account_id: int, code: str
+) -> bool:
+    """校验验证码：恒时比较 + 未过期；成功置 email_verified=1 并清码。"""
+    row = conn.execute(
+        "select verification_code_hash, verification_expires_at from merchant_accounts"
+        " where account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    stored_hash = str(row["verification_code_hash"] or "")
+    if not stored_hash or not token_matches(token_digest(str(code or "").strip()), stored_hash):
+        return False
+    if str(row["verification_expires_at"] or "") < now_iso():
+        return False
+    conn.execute(
+        "update merchant_accounts set email_verified = 1,"
+        " verification_code_hash = '', verification_expires_at = '', updated_at = ?"
+        " where account_id = ?",
+        (now_iso(), account_id),
+    )
+    return True
+
+
+def account_by_email(conn: sqlite3.Connection, email: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "select * from merchant_accounts where email = ?",
+        (str(email or "").strip().lower(),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
 # ── 账号 CRUD ─────────────────────────────────────────────────────────────
 
 
 def register_account(
-    conn: sqlite3.Connection,
-    *,
-    email: str,
-    password: str,
-    domain: str,
-    agent_name: str,
-    purpose: str = "",
+    conn: sqlite3.Connection, *, email: str, password: str
 ) -> dict[str, Any]:
-    """注册：校验 → 建账号 → 自动创建待审工单（application 复用）。
+    """注册（极简：仅邮箱 + 密码）→ 建账号 + 签发邮箱验证码。
 
-    返回账号 + 工单信息。工单 pending，approve 后 merchant_id 回填账号。
+    不建商家工单——商家基本信息在「我的账户」申请令牌时填写
+    （request_token 带 domain/agent_name 建工单）。发送验证码失败 →
+    RuntimeError → 注册事务回滚（fail-closed）。
     """
     email = str(email or "").strip().lower()
     if not _EMAIL_RE.match(email):
@@ -128,12 +231,6 @@ def register_account(
         raise ValidationError("password must be at least 8 characters")
     if len(password) > 200:
         raise ValidationError("password too long")
-    agent_name = str(agent_name or "").strip()
-    if not agent_name:
-        raise ValidationError("agent_name is required")
-    from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
-
-    canonical_domain = normalize_canonical_domain(domain)
 
     existing = conn.execute(
         "select account_id from merchant_accounts where email = ?", (email,)
@@ -148,25 +245,13 @@ def register_account(
         (email, hash_password(password), now, now),
     )
     account_id = int(cursor.lastrowid or 0)
-
-    app_cursor = conn.execute(
-        """
-        insert into merchant_applications
-            (status, domain, agent_name, contact_email, purpose, account_id, created_at)
-        values ('pending', ?, ?, ?, ?, ?, ?)
-        """,
-        (canonical_domain, agent_name, email, purpose, account_id, now),
-    )
-    application_id = int(app_cursor.lastrowid or 0)
-    conn.execute(
-        "update merchant_accounts set application_id = ? where account_id = ?",
-        (application_id, account_id),
-    )
+    verification_code = issue_verification(conn, account_id, email)
     return {
         "account_id": account_id,
         "email": email,
-        "application_id": application_id,
         "status": "pending_review",
+        "email_verified": False,
+        "verification_code": verification_code,  # console 模式才有值
     }
 
 
@@ -287,6 +372,9 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
     return {
         "account_id": account["account_id"],
         "email": account["email"],
+        "merchant_name": account.get("merchant_name") or "",
+        "phone": account.get("phone") or "",
+        "created_at": account.get("created_at") or "",
         "merchant_id": merchant_id,
         "application": application,
         "token": token_info,
@@ -295,9 +383,18 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
     }
 
 
-def request_token(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str, Any]:
+def request_token(
+    conn: sqlite3.Connection,
+    account: dict[str, Any],
+    *,
+    domain: str = "",
+    agent_name: str = "",
+    phone: str = "",
+    purpose: str = "",
+) -> dict[str, Any]:
     """"我的"里申请 token：已有 active → 返回现状；已有 pending 工单 →
-    提示等待；否则建工单（域名/名称复用账号申请信息）。"""
+    提示等待；否则用本次填写的商家基本信息建工单（注册极简，基本信息
+    在此一步补齐），并回填账户基本信息（商家名称/电话）。"""
     view = account_view(conn, account)
     if view["token"] and view["token"]["status"] == "active":
         return {"status": "active", "message": "token already issued", **view}
@@ -305,30 +402,68 @@ def request_token(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str
         return {"status": "pending", "message": "application pending review", **view}
     if view["application"] and view["application"]["status"] == "rejected":
         raise ConflictError("previous application was rejected; contact operations")
-    # 建新工单：复用账号已填信息
-    application = view["application"] or {}
+    from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
+
+    domain = normalize_canonical_domain(domain)
+    agent_name = str(agent_name or "").strip()
+    if not agent_name:
+        raise ValidationError("agent_name is required to apply for a token")
+    phone = str(phone or "").strip()
     now = now_iso()
     cursor = conn.execute(
         """
         insert into merchant_applications
-            (status, domain, agent_name, contact_email, purpose, account_id, created_at)
-        values ('pending', ?, ?, ?, ?, ?, ?)
+            (status, domain, agent_name, contact_email, purpose, phone, account_id, created_at)
+        values ('pending', ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            application.get("domain") or "",
-            application.get("agent_name") or "",
-            account["email"],
-            application.get("purpose") or "",
-            account["account_id"],
-            now,
-        ),
+        (domain, agent_name, account["email"], str(purpose or "").strip(), phone, account["account_id"], now),
     )
     application_id = int(cursor.lastrowid or 0)
     conn.execute(
-        "update merchant_accounts set application_id = ? where account_id = ?",
-        (application_id, account["account_id"]),
+        "update merchant_accounts set application_id = ?, updated_at = ? where account_id = ?",
+        (application_id, now, account["account_id"]),
+    )
+    # 回填账户基本信息（v16：商家名称/电话）
+    conn.execute(
+        "update merchant_accounts set merchant_name = ?, phone = ?, updated_at = ?"
+        " where account_id = ?",
+        (agent_name, phone, now, account["account_id"]),
     )
     return {"status": "pending", "message": "application submitted", "application_id": application_id}
+
+
+def update_profile(
+    conn: sqlite3.Connection,
+    account: dict[str, Any],
+    *,
+    merchant_name: str = "",
+    phone: str = "",
+) -> dict[str, Any]:
+    """更新账户基本信息（商家名称/电话，均非空才覆盖）。"""
+    merchant_name = str(merchant_name or "").strip()
+    phone = str(phone or "").strip()
+    if merchant_name and len(merchant_name) > 200:
+        raise ValidationError("merchant_name too long")
+    if phone and len(phone) > 40:
+        raise ValidationError("phone too long")
+    if merchant_name:
+        conn.execute(
+            "update merchant_accounts set merchant_name = ?, updated_at = ?"
+            " where account_id = ?",
+            (merchant_name, now_iso(), account["account_id"]),
+        )
+    if phone:
+        conn.execute(
+            "update merchant_accounts set phone = ?, updated_at = ?"
+            " where account_id = ?",
+            (phone, now_iso(), account["account_id"]),
+        )
+    # 重查账号行（更新后的 merchant_name/phone 进视图）
+    fresh = conn.execute(
+        "select * from merchant_accounts where account_id = ?",
+        (account["account_id"],),
+    ).fetchone()
+    return account_view(conn, dict(fresh))
 
 
 def session_cookie_value(session_token: str) -> str:

@@ -79,15 +79,13 @@ def _require_session(
 def register(
     db_path: str | Path, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """POST /v1/accounts/register（公开）——注册即建账号 + 待审工单。
+    """POST /v1/accounts/register（公开）——极简注册：仅邮箱 + 密码。
 
-    成功后自动登录（签发会话 cookie），返回账号视图。
+    建账号 + 签发邮箱验证码；不自动登录（verify-email 通过后才可登录）。
+    console 模式响应含 verification_code（开发/演示）；smtp 模式发邮件。
     """
     email = str(require_field(payload, "email")).strip()
     password = str(require_field(payload, "password"))
-    domain = str(require_field(payload, "domain")).strip()
-    agent_name = str(require_field(payload, "agent_name")).strip()
-    purpose = str(payload.get("purpose") or "").strip()
 
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
@@ -103,30 +101,23 @@ def register(
                 description=f"account register ({limit}/15min per email)",
             )
         registered = accounts_service.register_account(
-            conn,
-            email=email,
-            password=password,
-            domain=domain,
-            agent_name=agent_name,
-            purpose=purpose,
+            conn, email=email, password=password
         )
-        session_token = accounts_service.create_session(
-            conn, registered["account_id"]
-        )
-        account = conn.execute(
-            "select * from merchant_accounts where account_id = ?",
-            (registered["account_id"],),
-        ).fetchone()
-        view = accounts_service.account_view(conn, dict(account))
         return {
             "ok": True,
-            **view,
-            "__cookies__": [accounts_service.session_cookie_value(session_token)],
+            "account_id": registered["account_id"],
+            "email": registered["email"],
+            "email_verified": False,
+            # console 模式才返回明文验证码（smtp 模式为空串）
+            "verification_code": registered.get("verification_code") or "",
         }
 
 
 def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST /v1/accounts/login（公开）——校验 + 签发会话 cookie。"""
+    """POST /v1/accounts/login（公开）——校验 + 签发会话 cookie。
+
+    邮箱未验证 → 403（提示先验证邮箱）。
+    """
     email = str(require_field(payload, "email")).strip()
     password = str(require_field(payload, "password"))
 
@@ -146,12 +137,55 @@ def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         account = accounts_service.authenticate(conn, email, password)
         if account is None:
             raise AuthError("invalid email or password")
+        if int(account.get("email_verified") or 0) != 1:
+            raise AuthError("email not verified — check your inbox for the code")
         session_token = accounts_service.create_session(conn, int(account["account_id"]))
         view = accounts_service.account_view(conn, account)
         return {
             "ok": True,
             **view,
             "__cookies__": [accounts_service.session_cookie_value(session_token)],
+        }
+
+
+def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/accounts/verify-email（公开）——验证码校验，通过后自动登录。"""
+    email = str(require_field(payload, "email")).strip().lower()
+    code = str(require_field(payload, "code")).strip()
+
+    with db_session(db_path) as conn:
+        account = accounts_service.account_by_email(conn, email)
+        if account is None:
+            raise AuthError("invalid verification code")
+        if int(account.get("email_verified") or 0) == 1:
+            raise AuthError("email already verified")
+        if not accounts_service.verify_email_code(conn, int(account["account_id"]), code):
+            raise AuthError("invalid or expired verification code")
+        session_token = accounts_service.create_session(conn, int(account["account_id"]))
+        view = accounts_service.account_view(conn, account)
+        return {
+            "ok": True,
+            **view,
+            "__cookies__": [accounts_service.session_cookie_value(session_token)],
+        }
+
+
+def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/accounts/resend-code（公开）——重新签发验证码。"""
+    email = str(require_field(payload, "email")).strip().lower()
+    with db_session(db_path) as conn:
+        account = accounts_service.account_by_email(conn, email)
+        if account is None:
+            raise AuthError("unknown email")
+        if int(account.get("email_verified") or 0) == 1:
+            raise AuthError("email already verified")
+        code = accounts_service.issue_verification(
+            conn, int(account["account_id"]), email
+        )
+        return {
+            "ok": True,
+            "email": email,
+            "verification_code": code,  # console 模式才有值
         }
 
 
@@ -179,11 +213,34 @@ def token_request(
 ) -> dict[str, Any]:
     """POST /v1/accounts/token-request（会话）——"我的"里申请 token。
 
-    已有 active → 返回现状；已有 pending → 提示等待；否则建工单。
+    已有 active → 返回现状；已有 pending → 提示等待；否则用本次填写的
+    商家基本信息（domain/agent_name）建工单。
     """
     _ctx, conn, account = _require_session(db_path, payload)
     try:
-        result = accounts_service.request_token(conn, account)
+        result = accounts_service.request_token(
+            conn,
+            account,
+            domain=str(payload.get("domain") or ""),
+            agent_name=str(payload.get("agent_name") or ""),
+            phone=str(payload.get("phone") or ""),
+            purpose=str(payload.get("purpose") or ""),
+        )
         return {"ok": True, **result}
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/accounts/profile（会话）——更新账户基本信息（商家名称/电话）。"""
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        view = accounts_service.update_profile(
+            conn,
+            account,
+            merchant_name=str(payload.get("merchant_name") or ""),
+            phone=str(payload.get("phone") or ""),
+        )
+        return {"ok": True, **view}
     finally:
         _ctx.__exit__(None, None, None)

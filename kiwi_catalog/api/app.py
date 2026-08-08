@@ -295,6 +295,16 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _v1_account_logout(db_path, payload),
     ),
 RouteEntry(
+        {"POST"},
+        "/v1/accounts/verify-email",
+        lambda db_path, payload, query, **kw: _v1_account_verify_email(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/resend-code",
+        lambda db_path, payload, query, **kw: _v1_account_resend_code(db_path, payload),
+    ),
+RouteEntry(
         {"GET"},
         "/v1/accounts/me",
         lambda db_path, payload, query, **kw: _v1_account_me(db_path, payload, query),
@@ -303,6 +313,11 @@ RouteEntry(
         {"POST"},
         "/v1/accounts/token-request",
         lambda db_path, payload, query, **kw: _v1_account_token_request(db_path, payload, query),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/profile",
+        lambda db_path, payload, query, **kw: _v1_account_profile(db_path, payload),
     ),
 # ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
 RouteEntry(
@@ -510,12 +525,24 @@ def _v1_account_logout(db_path, payload):
     return accounts_handlers.logout(db_path, payload)
 
 
+def _v1_account_verify_email(db_path, payload):
+    return accounts_handlers.verify_email(db_path, payload)
+
+
+def _v1_account_resend_code(db_path, payload):
+    return accounts_handlers.resend_code(db_path, payload)
+
+
 def _v1_account_me(db_path, payload, query):
     return accounts_handlers.me(db_path, payload, query or {})
 
 
 def _v1_account_token_request(db_path, payload, query):
     return accounts_handlers.token_request(db_path, payload, query or {})
+
+
+def _v1_account_profile(db_path, payload):
+    return accounts_handlers.profile(db_path, payload)
 
 
 # ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
@@ -1162,6 +1189,14 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_account_logout(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         return accounts_handlers.logout(db_path, _account_payload(request, payload))
 
+    @app.post("/v1/accounts/verify-email")
+    def v1_account_verify_email(payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(accounts_handlers.verify_email(db_path, payload))
+
+    @app.post("/v1/accounts/resend-code")
+    def v1_account_resend_code(payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.resend_code(db_path, payload)
+
     @app.get("/v1/accounts/me")
     def v1_account_me(request: _FastAPIRequest) -> dict[str, Any]:
         return accounts_handlers.me(db_path, _account_payload(request, {}), {})
@@ -1171,6 +1206,12 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
         return accounts_handlers.token_request(db_path, _account_payload(request, payload), {})
+
+    @app.post("/v1/accounts/profile")
+    def v1_account_profile(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.profile(db_path, _account_payload(request, payload))
 
     # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
     @app.get("/v1/admin/dashboard")

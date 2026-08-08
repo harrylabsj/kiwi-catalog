@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 16
 
 
 @dataclass(frozen=True)
@@ -430,6 +430,7 @@ _MERCHANT_TOKEN_DDL = [
         agent_name text not null,
         contact_email text not null,
         purpose text not null default '',
+        phone text not null default '',
         merchant_id text not null default '',
         review_note text not null default '',
         account_id integer not null default 0,
@@ -643,6 +644,49 @@ def migration_014_accounts(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_015_email_verification(conn: sqlite3.Connection) -> None:
+    """邮箱验证（docs §account）：merchant_accounts 幂等加 3 列。"""
+    for column in (
+        "email_verified integer not null default 0",
+        "verification_code_hash text not null default ''",
+        "verification_expires_at text not null default ''",
+    ):
+        existing = {
+            str(row[1]) for row in conn.execute("pragma table_info(merchant_accounts)").fetchall()
+        }
+        column_name = column.split()[0]
+        if column_name not in existing:
+            conn.execute(f"alter table merchant_accounts add column {column}")
+
+
+def migration_016_account_profile(conn: sqlite3.Connection) -> None:
+    """账户基本信息（docs §account）：merchant_name/phone 列 + 工单 phone。"""
+    for column, table in (
+        ("merchant_name text not null default ''", "merchant_accounts"),
+        ("phone text not null default ''", "merchant_accounts"),
+        ("phone text not null default ''", "merchant_applications"),
+    ):
+        existing = {
+            str(row[1]) for row in conn.execute(f"pragma table_info({table})").fetchall()
+        }
+        column_name = column.split()[0]
+        if column_name not in existing:
+            conn.execute(f"alter table {table} add column {column}")
+    for column, table in (
+        ("token_encrypted text not null default ''", "merchant_tokens"),
+        ("account_id integer not null default 0", "merchant_applications"),
+    ):
+        existing = {
+            str(row[1])
+            for row in conn.execute(f"pragma table_info({table})").fetchall()
+        }
+        column_name = column.split()[0]
+        if column_name not in existing:
+            conn.execute(f"alter table {table} add column {column}")
+    for statement in _ACCOUNTS_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -658,6 +702,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(12, "merchant_tokens", migration_012_merchant_tokens),
     Migration(13, "usage_metrics", migration_013_usage_metrics),
     Migration(14, "accounts", migration_014_accounts),
+    Migration(15, "email_verification", migration_015_email_verification),
+    Migration(16, "account_profile", migration_016_account_profile),
 )
 
 

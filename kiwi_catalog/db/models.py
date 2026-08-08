@@ -228,6 +228,7 @@ create table if not exists merchant_applications (
         agent_name text not null,
         contact_email text not null,
         purpose text not null default '',
+        phone text not null default '',
         merchant_id text not null default '',
         review_note text not null default '',
         account_id integer not null default 0,
@@ -260,11 +261,20 @@ create table if not exists usage_metrics (
     # session token 落库 SHA-256 + 过期）；merchant_tokens.token_encrypted：
     # Fernet 加密的明文 token（登录后"我的"可查——解决签发即丢失）；
     # merchant_applications.account_id：注册自动建工单的归属账号。
+    # v15 — 邮箱验证：email_verified（0/1）、verification_code_hash（6 位
+    # 验证码 SHA-256）、verification_expires_at（15 分钟过期）。
+    # v16 — 账户基本信息：merchant_name（商家名称）、phone（电话，选填）；
+    # merchant_applications.phone（申请工单电话，选填）。
     """
 create table if not exists merchant_accounts (
         account_id integer primary key autoincrement,
         email text not null unique,
         password_hash text not null,
+        email_verified integer not null default 0,
+        verification_code_hash text not null default '',
+        verification_expires_at text not null default '',
+        merchant_name text not null default '',
+        phone text not null default '',
         merchant_id text not null default '',
         application_id integer not null default 0,
         status text not null default 'active'

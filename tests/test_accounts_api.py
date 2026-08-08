@@ -39,11 +39,8 @@ ADMIN_TOKEN = "admin-tok-123"
 OWNER_SECRET = "test-owner-secret"
 
 REGISTER_BODY = {
-    "domain": "acme.example",
-    "agent_name": "Acme Merchant",
     "email": "ops@acme.example",
     "password": "strong-pw-123",
-    "purpose": "sell displays",
 }
 
 
@@ -96,6 +93,7 @@ class AccountsApiTest(unittest.TestCase):
             {
                 "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
                 "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             },
             clear=False,
         )
@@ -103,8 +101,8 @@ class AccountsApiTest(unittest.TestCase):
         self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
-    def _register(self) -> str:
-        """注册并返回会话 cookie。"""
+    def _register(self) -> tuple[str, str]:
+        """注册（console 模式）并验证邮箱，返回会话 cookie + 验证码。"""
         status, payload, headers = _call_http(
             self.app,
             "POST",
@@ -113,11 +111,34 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
+        self.assertFalse(payload["email_verified"])
+        code = payload["verification_code"]
+        self.assertTrue(code, "console 模式应返回验证码")
+        # 验证邮箱 → 自动登录（Set-Cookie）
+        status, payload, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": REGISTER_BODY["email"], "code": code}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
         set_cookie = headers.get("set-cookie", "")
         self.assertIn("kiwi_session=", set_cookie)
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("Secure", set_cookie)
-        return set_cookie.split(";")[0].split("=", 1)[1]
+        return set_cookie.split(";")[0].split("=", 1)[1], code
+
+    def _request_token(self, session: str) -> None:
+        """用商家信息申请令牌（建工单）。"""
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
 
     def _approve_first_application(self) -> dict:
         from kiwi_catalog.db.session import db_session
@@ -139,15 +160,15 @@ class AccountsApiTest(unittest.TestCase):
 
     # ── 注册 ───────────────────────────────────────────────────────────────
 
-    def test_register_creates_account_and_application(self) -> None:
-        session = self._register()
+    def test_register_creates_account_no_application_yet(self) -> None:
+        """极简注册：建账号，商家工单在申请令牌时才创建。"""
+        session, _ = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["email"], "ops@acme.example")
-        self.assertIsNotNone(payload["application"])
-        self.assertEqual(payload["application"]["status"], "pending")
+        self.assertIsNone(payload["application"])  # 未申请令牌，无工单
         self.assertIsNone(payload["token"])
         self.assertEqual(payload["merchant_id"], "")
 
@@ -201,10 +222,74 @@ class AccountsApiTest(unittest.TestCase):
         status, payload, _ = _call_http(self.app, "GET", "/v1/accounts/me")
         self.assertEqual(status, 403, payload)
 
+    # ── 邮箱验证 ───────────────────────────────────────────────────────────
+
+    def test_login_blocked_before_email_verification(self) -> None:
+        """未验证邮箱不能登录。"""
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps(REGISTER_BODY).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertFalse(payload["email_verified"])
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/login",
+            json.dumps({"email": "ops@acme.example", "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 403, payload)
+        self.assertIn("not verified", payload.get("error", ""))
+
+    def test_verify_email_wrong_code(self) -> None:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps(REGISTER_BODY).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": "ops@acme.example", "code": "000000"}).encode(),
+        )
+        self.assertEqual(status, 403, payload)
+
+    def test_resend_code_works(self) -> None:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps(REGISTER_BODY).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/resend-code",
+            json.dumps({"email": "ops@acme.example"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["verification_code"])
+        # 新码可验证并登录
+        status, payload, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": "ops@acme.example", "code": payload["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertIn("set-cookie", headers)
+
     # ── token 找回（核心：审批后"我的"可见明文）──────────────────────────
 
     def test_token_visible_after_approval(self) -> None:
-        session = self._register()
+        session, _ = self._register()
+        self._request_token(session)
         issued = self._approve_first_application()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
@@ -218,7 +303,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertNotEqual(payload["token"]["token"], "")
 
     def test_login_then_me_after_approval(self) -> None:
-        self._register()
+        session, _ = self._register()
+        self._request_token(session)
         self._approve_first_application()
         status, payload, headers = _call_http(
             self.app,
@@ -236,26 +322,96 @@ class AccountsApiTest(unittest.TestCase):
 
     # ── token-request ──────────────────────────────────────────────────────
 
-    def test_token_request_dedupe(self) -> None:
-        session = self._register()
+    def test_token_request_with_merchant_info(self) -> None:
+        session, _ = self._register()
         cookie = f"kiwi_session={session}"
+        # 缺商家信息 → 400
         status, payload, _ = _call_http(
             self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
         )
+        self.assertEqual(status, 400, payload)
+        # 带商家信息 → 建工单 pending
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            cookie=cookie,
+        )
         self.assertEqual(status, 200, payload)
-        self.assertEqual(payload["status"], "pending")  # 已在注册时建了工单
+        self.assertEqual(payload["status"], "pending")
+        # 重复申请去重
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
         # 审批后 request 返回 active 现状
         self._approve_first_application()
         status, payload, _ = _call_http(
-            self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "active")
 
+    # ── 账户基本信息 ───────────────────────────────────────────────────────
+
+    def test_profile_update_and_view(self) -> None:
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        # 更新基本信息
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/profile",
+            json.dumps({"merchant_name": "Acme 商贸", "phone": "+86 138 0000 0000"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["merchant_name"], "Acme 商贸")
+        self.assertEqual(payload["phone"], "+86 138 0000 0000")
+        # me 反映基本信息
+        status, payload, _ = _call_http(
+            self.app, "GET", "/v1/accounts/me", cookie=cookie
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["merchant_name"], "Acme 商贸")
+        self.assertEqual(payload["phone"], "+86 138 0000 0000")
+        self.assertTrue(payload["created_at"])
+
+    def test_token_request_carries_phone(self) -> None:
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "phone": "+86 139"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        # 工单带电话
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select phone from merchant_applications where account_id = ("
+                "select account_id from merchant_accounts where email = 'ops@acme.example')"
+            ).fetchone()
+        self.assertEqual(row["phone"], "+86 139")
+
     # ── 登出 ───────────────────────────────────────────────────────────────
 
     def test_logout_invalidates_session(self) -> None:
-        session = self._register()
+        session, _ = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app, "POST", "/v1/accounts/logout", b"{}", cookie=cookie
