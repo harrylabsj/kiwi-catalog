@@ -203,6 +203,14 @@ _NAV = """
 </div></nav>
 """
 
+# 运营后台专用导航：不出现商家门户入口（审核后台/dashboard 不对外公布，
+# 官方找不到、无链接可到）。
+_ADMIN_NAV = """
+<nav class="nav"><div class="nav-inner">
+  <span class="nav-logo">Kiwi 运营后台</span>
+</div></nav>
+"""
+
 _FOOTER = """
 <footer class="footer"><div class="footer-inner">
   <p>Kiwi Merchant Portal · 令牌只显示一次，遗失请联系运营轮换 · 明文令牌永不出现在日志中</p>
@@ -300,7 +308,7 @@ def portal_admin() -> dict[str, Any]:
     ):
         return {"__html__": _not_found_html(), "__status__": 404}
     body = (
-        _NAV
+        _ADMIN_NAV
         + """
 <section class="section"><div class="section-inner">
   <div class="kicker">Admin</div>
@@ -418,7 +426,7 @@ def portal_dashboard() -> dict[str, Any]:
     ):
         return {"__html__": _not_found_html(), "__status__": 404}
     body = (
-        _NAV
+        _ADMIN_NAV
         + """
 <section class="section"><div class="section-inner">
   <div class="kicker">Operations</div>
