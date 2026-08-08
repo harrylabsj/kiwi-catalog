@@ -16,17 +16,17 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import parse_qs
 
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api.limits import max_request_body_bytes
 from kiwi_catalog.discovery.cache import compute_etag, etag_matches
-
 
 HandleRequest = Callable[[str | Path, str, str, dict[str, Any] | None, dict[str, Any] | None], tuple[int, dict[str, Any]]]
 RouteProvider = Callable[[], list[Any]]
@@ -172,8 +172,19 @@ class MarketplaceASGIApp:
 
         When the caller allows conditional GET and the client's
         ``If-None-Match`` matches the computed ETag, a body-less 304 is sent.
+
+        ``{"__html__": "..."}`` 标记响应（/portal/* 门户页，docs §6）改发
+        text/html；门户页含一次性令牌展示，响应带 no-store 防缓存。
         """
-        body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        html = response.get("__html__") if isinstance(response, dict) else None
+        if html is not None:
+            body = str(html).encode("utf-8")
+            content_type = b"text/html; charset=utf-8"
+            extra_headers = [(b"cache-control", b"no-store")]
+        else:
+            body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            content_type = b"application/json"
+            extra_headers = []
         etag = compute_etag(body)
         # A conditional GET only revalidates a *successful* representation:
         # never 304 an error body (e.g. a 404 for If-None-Match: *).
@@ -192,9 +203,10 @@ class MarketplaceASGIApp:
                 "type": "http.response.start",
                 "status": status,
                 "headers": [
-                    (b"content-type", b"application/json"),
+                    (b"content-type", content_type),
                     (b"etag", etag.encode("ascii")),
                     (b"content-length", str(len(body)).encode("ascii")),
+                    *extra_headers,
                 ],
             }
         )

@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 
 @dataclass(frozen=True)
@@ -408,6 +408,45 @@ def migration_009_shadow_tables(conn: sqlite3.Connection) -> None:
     )
 
 
+_MERCHANT_TOKEN_DDL = [
+    """
+    create table if not exists merchant_tokens (
+        merchant_id text primary key,
+        token_hash text not null,
+        status text not null default 'active'
+            check(status in ('active','revoked')),
+        issued_at text not null,
+        rotated_at text not null default '',
+        revoked_at text not null default ''
+    ) without rowid
+    """,
+    """
+    create table if not exists merchant_applications (
+        application_id integer primary key autoincrement,
+        status text not null default 'pending'
+            check(status in ('pending','approved','rejected')),
+        domain text not null,
+        agent_name text not null,
+        contact_email text not null,
+        purpose text not null default '',
+        merchant_id text not null default '',
+        review_note text not null default '',
+        created_at text not null,
+        reviewed_at text not null default ''
+    )
+    """,
+    """
+    create table if not exists merchant_application_limits (
+        actor_key text not null,
+        window_start text not null,
+        request_count integer not null default 0,
+        updated_at text not null,
+        primary key (actor_key, window_start)
+    )
+    """,
+]
+
+
 _COMMERCE_LISTINGS_DDL = [
     """
     create table if not exists commerce_listings (
@@ -514,6 +553,17 @@ def migration_010_commerce_listings(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_012_merchant_tokens(conn: sqlite3.Connection) -> None:
+    """Merchant token 分发（docs/kiwi-catalog-token-portal-design-v0.1 §3）。
+
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（tests/test_shadow_tables.py
+    锁定 fresh 路径与迁移路径等价）。merchant_tokens 每 merchant 至多一条
+    active 行；token_hash = SHA-256(明文)，明文永不落库。
+    """
+    for statement in _MERCHANT_TOKEN_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -526,6 +576,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(9, "shadow_tables", migration_009_shadow_tables),
     Migration(10, "commerce_listings", migration_010_commerce_listings),
     Migration(11, "search_indexes_and_domain_unique", migration_011_search_indexes_and_domain_unique),
+    Migration(12, "merchant_tokens", migration_012_merchant_tokens),
 )
 
 

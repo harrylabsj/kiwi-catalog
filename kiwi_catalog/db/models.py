@@ -202,6 +202,45 @@ create table if not exists merchants (
         updated_at text not null
     )
     """,
+    # v12 — merchant token 分发（docs/kiwi-catalog-token-portal-design-v0.1 §3）。
+    # merchant_tokens：每 merchant 至多一条 active 行；token_hash = SHA-256(明文)，
+    # 明文永不落库（签发/轮换时响应一次即弃）。merchant_applications：申请工单，
+    # approve 时平台签发 mkt_<rand> merchant_id 并原子写入三张表。
+    """
+create table if not exists merchant_tokens (
+        merchant_id text primary key,
+        token_hash text not null,
+        status text not null default 'active'
+            check(status in ('active','revoked')),
+        issued_at text not null,
+        rotated_at text not null default '',
+        revoked_at text not null default ''
+    ) without rowid
+    """,
+    """
+create table if not exists merchant_applications (
+        application_id integer primary key autoincrement,
+        status text not null default 'pending'
+            check(status in ('pending','approved','rejected')),
+        domain text not null,
+        agent_name text not null,
+        contact_email text not null,
+        purpose text not null default '',
+        merchant_id text not null default '',
+        review_note text not null default '',
+        created_at text not null,
+        reviewed_at text not null default ''
+    )
+    """,
+    """
+create table if not exists merchant_application_limits (
+        actor_key text not null,
+        window_start text not null,
+        request_count integer not null default 0,
+        updated_at text not null,
+        primary key (actor_key, window_start)
+    )
+    """,
     """
 create table if not exists audit_events (
         id integer primary key autoincrement,

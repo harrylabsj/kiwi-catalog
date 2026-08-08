@@ -59,14 +59,21 @@ docker run --rm -p 8601:8600 -e KIWI_CATALOG_OWNER_TOKEN_SECRET=... kiwi-catalog
   （verify/mark_stale/suspend/reinstate 三域编排）、agent_catalog_writes.py
   （register/claim，public-only 字段白名单）
 - `api/` — app.py（路由表 + FastAPI 双栈）、handlers/agent_catalog.py（v1 +
-  legacy handler）、auth.py（admin token / owner token HMAC）、idempotency.py
+  legacy handler）、handlers/merchants.py（token 分发：apply/approve/rotate/
+  revoke/self，docs/kiwi-catalog-token-portal-design-v0.1）、handlers/portal.py
+  （/portal/* HTML 门户页，`{"__html__": ...}` 标记经 fallback _send_json
+  发 text/html + no-store）、auth.py（admin token / owner token 双路径：
+  随机 token 落库 merchant_tokens 优先，HMAC 派生 fallback）、idempotency.py
 - `db/` — models.py（SCHEMA）、migrations.py（**新增列先加迁移 vN，幂等
   ALTER + 回填**；user_version 门保证每库只跑一次）
 
 ## 约定
 
-- 数据目录/文件 0700/0600；owner token = HMAC-SHA256(secret,
-  `kiwi-catalog-owner:{merchant_id}`)。
+- 数据目录/文件 0700/0600；owner token 双路径（docs/kiwi-catalog-token-portal-design-v0.1）：
+  随机 token（`mkt_` + 32B urlsafe，SHA-256 落库 merchant_tokens，明文仅
+  签发/轮换时响应一次）优先；HMAC-SHA256(secret, `kiwi-catalog-owner:{merchant_id}`)
+  派生路径 fallback（存量兼容）。轮换/吊销只走 admin（泄露场景下旧 token 自助
+  轮换=攻击者也能轮换）。
 - 时间戳格式：全库 ISO 文本（UTC、无微秒，`now_iso()`）——唯一例外是
   `verification_queue_tasks` 的 `enqueued_at`/`started_at`/`finished_at`
   （epoch REAL，与 `time.time()` 同单位，数值比较；跨表比较前先转换）。

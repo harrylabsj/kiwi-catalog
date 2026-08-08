@@ -61,14 +61,30 @@ def _write_rate_limit_per_minute() -> int:
     return rate_limit_per_minute(raw, default=60, maximum=2**63 - 1)
 
 
-def _require_owner_token_for_merchant(payload: dict[str, Any], merchant_id: str) -> str:
-    """owner token 校验（admin 可豁免）；返回 actor 串。"""
+def _require_owner_token_for_merchant(
+    payload: dict[str, Any],
+    merchant_id: str,
+    db_path: str | Path | None = None,
+    conn: Any | None = None,
+) -> str:
+    """owner token 双路径校验（admin 可豁免）；返回 actor 串。
+
+    随机 token 落库校验（docs §5）需要连接：调用点在 db_session 块内传
+    conn=；在块外传 db_path=（helper 自开短连接）；两者都缺省时退化为
+    HMAC 派生路径（行为同旧版）。
+    """
     try:
         api_auth.require_admin_token(payload)
         return "admin"
     except AuthError:
         pass
-    api_auth.require_owner_token(payload, merchant_id)
+    if conn is not None:
+        api_auth.require_merchant_token(payload, merchant_id, conn)
+    elif db_path is not None:
+        with db_session(db_path) as token_conn:
+            api_auth.require_merchant_token(payload, merchant_id, token_conn)
+    else:
+        api_auth.require_merchant_token(payload, merchant_id, None)
     return f"merchant:{merchant_id}"
 
 
@@ -152,7 +168,7 @@ def v1_list_agent_listings(db_path: str | Path, agent_id: str, query: dict[str, 
             # 审查 P2：admin 豁免此前未生效——直接 require_owner_token 会用
             # admin token 比对 HMAC 派生值恒 403，与 docstring「授权与
             # withdraw/reinstate 一致（admin 豁免）」相悖；复用同一 helper。
-            _require_owner_token_for_merchant(auth_payload, merchant_id)
+            _require_owner_token_for_merchant(auth_payload, merchant_id, conn=conn)
         else:
             try:
                 api_auth.require_admin_token(auth_payload)
@@ -193,7 +209,7 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     # 先限流后鉴权让无 token 请求耗尽全体商户共享写预算）。actor_key 按
     # owner_token 隔离——跨商户幂等键不再冲突（历史教训：匿名桶 409）。
     actor = _require_owner_token_for_merchant(
-        payload, str(canonical.get("merchant_id") or "")
+        payload, str(canonical.get("merchant_id") or ""), db_path=db_path
     )
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
@@ -263,7 +279,7 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
             raise NotFoundError(f"Unknown listing: {listing_id}")
         merchant_id = str(row.get("merchant_id") or "")
         owner_agent_id = str(row.get("owner_agent_id") or "")
-    actor = _require_owner_token_for_merchant(payload, merchant_id)
+    actor = _require_owner_token_for_merchant(payload, merchant_id, db_path=db_path)
 
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
@@ -320,7 +336,7 @@ def v1_reinstate_listing(db_path: str | Path, listing_id: str, payload: dict[str
             raise NotFoundError(f"Unknown listing: {listing_id}")
         merchant_id = str(row.get("merchant_id") or "")
         owner_agent_id = str(row.get("owner_agent_id") or "")
-    actor = _require_owner_token_for_merchant(payload, merchant_id)
+    actor = _require_owner_token_for_merchant(payload, merchant_id, db_path=db_path)
 
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)
