@@ -35,6 +35,7 @@ from typing import Any
 
 from kiwi_catalog import VERSION
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
@@ -276,6 +277,24 @@ RouteEntry(
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
     ),
+# ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
+RouteEntry(
+        {"GET"},
+        "/v1/admin/dashboard",
+        lambda db_path, payload, query, **kw: _v1_admin_dashboard(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/merchants",
+        lambda db_path, payload, query, **kw: _v1_admin_merchants(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/merchants/{merchant_id}/report",
+        lambda db_path, payload, query, merchant_id: _v1_admin_merchant_report(
+            db_path, merchant_id, payload, query
+        ),
+    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -296,6 +315,11 @@ RouteEntry(
         {"GET"},
         "/portal/status",
         lambda db_path, payload, query, **kw: _portal_status(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/dashboard",
+        lambda db_path, payload, query, **kw: _portal_dashboard(),
     ),
 )
 
@@ -429,6 +453,21 @@ def _v1_merchant_self(db_path, payload, query):
     return merchants_handlers.self_status(db_path, payload, query or {})
 
 
+# ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
+
+
+def _v1_admin_dashboard(db_path, payload, query):
+    return admin_handlers.dashboard(db_path, payload, query or {})
+
+
+def _v1_admin_merchants(db_path, payload, query):
+    return admin_handlers.merchant_list(db_path, payload, query or {})
+
+
+def _v1_admin_merchant_report(db_path, merchant_id, payload, query):
+    return admin_handlers.merchant_report(db_path, merchant_id, payload, query or {})
+
+
 # ── /portal wrapper（门户页面）────────────────────────────────────────────
 
 
@@ -446,6 +485,10 @@ def _portal_admin():
 
 def _portal_status():
     return portal_handlers.portal_status()
+
+
+def _portal_dashboard():
+    return portal_handlers.portal_dashboard()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):
@@ -1014,6 +1057,23 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_merchant_self(db_path, {}, _query_params_from_request(request))
 
+    # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
+    @app.get("/v1/admin/dashboard")
+    def v1_admin_dashboard(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_dashboard(db_path, {}, _query_params_from_request(request))
+
+    @app.get("/v1/admin/merchants")
+    def v1_admin_merchants(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_merchants(db_path, {}, _query_params_from_request(request))
+
+    @app.get("/v1/admin/merchants/{merchant_id}/report")
+    def v1_admin_merchant_report(
+        merchant_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _v1_admin_merchant_report(
+            db_path, merchant_id, {}, _query_params_from_request(request)
+        )
+
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
     from fastapi.responses import HTMLResponse
 
@@ -1043,6 +1103,10 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/status")
     def portal_status_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_status())
+
+    @app.get("/portal/dashboard")
+    def portal_dashboard_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_dashboard())
 
 
 def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:

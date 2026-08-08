@@ -241,6 +241,17 @@ create table if not exists merchant_application_limits (
         primary key (actor_key, window_start)
     )
     """,
+    # v13 — 运营埋点（dashboard 数据源）。metric × day 每日计数，原子
+    # INSERT ON CONFLICT +1；day 为 UTC 日期（YYYY-MM-DD）。
+    """
+create table if not exists usage_metrics (
+        metric text not null,
+        day text not null,
+        count integer not null default 0,
+        updated_at text not null,
+        primary key (metric, day)
+    )
+    """,
     """
 create table if not exists audit_events (
         id integer primary key autoincrement,

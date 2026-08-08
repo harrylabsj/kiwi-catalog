@@ -28,7 +28,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiwi_catalog.agent_catalog.serializers import catalog_agent_record, catalog_search_result
+from kiwi_catalog.agent_catalog.serializers import (
+    catalog_agent_record,
+    catalog_search_result,
+)
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     _list_capabilities_by_agent,
     _list_endpoints_by_agent,
@@ -38,26 +41,43 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     get_catalog_agent_by_domain,
     get_catalog_agent_with_merchant,
     list_capabilities,
-    list_catalog_agents as _list_catalog_agents,
-    list_catalog_agents_by_merchant as _list_catalog_agents_by_merchant,
     list_endpoints,
     list_skills,
     require_catalog_agent,
+)
+from kiwi_catalog.agent_catalog.sqlite_repository import (
+    list_catalog_agents as _list_catalog_agents,
+)
+from kiwi_catalog.agent_catalog.sqlite_repository import (
+    list_catalog_agents_by_merchant as _list_catalog_agents_by_merchant,
+)
+from kiwi_catalog.agent_catalog.sqlite_repository import (
     search_catalog_agents as _repo_search_catalog_agents,
 )
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
-from kiwi_catalog.core.errors import AuthError, NotFoundError, PermissionDenied, ValidationError
+from kiwi_catalog.api.handlers.common import (
+    MAX_SQLITE_INTEGER,
+    require_field,
+    result_limit,
+)
+from kiwi_catalog.core.errors import (
+    AuthError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
 from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
-from kiwi_catalog.services import agent_catalog_writes
-from kiwi_catalog.services.agent_catalog import search_catalog_agents as _search_catalog_agents_service
+from kiwi_catalog.services import agent_catalog_writes, usage_metrics
+from kiwi_catalog.services.agent_catalog import (
+    search_catalog_agents as _search_catalog_agents_service,
+)
+
 # 审查 P1-8：VerificationQueueFullError 必须在模块级可见——此前只在
 # _verification_queue 函数内导入，队列满的 except 分支求值时抛 NameError
 # → 500，优雅降级（verification_enqueued=False）是死代码。
 from kiwi_catalog.services.agent_verification import VerificationQueueFullError
-
-from kiwi_catalog.api.handlers.common import MAX_SQLITE_INTEGER, require_field, result_limit
 
 
 def _serialize_row(
@@ -130,6 +150,7 @@ def search_agent_catalog(db_path: str | Path, query: dict[str, Any]) -> dict[str
     """GET /v1/agent-catalog/agents/search — filtered search (§8.2)."""
     limit = result_limit(query.get("limit"), default=20)
     with db_session(db_path) as conn:
+        usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
         result = _search_catalog_agents_service(
             conn=conn,
             q=str(query.get("q") or ""),
@@ -193,7 +214,6 @@ def _verification_queue(db_path: str | Path) -> Any:
         if queue is None:
             from kiwi_catalog.services.agent_verification import (
                 VerificationQueueConfig,
-                VerificationQueueFullError,
                 make_verification_worker,
             )
 
@@ -838,6 +858,7 @@ def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
         str(query.get("hosting_mode") or "")
     )
     with db_session(db_path) as conn:
+        usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
         rows, next_cursor = _repo_search_catalog_agents(
             conn,
             q=str(query.get("q") or ""),
