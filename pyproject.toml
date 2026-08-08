@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "kiwi-catalog"
 version = "0.1.0"
 description = "Standalone Agent Catalog service (published from shopping-cli extraction plan, phase 2)"
+readme = "README.md"
 requires-python = ">=3.11"
 # cryptography：token 加密存储（Fernet）——标准库无可逆加密，商家凭证
 # 安全存储的必要例外（docs §account）
