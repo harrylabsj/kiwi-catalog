@@ -114,16 +114,29 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         (merchant_id, agent_name, now, now),
     )
     token = generate_merchant_token()
+    # v14：明文 Fernet 加密落库（登录后"我的"可查，docs §account）
+    from kiwi_catalog.services import accounts as accounts_service
+
+    encrypted = accounts_service.encrypt_merchant_token(token)
     conn.execute(
         "insert or replace into merchant_tokens"
-        " (merchant_id, token_hash, status, issued_at) values (?, ?, 'active', ?)",
-        (merchant_id, token_digest(token), now),
+        " (merchant_id, token_hash, token_encrypted, status, issued_at)"
+        " values (?, ?, ?, 'active', ?)",
+        (merchant_id, token_digest(token), encrypted, now),
     )
     conn.execute(
         "update merchant_applications set status = 'approved', merchant_id = ?,"
         " reviewed_at = ? where application_id = ?",
         (merchant_id, now, application_id),
     )
+    # 回填注册账号的 merchant_id（account_id>0 的工单来自账号注册）
+    account_id = int(row["account_id"] or 0)
+    if account_id:
+        conn.execute(
+            "update merchant_accounts set merchant_id = ?, updated_at = ?"
+            " where account_id = ?",
+            (merchant_id, now, account_id),
+        )
     append_catalog_audit(
         conn,
         "",
@@ -182,10 +195,13 @@ def rotate_token(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
     require_token_row(conn, merchant_id)
     now = now_iso()
     token = generate_merchant_token()
+    from kiwi_catalog.services import accounts as accounts_service
+
+    encrypted = accounts_service.encrypt_merchant_token(token)
     conn.execute(
-        "update merchant_tokens set token_hash = ?, status = 'active',"
-        " rotated_at = ? where merchant_id = ?",
-        (token_digest(token), now, merchant_id),
+        "update merchant_tokens set token_hash = ?, token_encrypted = ?,"
+        " status = 'active', rotated_at = ? where merchant_id = ?",
+        (token_digest(token), encrypted, now, merchant_id),
     )
     append_catalog_audit(
         conn,

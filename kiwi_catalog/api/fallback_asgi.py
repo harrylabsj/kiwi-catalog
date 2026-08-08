@@ -138,6 +138,10 @@ class MarketplaceASGIApp:
             authorization=headers.get("authorization", ""),
             idempotency_key=headers.get("idempotency-key", ""),
         )
+        # 会话 cookie（账号体系）：透传给 handler（auth 头之外的最小传输面）
+        cookie = headers.get("cookie", "")
+        if cookie:
+            payload["_cookie"] = cookie
         try:
             raw_query = scope.get("query_string", b"").decode("utf-8")
         except UnicodeDecodeError:
@@ -175,7 +179,8 @@ class MarketplaceASGIApp:
 
         ``{"__html__": "..."}`` 标记响应（/portal/* 门户页，docs §6）改发
         text/html；门户页含一次性令牌展示，响应带 no-store 防缓存。
-        ``__status__`` 键覆盖状态码（如审核后台关闭时发真实 404）。
+        ``__status__`` 键覆盖状态码（如审核后台关闭时发真实 404）；
+        ``__cookies__`` 列表下发 Set-Cookie（账号会话，docs §account）。
         """
         html = response.get("__html__") if isinstance(response, dict) else None
         override_status = (
@@ -191,6 +196,18 @@ class MarketplaceASGIApp:
             body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
             content_type = b"application/json"
             extra_headers = []
+        cookies = response.get("__cookies__") if isinstance(response, dict) else None
+        if cookies:
+            extra_headers.extend(
+                (b"set-cookie", str(cookie).encode("utf-8")) for cookie in cookies
+            )
+        if html is None and isinstance(response, dict) and "__cookies__" in response:
+            # 元键不进响应体（JSON 分支）：只用于下发 Set-Cookie
+            body = json.dumps(
+                {k: v for k, v in response.items() if k != "__cookies__"},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
         etag = compute_etag(body)
         # A conditional GET only revalidates a *successful* representation:
         # never 304 an error body (e.g. a 404 for If-None-Match: *).

@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from kiwi_catalog.cli import build_parser, main
 from kiwi_catalog.db.session import db_session, now_iso
@@ -39,6 +41,12 @@ class CatalogMerchantCliTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "catalog.sqlite"
+        # approve 签发时对 token 做 Fernet 加密（v14），需要 owner secret
+        env_patch = mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret"}, clear=False
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

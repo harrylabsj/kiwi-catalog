@@ -204,12 +204,14 @@ create table if not exists merchants (
     """,
     # v12 — merchant token 分发（docs/kiwi-catalog-token-portal-design-v0.1 §3）。
     # merchant_tokens：每 merchant 至多一条 active 行；token_hash = SHA-256(明文)，
-    # 明文永不落库（签发/轮换时响应一次即弃）。merchant_applications：申请工单，
-    # approve 时平台签发 mkt_<rand> merchant_id 并原子写入三张表。
+    # token_encrypted = Fernet 加密明文（v14 起，登录后"我的"可查）；明文不进
+    # 日志。merchant_applications：申请工单，approve 时平台签发 mkt_<rand>
+    # merchant_id 并原子写入三张表；account_id（v14）归属注册账号。
     """
 create table if not exists merchant_tokens (
         merchant_id text primary key,
         token_hash text not null,
+        token_encrypted text not null default '',
         status text not null default 'active'
             check(status in ('active','revoked')),
         issued_at text not null,
@@ -228,6 +230,7 @@ create table if not exists merchant_applications (
         purpose text not null default '',
         merchant_id text not null default '',
         review_note text not null default '',
+        account_id integer not null default 0,
         created_at text not null,
         reviewed_at text not null default ''
     )
@@ -250,6 +253,32 @@ create table if not exists usage_metrics (
         count integer not null default 0,
         updated_at text not null,
         primary key (metric, day)
+    )
+    """,
+    # v14 — 账号体系（docs §account）。merchant_accounts：注册即建账号，
+    # merchant_id 审批签发后回填；account_sessions：登录会话（随机
+    # session token 落库 SHA-256 + 过期）；merchant_tokens.token_encrypted：
+    # Fernet 加密的明文 token（登录后"我的"可查——解决签发即丢失）；
+    # merchant_applications.account_id：注册自动建工单的归属账号。
+    """
+create table if not exists merchant_accounts (
+        account_id integer primary key autoincrement,
+        email text not null unique,
+        password_hash text not null,
+        merchant_id text not null default '',
+        application_id integer not null default 0,
+        status text not null default 'active'
+            check(status in ('active','suspended')),
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create table if not exists account_sessions (
+        session_token_hash text primary key,
+        account_id integer not null,
+        expires_at text not null,
+        created_at text not null
     )
     """,
     """

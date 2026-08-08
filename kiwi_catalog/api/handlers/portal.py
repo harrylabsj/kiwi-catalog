@@ -592,6 +592,201 @@ document.getElementById('report_back').addEventListener('click', () => {
 """
 
 
+_ACCOUNT_JS = """
+function postJson(url, body) {
+  return fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})
+    .then(r => r.json());
+}
+function go(path) { window.location.href = path; }
+"""
+
+
+def _account_page(title: str, body: str) -> dict[str, Any]:
+    return _page(title, body, extra_js=_ACCOUNT_JS)
+
+
+def portal_register() -> dict[str, Any]:
+    """注册页：merchant 基本信息注册（建账号 + 待审工单），成功即登录。"""
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Register</div>
+  <h2>注册商家账号</h2>
+  <p class="lead">填写商家基本信息注册——审核通过后，在「我的」里申请并查看令牌。</p>
+  <div class="card form-card">
+    <label for="domain">店铺域名（bare hostname，如 acme.example）</label>
+    <input id="domain" placeholder="acme.example" autocomplete="off">
+    <label for="agent_name">商家名称（Agent 名）</label>
+    <input id="agent_name" placeholder="Acme Merchant">
+    <label for="email">邮箱（登录账号）</label>
+    <input id="email" type="email" placeholder="ops@acme.example">
+    <label for="password">密码（至少 8 位）</label>
+    <input id="password" type="password" autocomplete="new-password">
+    <label for="purpose">用途说明（可选）</label>
+    <textarea id="purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
+    <button class="btn-form" id="submit">注册</button>
+    <div id="out"></div>
+    <p class="small" style="margin-top:16px">已有账号？<a href="/portal/login">登录</a></p>
+  </div>
+</div></section>
+<script>
+document.getElementById('submit').addEventListener('click', () => {
+  const btn = document.getElementById('submit');
+  const out = document.getElementById('out');
+  btn.disabled = true;
+  postJson('/v1/accounts/register', {
+    domain: document.getElementById('domain').value.trim(),
+    agent_name: document.getElementById('agent_name').value.trim(),
+    email: document.getElementById('email').value.trim(),
+    password: document.getElementById('password').value,
+    purpose: document.getElementById('purpose').value.trim(),
+  }).then(r => {
+    if (r.ok) {
+      out.className = 'ok';
+      out.textContent = '注册成功，等待平台审核。正在进入「我的」…';
+      setTimeout(() => go('/portal/account'), 800);
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '注册失败';
+      btn.disabled = false;
+    }
+  });
+});
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("商家注册", body)
+
+
+def portal_login() -> dict[str, Any]:
+    """登录页：邮箱 + 密码 → 会话 cookie → 「我的」。"""
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Login</div>
+  <h2>商家登录</h2>
+  <div class="card form-card">
+    <label for="email">邮箱</label>
+    <input id="email" type="email" autocomplete="email">
+    <label for="password">密码</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <button class="btn-form" id="submit">登录</button>
+    <div id="out"></div>
+    <p class="small" style="margin-top:16px">还没有账号？<a href="/portal/register">注册商家账号</a></p>
+  </div>
+</div></section>
+<script>
+document.getElementById('submit').addEventListener('click', () => {
+  const btn = document.getElementById('submit');
+  const out = document.getElementById('out');
+  btn.disabled = true;
+  postJson('/v1/accounts/login', {
+    email: document.getElementById('email').value.trim(),
+    password: document.getElementById('password').value,
+  }).then(r => {
+    if (r.ok) {
+      out.className = 'ok';
+      out.textContent = '登录成功，正在进入「我的」…';
+      setTimeout(() => go('/portal/account'), 500);
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '登录失败';
+      btn.disabled = false;
+    }
+  });
+});
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("商家登录", body)
+
+
+def portal_account() -> dict[str, Any]:
+    """「我的」：工单状态 / 申请 token / 查看 token（明文，登录态）/ 状态查询。"""
+    body = (
+        _NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">My Account</div>
+  <h2>我的</h2>
+  <div id="out"></div>
+  <div id="not_logged" style="display:none">
+    <div class="card form-card">
+      <p class="lead">登录后查看你的商家令牌与申请状态。</p>
+      <p style="margin-top:16px"><a class="btn btn-solid" href="/portal/login">登录</a>
+      <a class="btn btn-ghost" href="/portal/register">注册商家账号</a></p>
+    </div>
+  </div>
+  <div id="content" style="display:none">
+    <div class="card form-card">
+      <div id="profile"></div>
+      <div id="token_box"></div>
+      <button class="btn-form" id="request_token" style="display:none">申请令牌</button>
+      <button class="btn-mini" id="logout" style="margin-top:14px">退出登录</button>
+    </div>
+  </div>
+</div></section>
+<script>
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function loadMe() {
+  fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+    if (!r.ok) {
+      document.getElementById('not_logged').style.display = 'block';
+      return;
+    }
+    document.getElementById('content').style.display = 'block';
+    const p = document.getElementById('profile');
+    let html = '<h3>' + esc(r.email) + '</h3>';
+    html += '<p class="small">账号 ID ' + r.account_id + (r.merchant_id ? ' · 商家 ' + esc(r.merchant_id) : '') + '</p>';
+    if (r.application) {
+      html += '<p>申请状态：<strong>' + esc(r.application.status) + '</strong>'
+        + (r.application.status === 'rejected' && r.application.review_note ? '（' + esc(r.application.review_note) + '）' : '')
+        + ' · ' + esc(r.application.agent_name) + ' · ' + esc(r.application.domain) + '</p>';
+    }
+    p.innerHTML = html;
+    const tb = document.getElementById('token_box');
+    const rt = document.getElementById('request_token');
+    if (r.token && r.token.status === 'active') {
+      tb.innerHTML = '<p class="small">商家令牌（mkt_…，保管好；遗失可联系运营轮换）</p>'
+        + '<div class="token-box">' + esc(r.token.token) + '</div>'
+        + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
+        + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
+        + (r.token.revoked_at ? ' · 已吊销 ' + esc(r.token.revoked_at.slice(0, 10)) : '')
+        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>'
+        + '<button class="btn-mini" onclick="navigator.clipboard.writeText(document.querySelector(\'.token-box\').textContent.trim())">复制令牌</button>';
+      rt.style.display = 'none';
+    } else if (r.application && r.application.status === 'pending') {
+      tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
+      rt.style.display = 'none';
+    } else {
+      tb.innerHTML = '<p class="small muted">还没有令牌。提交申请，平台审核通过后签发。</p>';
+      rt.style.display = 'inline-block';
+    }
+  });
+}
+document.getElementById('request_token').addEventListener('click', () => {
+  postJson('/v1/accounts/token-request', {}).then(r => {
+    if (r.ok) { loadMe(); } else {
+      document.getElementById('out').className = 'err';
+      document.getElementById('out').textContent = r.error || '申请失败';
+    }
+  });
+});
+document.getElementById('logout').addEventListener('click', () => {
+  postJson('/v1/accounts/logout', {}).then(() => { window.location.href = '/portal'; });
+});
+loadMe();
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("我的", body)
+
+
 def _not_found_html() -> str:
     """404 页面 HTML 字符串（不含 JS，供 __status__: 404 包裹）。"""
     body = (

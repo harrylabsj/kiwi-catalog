@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable
 
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 @dataclass(frozen=True)
@@ -413,6 +413,7 @@ _MERCHANT_TOKEN_DDL = [
     create table if not exists merchant_tokens (
         merchant_id text primary key,
         token_hash text not null,
+        token_encrypted text not null default '',
         status text not null default 'active'
             check(status in ('active','revoked')),
         issued_at text not null,
@@ -431,6 +432,7 @@ _MERCHANT_TOKEN_DDL = [
         purpose text not null default '',
         merchant_id text not null default '',
         review_note text not null default '',
+        account_id integer not null default 0,
         created_at text not null,
         reviewed_at text not null default ''
     )
@@ -464,6 +466,30 @@ _USAGE_METRICS_DDL = [
         count integer not null default 0,
         updated_at text not null,
         primary key (metric, day)
+    )
+    """,
+]
+
+_ACCOUNTS_DDL = [
+    """
+    create table if not exists merchant_accounts (
+        account_id integer primary key autoincrement,
+        email text not null unique,
+        password_hash text not null,
+        merchant_id text not null default '',
+        application_id integer not null default 0,
+        status text not null default 'active'
+            check(status in ('active','suspended')),
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+    create table if not exists account_sessions (
+        session_token_hash text primary key,
+        account_id integer not null,
+        expires_at text not null,
+        created_at text not null
     )
     """,
 ]
@@ -595,6 +621,28 @@ def migration_013_usage_metrics(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_014_accounts(conn: sqlite3.Connection) -> None:
+    """账号体系（docs §account）：幂等 ALTER + 回填 + 新表。
+
+    - merchant_tokens 加 token_encrypted（Fernet 加密明文，存量行回填空串）；
+    - merchant_applications 加 account_id（存量行回填 0）；
+    - merchant_accounts / account_sessions 建表。
+    """
+    for column, table in (
+        ("token_encrypted text not null default ''", "merchant_tokens"),
+        ("account_id integer not null default 0", "merchant_applications"),
+    ):
+        existing = {
+            str(row[1])
+            for row in conn.execute(f"pragma table_info({table})").fetchall()
+        }
+        column_name = column.split()[0]
+        if column_name not in existing:
+            conn.execute(f"alter table {table} add column {column}")
+    for statement in _ACCOUNTS_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -609,6 +657,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(11, "search_indexes_and_domain_unique", migration_011_search_indexes_and_domain_unique),
     Migration(12, "merchant_tokens", migration_012_merchant_tokens),
     Migration(13, "usage_metrics", migration_013_usage_metrics),
+    Migration(14, "accounts", migration_014_accounts),
 )
 
 
