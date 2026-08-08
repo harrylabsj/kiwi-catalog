@@ -775,7 +775,7 @@ def portal_account() -> dict[str, Any]:
         <button class="btn-form" id="save_profile">保存基本信息</button>
         <div id="out_profile"></div>
       </div>
-      <button class="btn-mini" id="logout" style="margin-top:14px">退出登录</button>
+      <button class="btn-form" id="logout">退出登录</button>
     </div>
   </div>
 </div></section>
