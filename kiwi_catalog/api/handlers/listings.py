@@ -147,13 +147,23 @@ def v1_get_listing(db_path: str | Path, listing_id: str) -> dict[str, Any]:
         return {"ok": True, "listing": listing_record(row)}
 
 
-def v1_list_agent_listings(db_path: str | Path, agent_id: str, query: dict[str, Any]) -> dict[str, Any]:
+def v1_list_agent_listings(
+    db_path: str | Path,
+    agent_id: str,
+    query: dict[str, Any],
+    auth_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """GET /v1/agents/{agent_id}/listings —— publisher 自查（v0.4 §7.2）。
 
     支持 ?freshness_state=STALE 过滤过期项（v0.4 §15.1 闭环的自查半边）。
 
     授权与 withdraw/reinstate 一致（owner token 或 admin token；admin 豁免）：
-    GET 无 body，token 经 query 传递（?owner_token=… 或 ?admin_token=…）。
+    - owner_token 仍经 query 传递（?owner_token=…，legacy 自查兼容，GET 无
+      body 的必然妥协，CLAUDE.md 记录为不修的设计取舍）；
+    - admin token 只经 Authorization: Bearer 传递（KC-SEC-02：凭据不得进
+      query——会落入访问日志/浏览器历史）。query 中的 admin_token 一律忽略，
+      由 transport 层把 header 合并为 payload["_auth_token"]（fallback 栈
+      payload_with_auth 与 FastAPI 路由都会合并）。
     agent 未绑定 merchant 时不存在可归属 owner——仅 admin 可读，防止任意
     访客枚举任意 merchant 的 listing 清单与治理状态（SUSPENDED/WITHDRAWN）。
     """
@@ -163,8 +173,12 @@ def v1_list_agent_listings(db_path: str | Path, agent_id: str, query: dict[str, 
     if freshness_state is not None and freshness_state not in LISTING_FRESHNESS_STATES:
         raise ValidationError(f"freshness_state must be one of {LISTING_FRESHNESS_STATES}")
 
-    q_token = str(query.get("owner_token") or query.get("admin_token") or "").strip()
-    auth_payload = {"owner_token": q_token, "admin_token": q_token}
+    # query 派生 auth 只认 owner_token（自查兼容）；admin 凭据不得出现在
+    # query 派生的 auth 中——admin 只从 transport 的 _auth_token 读取。
+    auth_payload = dict(auth_payload or {})
+    q_owner_token = str(query.get("owner_token") or "").strip()
+    if q_owner_token:
+        auth_payload["owner_token"] = q_owner_token
     with db_session(db_path) as conn:
         merchant_id = owner_agent_merchant_id(conn, owner_agent_id)
         if merchant_id:
