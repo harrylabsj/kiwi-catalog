@@ -28,6 +28,12 @@ from typing import Any
 from kiwi_catalog.agent_catalog.catalog_audit import (
     append_catalog_audit,  # noqa: F401 —— facade re-export
 )
+from kiwi_catalog.agent_catalog.catalog_query import (
+    agent_list_cursor_clause as _agent_list_cursor_clause,
+)
+from kiwi_catalog.agent_catalog.catalog_query import (
+    agent_page_query as _agent_page_query,
+)
 from kiwi_catalog.agent_catalog.pagination import (
     agent_cursor_predicate as _agent_cursor_predicate,
 )
@@ -71,7 +77,9 @@ from kiwi_catalog.db.session import now_iso
 # ── §8.3 keyset pagination（审查 P1-6）─────────────────────────────────────
 # 三处列表/搜索共用同一排序键：verification_status rank → last_verified_at
 # desc → display_name → catalog_agent_id。键集分页谓词必须与排序键完全同键，
-# 历史 bug：游标只编码 catalog_agent_id，跨 rank/lva 组丢行/重行。
+# 历史 bug：游标只编码 catalog_agent_id，跨 rank/lva 组丢行/重行。排序键与
+# 查询组装收敛在 catalog_query.py（AGENT_ORDER_BY 与 pagination 的
+# agent_cursor_predicate 同源）。
 
 def _like_escaped(term: str) -> str:
     """LIKE 通配符转义（审查 P2）：用户输入里的 % / _ / \\ 是 SQL LIKE 元字符，
@@ -585,40 +593,13 @@ def search_catalog_agents(
     if clauses:
         where = "where " + " and ".join(clauses)
 
-    # ── deterministic ordering (§8.3) ───────────────────────────────────
-    # Priority: verification_status rank → last_verified_at desc → display_name → catalog_agent_id
-    order = """
-    order by
-        case ca.verification_status
-            when 'commerce_verified' then 0
-            when 'agent_verified' then 1
-            when 'domain_verified' then 2
-            when 'profile_valid' then 3
-            when 'discovered' then 4
-            when 'stale' then 5
-            when 'unreachable' then 6
-            when 'suspended' then 7
-            when 'rejected' then 8
-            else 9
-        end,
-        ca.last_verified_at desc,
-        coalesce(ca.display_name, ''),
-        ca.catalog_agent_id
-    """
+    # deterministic ordering and base projection come from the shared §8.3
+    # fragments (catalog_query.AGENT_ORDER_BY / AGENT_BASE_SELECT) — the
+    # same sort key the keyset cursor predicate uses.  The query fetches one
+    # extra row (limit + 1) to detect the next page.
+    sql, page_params = _agent_page_query(where, params, limit)
 
-    sql = f"""
-        select ca.*, m.name as merchant_name, m.city as merchant_city,
-               m.service_area as merchant_service_area,
-               m.tags_json as merchant_tags_json
-        from catalog_agents ca
-        left join merchants m on m.id = ca.merchant_id
-        {where}
-        {order}
-        limit ?
-    """
-    params.append(limit + 1)  # fetch one extra to detect next page
-
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, page_params).fetchall()
 
     return _paginate_agent_rows(rows, limit)
 
@@ -636,45 +617,17 @@ def list_catalog_agents(
     params: list[Any] = []
 
     if cursor:
-        clauses.append("ca.catalog_agent_id > ?")
-        params.append(cursor)
+        cursor_clause, cursor_params = _agent_list_cursor_clause(cursor)
+        clauses.append(cursor_clause)
+        params.extend(cursor_params)
 
     where = ""
     if clauses:
         where = "where " + " and ".join(clauses)
 
-    order = """
-    order by
-        case ca.verification_status
-            when 'commerce_verified' then 0
-            when 'agent_verified' then 1
-            when 'domain_verified' then 2
-            when 'profile_valid' then 3
-            when 'discovered' then 4
-            when 'stale' then 5
-            when 'unreachable' then 6
-            when 'suspended' then 7
-            when 'rejected' then 8
-            else 9
-        end,
-        ca.last_verified_at desc,
-        coalesce(ca.display_name, ''),
-        ca.catalog_agent_id
-    """
+    sql, page_params = _agent_page_query(where, params, limit)
 
-    sql = f"""
-        select ca.*, m.name as merchant_name, m.city as merchant_city,
-               m.service_area as merchant_service_area,
-               m.tags_json as merchant_tags_json
-        from catalog_agents ca
-        left join merchants m on m.id = ca.merchant_id
-        {where}
-        {order}
-        limit ?
-    """
-    params.append(limit + 1)
-
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, page_params).fetchall()
 
     return _paginate_agent_rows(rows, limit)
 
@@ -690,41 +643,15 @@ def list_catalog_agents_by_merchant(
     params: list[Any] = [merchant_id]
 
     if cursor:
-        clauses.append("ca.catalog_agent_id > ?")
-        params.append(cursor)
+        cursor_clause, cursor_params = _agent_list_cursor_clause(cursor)
+        clauses.append(cursor_clause)
+        params.extend(cursor_params)
 
-    order = """
-    order by
-        case ca.verification_status
-            when 'commerce_verified' then 0
-            when 'agent_verified' then 1
-            when 'domain_verified' then 2
-            when 'profile_valid' then 3
-            when 'discovered' then 4
-            when 'stale' then 5
-            when 'unreachable' then 6
-            when 'suspended' then 7
-            when 'rejected' then 8
-            else 9
-        end,
-        ca.last_verified_at desc,
-        coalesce(ca.display_name, ''),
-        ca.catalog_agent_id
-    """
+    sql, page_params = _agent_page_query(
+        "where " + " and ".join(clauses), params, limit
+    )
 
-    sql = f"""
-        select ca.*, m.name as merchant_name, m.city as merchant_city,
-               m.service_area as merchant_service_area,
-               m.tags_json as merchant_tags_json
-        from catalog_agents ca
-        left join merchants m on m.id = ca.merchant_id
-        where {' and '.join(clauses)}
-        {order}
-        limit ?
-    """
-    params.append(limit + 1)
-
-    rows = conn.execute(sql, params).fetchall()
+    rows = conn.execute(sql, page_params).fetchall()
 
     return _paginate_agent_rows(rows, limit)
 
