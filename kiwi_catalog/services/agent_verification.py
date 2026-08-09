@@ -43,15 +43,12 @@ auth metadata.
 from __future__ import annotations
 
 import itertools
-import json
 import queue
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -109,6 +106,27 @@ from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
 from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_from_epoch
 from kiwi_catalog.services.verification_helpers import outcome_for as _outcome_for
+from kiwi_catalog.services.verification_profile_policy import (
+    LADDER_RUNGS as _LADDER_RUNGS,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    VERIFIED_RUNGS as _VERIFIED_RUNGS,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    ProfileFailure as _ProfileFailure,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    Profiles as _Profiles,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    ReusedSnapshotFetch as _ReusedSnapshotFetch,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    parse_iso_ts as _parse_iso_ts,
+)
+from kiwi_catalog.services.verification_profile_policy import (
+    profile_is_stale as _profile_is_stale,
+)
 from kiwi_catalog.services.verification_queue_ledger import (
     cleanup_terminal_tasks as _cleanup_terminal_tasks,
 )
@@ -147,70 +165,6 @@ from kiwi_catalog.services.verification_stages import (
 from kiwi_catalog.services.verification_stages import (
     failed_evidence as _failed_evidence,
 )
-
-# The ladder rungs that carry a persisted profile (anything above DISCOVERED).
-_LADDER_RUNGS: frozenset[str] = frozenset(
-    {PROFILE_VALID, DOMAIN_VERIFIED, AGENT_VERIFIED, COMMERCE_VERIFIED}
-)
-
-# Rungs that count as "verified" for the §24 funnel (domain-control proof §6).
-_VERIFIED_RUNGS: frozenset[str] = frozenset(
-    {DOMAIN_VERIFIED, AGENT_VERIFIED, COMMERCE_VERIFIED}
-)
-
-
-class _ProfileFailure(Exception):
-    """Raised internally when the profile stage cannot complete.
-
-    Carries the semantic target status (§6: rejected / unreachable / stale)
-    so the caller can apply the correct terminal transition.
-    """
-
-    def __init__(self, target_status: str, reason: str) -> None:
-        super().__init__(reason)
-        self.target_status = target_status
-        self.reason = reason
-
-
-@dataclass
-class _Profiles:
-    """Validated profile pair shared across the ladder stages."""
-
-    card: AgentCardResult
-    ucp: UcpProfileResult
-    urls: dict[str, str]
-    snapshot_ids: tuple[int, ...]
-
-
-class _ReusedSnapshotFetch:
-    """304 Not Modified 的包装：从存储的 raw_json 恢复 parsed（§18 缓存语义）。
-
-    形状对齐 FetchResult 的消费字段（parsed/url/etag/last_modified/etag 等），
-    使下游 parse/快照逻辑无需区分 200 与 304。
-    """
-
-    def __init__(self, fetch: Any, raw_json: str) -> None:
-        self.url = fetch.url
-        self.status_code = fetch.status_code
-        self.etag = fetch.etag
-        self.last_modified = fetch.last_modified
-        self.cache_control = fetch.cache_control
-        self.max_age = fetch.max_age
-        self.fetched_at = fetch.fetched_at
-        try:
-            self.parsed = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            raise _ProfileFailure(
-                REJECTED, f"stored snapshot raw_json is not valid JSON: {exc}"
-            ) from exc
-
-    @property
-    def is_not_modified(self) -> bool:
-        return True
-
-    @property
-    def is_success(self) -> bool:
-        return True
 
 
 class VerificationService:
@@ -871,7 +825,7 @@ class VerificationService:
                 continue
             expires_at = str(row.get("expires_at") or "")
             if expires_at:
-                parsed = self._parse_iso_ts(expires_at)
+                parsed = _parse_iso_ts(expires_at)
                 if parsed is None or parsed < now_ts:
                     continue
             return level
@@ -944,27 +898,14 @@ class VerificationService:
 
     def _is_stale(self, catalog_agent_id: str) -> bool:
         """True when the latest profile snapshot has passed its fresh_until."""
-        now_ts = self._now()
+        fresh_untils: list[str] = []
         for kind in ("agent_card", "ucp"):
             snapshot = latest_profile_snapshot(self._conn, catalog_agent_id, kind)
-            if snapshot is None:
-                return True  # on the ladder with no snapshot → needs re-verification
-            fresh_until_ts = self._parse_iso_ts(str(snapshot.get("fresh_until") or ""))
-            if fresh_until_ts is None or now_ts >= fresh_until_ts:
-                return True
-        return False
-
-    @staticmethod
-    def _parse_iso_ts(value: str) -> float | None:
-        if not value:
-            return None
-        try:
-            dt = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt.timestamp()
+            # on the ladder with no snapshot → needs re-verification (§7.2).
+            fresh_untils.append(
+                str(snapshot.get("fresh_until") or "") if snapshot is not None else ""
+            )
+        return _profile_is_stale(fresh_untils, self._now())
 
     def _now_iso(self) -> str:
         return _iso_from_epoch(self._now())
