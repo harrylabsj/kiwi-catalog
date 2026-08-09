@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
 # ── Pinned external spec versions (§0.3) ──────────────────────────────────────
 _PINNED_A2A_VERSIONS = ("1.0.0",)
 _PINNED_UCP_VERSIONS = ("2026-04-08",)
@@ -121,12 +120,12 @@ class TrustPolicy:
     # ── Factory helpers ───────────────────────────────────────────────────
 
     @classmethod
-    def defaults(cls) -> "TrustPolicy":
+    def defaults(cls) -> TrustPolicy:
         """Return the default TrustPolicy with all production-safe defaults."""
         return cls()
 
     @classmethod
-    def permissive_local(cls) -> "TrustPolicy":
+    def permissive_local(cls) -> TrustPolicy:
         """Return a permissive policy suitable for local development ONLY.
 
         Allows HTTP, all ports, and longer age limits.  Never use this in
@@ -159,7 +158,7 @@ class TrustPolicy:
         allowed_knp_versions: tuple[str, ...] | list[str] | None = None,
         redirect_limit: int = _DEFAULT_REDIRECT_LIMIT,
         max_profile_bytes: int = _DEFAULT_MAX_PROFILE_BYTES,
-    ) -> "TrustPolicy":
+    ) -> TrustPolicy:
         """Construct a TrustPolicy from explicit keyword arguments.
 
         Every parameter is optional and defaults to the production-safe value.

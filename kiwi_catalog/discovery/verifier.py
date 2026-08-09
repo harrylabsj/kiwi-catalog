@@ -33,13 +33,17 @@ network dependency is the SSRF-safe ``ProfileFetcher`` (W1), injected here.
 from __future__ import annotations
 
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Mapping
+from datetime import UTC, datetime
+from typing import Any, ClassVar
 
-from kiwi_catalog.agent_catalog.state_domains import InvalidStateTransitionError  # noqa: F401 (re-export)
-from kiwi_catalog.core.errors import ShoppingCliError
-from kiwi_catalog.discovery._validation import canonical_domain_of, is_http_url, is_same_authority
+from kiwi_catalog.agent_catalog.state_domains import InvalidStateTransitionError
+from kiwi_catalog.discovery._validation import (
+    canonical_domain_of,
+    is_http_url,
+    is_same_authority,
+)
 from kiwi_catalog.discovery.agent_card import AgentCardResult
 from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher, SSRFBlockError
 from kiwi_catalog.discovery.trust import TrustPolicy
@@ -132,7 +136,7 @@ class VerificationStateMachine:
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
 
 @dataclass(frozen=True)
@@ -168,7 +172,7 @@ class IdentityVerifier:
     """
 
     # Standard discovery locations served from the domain root.
-    WELL_KNOWN_PATHS: dict[str, str] = {
+    WELL_KNOWN_PATHS: ClassVar[dict[str, str]] = {
         "agent_card": ".well-known/agent-card.json",
         "ucp": ".well-known/ucp",
     }
