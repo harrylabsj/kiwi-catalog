@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
+from kiwi_catalog.api.route_matching import match_path as _match_path
 from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
@@ -374,19 +374,6 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _portal_account(),
     ),
 )
-
-def _match_path(template: str, path: str) -> dict[str, str] | None:
-    parts = template.split("/")
-    regex_parts = []
-    for part in parts:
-        if part.startswith("{") and part.endswith("}"):
-            param_name = part[1:-1]
-            regex_parts.append(f"(?P<{param_name}>[^/]+)")
-        else:
-            regex_parts.append(re.escape(part))
-    match = re.match("^" + "/".join(regex_parts) + "$", path)
-    return match.groupdict() if match else None
-
 
 def _list_catalog_agents(db_path, payload, query):
     return agent_catalog_handlers.list_catalog_agents(db_path, query)
