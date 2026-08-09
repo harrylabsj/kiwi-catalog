@@ -18,7 +18,8 @@ HTTP handler（api/handlers/merchants.py）与本地 CLI（cli_merchant_commands
 共用同一实现：handler 负责 admin 校验/限流 + 组织响应，本模块只做数据操作。
 所有写操作自带审计（append_catalog_audit，明文 token 永不进审计）。
 
-明文 token 只在 approve / rotate 的返回值里出现一次；库中只存 SHA-256 摘要。
+approve / rotate 返回新 token；账号“我的”页可在认证会话中恢复 active token。
+库中同时保存 SHA-256 摘要与 Fernet 加密值，审计不含明文。
 """
 
 from __future__ import annotations

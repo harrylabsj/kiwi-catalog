@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest import mock
@@ -311,6 +312,14 @@ class AccountsApiTest(unittest.TestCase):
         # 明文与签发时一致（加密存储可解密找回）
         self.assertEqual(payload["token"]["token"], issued["token"])
         self.assertNotEqual(payload["token"]["token"], "")
+        with sqlite3.connect(self.db_path) as conn:
+            event = conn.execute(
+                "select event, details_json from audit_events "
+                "where event = 'merchant_token_viewed' order by id desc limit 1"
+            ).fetchone()
+        self.assertIsNotNone(event)
+        self.assertEqual(event[0], "merchant_token_viewed")
+        self.assertNotIn(issued["token"], event[1])
 
     def test_login_then_me_after_approval(self) -> None:
         session, _ = self._register()

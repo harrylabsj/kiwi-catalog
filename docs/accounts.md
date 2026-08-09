@@ -83,7 +83,9 @@ owner token 双路径（`api/auth.py`）：
 
 - 口令：PBKDF2-SHA256（每账号随机盐）；邮箱验证码 console/smtp 双模式；
 - session token 随机 + SHA-256 存储；密码/密钥不落明文；
-- merchant token Fernet 加密（`token_encrypted`），`token_prefix` 仅回显前缀；
+- merchant token Fernet 加密（`token_encrypted`）；登录态“我的”页会解密显示 active token，
+  因此会话应按凭据保护，疑似泄露时立即轮换；每次登录态展示记录
+  `merchant_token_viewed` 审计事件（不含明文）；admin 列表/审计仅回显 `token_prefix`；
 - 注册/登录/申请均限流；`require_merchant_token` 恒时比较（sha256 digest）；
 - 生产部署需配置 `KIWI_CATALOG_ADMIN_TOKEN` 与
   `KIWI_CATALOG_OWNER_TOKEN_SECRET`（未配置时鉴权一律 fail-closed）。

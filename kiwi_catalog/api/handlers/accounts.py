@@ -17,7 +17,7 @@
 - register / login 公开（限流防爆破）；登录签发会话 cookie
   （httpOnly + Secure + SameSite=Lax，7 天）；
 - me / token-request 需会话（cookie kiwi_session）；
-- token 明文只在登录态 /me 返回（merchant_tokens.token_encrypted 解密）；
+- token 明文仅在已登录会话 `/me` 返回（merchant_tokens.token_encrypted 解密）；
 - cookie 传输：fallback 经 payload["_cookie"]，FastAPI 经 request.cookies。
 """
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api.handlers.common import require_field
 from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.db.session import db_session
@@ -36,6 +37,23 @@ from kiwi_catalog.services.rate_limit import (
 )
 
 _LOGIN_RATE_LIMIT_PER_15MIN_ENV = "KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN"
+
+
+def _audit_token_view(conn: Any, account: dict[str, Any], view: dict[str, Any]) -> None:
+    """Record a token reveal without ever putting the bearer value in the audit log."""
+    token = view.get("token")
+    if not isinstance(token, dict) or token.get("status") != "active":
+        return
+    merchant_id = str(token.get("merchant_id") or view.get("merchant_id") or "")
+    if not merchant_id:
+        return
+    append_catalog_audit(
+        conn,
+        "",
+        f"account:{account.get('account_id')}",
+        "merchant_token_viewed",
+        {"merchant_id": merchant_id, "surface": "authenticated_account_view"},
+    )
 
 
 def _login_rate_limit_per_15min() -> int:
@@ -141,6 +159,7 @@ def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             raise AuthError("email not verified — check your inbox for the code")
         session_token = accounts_service.create_session(conn, int(account["account_id"]))
         view = accounts_service.account_view(conn, account)
+        _audit_token_view(conn, account, view)
         return {
             "ok": True,
             **view,
@@ -163,6 +182,7 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
             raise AuthError("invalid or expired verification code")
         session_token = accounts_service.create_session(conn, int(account["account_id"]))
         view = accounts_service.account_view(conn, account)
+        _audit_token_view(conn, account, view)
         return {
             "ok": True,
             **view,
@@ -203,6 +223,7 @@ def me(db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]) -> d
     _ctx, conn, account = _require_session(db_path, payload)
     try:
         view = accounts_service.account_view(conn, account)
+        _audit_token_view(conn, account, view)
         return {"ok": True, **view}
     finally:
         _ctx.__exit__(None, None, None)
