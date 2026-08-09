@@ -120,6 +120,16 @@ from kiwi_catalog.services.verification_queue_types import (
     VerificationTask,
     VerificationTaskResult,
 )
+from kiwi_catalog.services.verification_stages import (
+    StageResult,
+    VerificationResult,
+)
+from kiwi_catalog.services.verification_stages import (
+    evidence_payload as _evidence_payload,
+)
+from kiwi_catalog.services.verification_stages import (
+    failed_evidence as _failed_evidence,
+)
 
 # The ladder rungs that carry a persisted profile (anything above DISCOVERED).
 _LADDER_RUNGS: frozenset[str] = frozenset(
@@ -130,43 +140,6 @@ _LADDER_RUNGS: frozenset[str] = frozenset(
 _VERIFIED_RUNGS: frozenset[str] = frozenset(
     {DOMAIN_VERIFIED, AGENT_VERIFIED, COMMERCE_VERIFIED}
 )
-
-
-@dataclass(frozen=True)
-class StageResult:
-    """Outcome of one verification stage in the §6 ladder."""
-
-    stage: str
-    """Stage identifier: ``profile``, ``domain_control``, ``agent_identity``,
-    ``commerce_capability``, ``staleness``, ``suspend``."""
-
-    outcome: str
-    """``passed``, ``rejected``, ``unreachable``, or ``stale``."""
-
-    target_status: str
-    """The ``verification_status`` this stage persisted."""
-
-    reason: str = ""
-    """Human-readable failure reason (only set when not passed)."""
-
-    verification_id: int | None = None
-    """Row id of the ``agent_verifications`` evidence written for this stage."""
-
-    snapshot_ids: tuple[int, ...] = ()
-    """Row ids of ``agent_profile_snapshots`` written by the profile stage."""
-
-    evidence: dict[str, Any] | None = None
-    """The evidence payload written to ``agent_verifications`` (no secrets)."""
-
-
-@dataclass(frozen=True)
-class VerificationResult:
-    """Full result of a verification pipeline run."""
-
-    catalog_agent_id: str
-    previous_status: str
-    status: str
-    stages: tuple[StageResult, ...]
 
 
 class _ProfileFailure(Exception):
@@ -1005,28 +978,6 @@ class VerificationService:
             self._conn.commit()
         finally:
             self._conn.close()
-
-
-def _evidence_payload(evidence: VerificationEvidence, policy: TrustPolicy) -> dict[str, Any]:
-    """The §5.6 evidence payload — always pins the §6.1 trust_policy_version."""
-    return {
-        "verification_type": evidence.verification_type,
-        "result": evidence.result,
-        "reason": evidence.reason,
-        "trust_policy_version": policy.policy_version,
-        "details": dict(evidence.details),
-    }
-
-
-def _failed_evidence(verification_type: str, reason: str, details: dict[str, Any]) -> VerificationEvidence:
-    from kiwi_catalog.discovery.verifier import VerificationEvidence as _VE
-
-    return _VE(
-        verification_type=verification_type,
-        result="failed",
-        reason=reason,
-        details=dict(details),
-    )
 
 
 # ── Bounded in-process verification queue (§25 Phase 2) ─────────────────────
