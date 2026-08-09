@@ -16,7 +16,7 @@ license = {file = "LICENSE"}
 
 [project.optional-dependencies]
 api = ["uvicorn", "fastapi"]
-dev = ["ruff", "mypy"]
+dev = ["mypy", "pytest", "ruff"]
 
 [project.scripts]
 kiwi-catalog-api = "kiwi_catalog.scripts.kiwi_catalog_api:main"
