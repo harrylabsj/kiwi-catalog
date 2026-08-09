@@ -38,9 +38,9 @@ import sqlite3
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
-    list_catalog_agents_by_merchant,
     append_catalog_audit,
     get_catalog_agent_by_domain,
+    list_catalog_agents_by_merchant,
     list_endpoints,
     new_catalog_agent_id,
     replace_capabilities,

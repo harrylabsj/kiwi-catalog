@@ -51,9 +51,9 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     append_catalog_audit,
@@ -973,7 +973,7 @@ class VerificationService:
         except ValueError:
             return None
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()
 
     def _now_iso(self) -> str:
@@ -1089,7 +1089,7 @@ class VerificationQueue:
     def __init__(
         self,
         *,
-        service_factory: Callable[[], "VerificationService"],
+        service_factory: Callable[[], VerificationService],
         config: VerificationQueueConfig | None = None,
         now: Callable[[], float] | None = None,
         db_path: str | Path | None = None,
@@ -1493,10 +1493,10 @@ class VerificationQueue:
                         pass
                     self._db_conn = None
 
-    def __enter__(self) -> "VerificationQueue":
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.shutdown(wait=True)
 
     def __del__(self) -> None:
@@ -1739,15 +1739,15 @@ __all__ = [
     "STALE",
     "SUSPENDED",
     "UNREACHABLE",
+    "InvalidStateTransitionError",
     "StageResult",
-    "VerificationResult",
-    "VerificationService",
     "VerificationQueue",
     "VerificationQueueConfig",
     "VerificationQueueFullError",
     "VerificationQueueShutdownError",
+    "VerificationResult",
+    "VerificationService",
     "VerificationTask",
     "VerificationTaskResult",
     "make_verification_worker",
-    "InvalidStateTransitionError",
 ]

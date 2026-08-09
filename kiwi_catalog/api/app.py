@@ -657,9 +657,9 @@ def handle_request(
         return error_result(400, exc)
     except ShoppingCliError as exc:
         return error_result(400, exc)
-    except Exception as exc:
+    except Exception:
         # 错误（如 schema 漂移/遗留表引用）无法定位。
-        logging.getLogger(__name__).exception("unhandled request error: %r", exc)
+        logging.getLogger(__name__).exception("unhandled request error")
         return error_result(500, "internal server error")
 
 
