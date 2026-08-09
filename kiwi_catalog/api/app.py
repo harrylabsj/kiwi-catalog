@@ -43,6 +43,7 @@ from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
+from kiwi_catalog.api.request_dispatch import dispatch_request
 from kiwi_catalog.api.route_matching import match_path as _match_path
 from kiwi_catalog.core.errors import (
     AuthError,
@@ -621,21 +622,19 @@ def handle_request(
     query = query or {}
     try:
         validate_payload(payload)
-        path_matched = False
-        for route in _ROUTE_TABLE:
-            path_params = _match_path(route.path_template, path)
-            if path_params is None:
-                continue
-            path_matched = True
-            if method.upper() in route.methods:
-                # handler 统一返回响应体 dict（13 条路由皆然）；旧
-                # _is_status_body_pair 分支（handler 返回 (status, body) 对）
-                # 无任何路由使用，已删。
-                result = route.handler(db_path, payload, query, **path_params)
-                return 200, result
-        if path_matched:
-            raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
-        raise NotFoundError(f"No route for {method} {path}")
+        # 纯路由分发循环已提取到 request_dispatch.dispatch_request：
+        # 顺序匹配路径模板、命中即调 handler，路径已知但方法不符抛 405，
+        # 未知路径抛 404（与内联实现逐字一致）。
+        result = dispatch_request(
+            _ROUTE_TABLE,
+            method,
+            path,
+            db_path,
+            payload,
+            query,
+            _match_path,
+        )
+        return 200, result
     except AuthError as exc:
         return error_result(403, exc)
     except PermissionDenied as exc:
