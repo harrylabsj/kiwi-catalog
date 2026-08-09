@@ -176,6 +176,8 @@ def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
     # CSP（KC-SEC-01 硬化）：script 走 per-response nonce——页面内嵌脚本
     # 是唯一合法执行源，匿名数据即使绕过转义也无法执行（meta CSP 对
     # 同源注入有效）。style 允许 inline（页面样式内嵌且无用户数据）。
+    # frame-ancestors 经 meta 会被浏览器忽略——由响应头提供（见
+    # fallback _send_json 与 FastAPI _parity_middleware）。
     nonce = secrets.token_urlsafe(16)
     csp = (
         "default-src 'none'; "
@@ -185,9 +187,11 @@ def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
         "connect-src 'self'; "
         "form-action 'self'; "
         "base-uri 'none'; "
-        "frame-ancestors 'none'; "
         "object-src 'none'"
     )
+    # 页面 body 自带的内嵌 <script>（每页独立 JS 块）同样必须带 nonce——
+    # 否则被 CSP 拦截导致页面 JS 失效（生产浏览器验证发现）。
+    body = body.replace("<script>", f'<script nonce="{nonce}">')
     return {
         "__html__": (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"

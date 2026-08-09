@@ -779,6 +779,7 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         # 安全响应头（KC-SEC-01 硬化，与 fallback _send_json 对齐）
         response.headers["x-content-type-options"] = "nosniff"
         response.headers["referrer-policy"] = "no-referrer"
+        response.headers["content-security-policy"] = "frame-ancestors 'none'"
 
         # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
         if request.method == "GET" and response.status_code == 200:
