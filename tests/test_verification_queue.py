@@ -27,6 +27,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from kiwi_catalog.services.agent_verification import (

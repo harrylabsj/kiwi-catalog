@@ -343,7 +343,6 @@ class ListingsApiTest(unittest.TestCase):
     def test_agent_suspend_marks_owned_listings_suspended(self) -> None:
         self._publish()
         self._publish({"source_product_ref": "SKU-002", "title": "Second"})
-        from kiwi_catalog.api.auth import configured_admin_token
 
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
             status, payload = _call_http(
@@ -384,7 +383,6 @@ class ListingsApiTest(unittest.TestCase):
 
     def test_publisher_can_reinstate_suspended_listing(self) -> None:
         self._publish()
-        from kiwi_catalog.api.auth import configured_admin_token
 
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
             _call_http(

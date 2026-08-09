@@ -160,8 +160,7 @@ class AuditShadowTableTest(unittest.TestCase):
         db = _make_db()
         from kiwi_catalog.api.handlers.agent_catalog import register_catalog_agent
 
-        result = register_catalog_agent(db, {"domain": "merchant.example", "idempotency_key": "r1"})
-        cagt = result["catalog_agent"]["catalog_agent_id"]
+        register_catalog_agent(db, {"domain": "merchant.example", "idempotency_key": "r1"})
 
         conn = open_connection(db)
         rows = conn.execute("select event from audit_events order by id").fetchall()
@@ -180,7 +179,7 @@ class AuditShadowTableTest(unittest.TestCase):
         db = Path(tmp) / "legacy.sqlite"
         conn = sqlite3.connect(db)
         # 模拟旧库：只跑迁移链（不经 open_connection 的 fresh SCHEMA）。
-        from kiwi_catalog.db.migrations import MIGRATIONS, schema_user_version, _set_schema_user_version
+        from kiwi_catalog.db.migrations import MIGRATIONS, _set_schema_user_version
 
         for migration in MIGRATIONS:
             migration.apply(conn)

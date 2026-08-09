@@ -30,7 +30,6 @@ import json
 import os
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from kiwi_catalog.api.app import create_catalog_app
@@ -428,7 +427,6 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         )
         from kiwi_catalog.discovery.verifier import VerificationEvidence
         from kiwi_catalog.services.agent_verification import (
-            AGENT_VERIFIED,
             DISCOVERED,
             DOMAIN_VERIFIED,
             VerificationService,

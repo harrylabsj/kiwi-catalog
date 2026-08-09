@@ -89,7 +89,7 @@ class MerchantSingleAgentTest(unittest.TestCase):
     def test_claim_to_merchant_with_existing_agent_rejected(self) -> None:
         db = _make_db()
         conn = open_connection(db)
-        owned = register_catalog_agent(conn, domain="owned.example", merchant_id="mrc-1", actor="test")
+        register_catalog_agent(conn, domain="owned.example", merchant_id="mrc-1", actor="test")
         free = register_catalog_agent(conn, domain="free.example", actor="test")
         with self.assertRaises(ConflictError):
             claim_catalog_agent(
