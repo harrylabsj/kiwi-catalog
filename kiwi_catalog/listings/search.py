@@ -180,7 +180,9 @@ def search_listings(
         values.append(listing_type)
 
     for column, key in (("category", "category"), ("brand", "brand")):
-        raw = str(query.get(key) or "").strip()
+        # raw 跨循环复用（category/brand 为 str，min_moq/supports_* 来自
+        # query.get 的 Any|None）；声明为 Any 让后两处收窄保持校验/SQL 不变。
+        raw: Any = str(query.get(key) or "").strip()
         if raw:
             where.append(f"{column} = ?")
             values.append(raw)

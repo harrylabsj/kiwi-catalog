@@ -605,6 +605,10 @@ def resolve_route(
     path_known = False
     for route in table:
         template = getattr(route, "path_template", None) or getattr(route, "path", "")
+        # 动态 route 模板严格收窄为 str；非 str（异常值）fail-closed：不视为匹配，
+        # 绝不把 Any/None 强转成可能错误的字符串去匹配。
+        if not isinstance(template, str):
+            continue
         if _match_path(template, path) is None:
             continue
         path_known = True
