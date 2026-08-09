@@ -776,6 +776,10 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
         response = await call_next(request)
 
+        # 安全响应头（KC-SEC-01 硬化，与 fallback _send_json 对齐）
+        response.headers["x-content-type-options"] = "nosniff"
+        response.headers["referrer-policy"] = "no-referrer"
+
         # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
         if request.method == "GET" and response.status_code == 200:
             body = b"".join([chunk async for chunk in response.body_iterator])
@@ -1102,7 +1106,12 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/merchants/applications")
     def v1_list_applications(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_list_applications(db_path, {}, _query_params_from_request(request))
+        # admin token 只经 Authorization header（KC-SEC-02，与 fallback 一致）
+        return _v1_list_applications(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
 
     @app.post("/v1/merchants/applications/{application_id}/approve")
     def v1_approve_application(
@@ -1150,7 +1159,11 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/merchants/self")
     def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_merchant_self(db_path, {}, _query_params_from_request(request))
+        return _v1_merchant_self(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
 
     # ── /v1/accounts（商家账号；cookie 会话经 request 透传）───────────────
     from fastapi.responses import JSONResponse as _JSONResponse
@@ -1207,18 +1220,29 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
     @app.get("/v1/admin/dashboard")
     def v1_admin_dashboard(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_dashboard(db_path, {}, _query_params_from_request(request))
+        return _v1_admin_dashboard(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
 
     @app.get("/v1/admin/merchants")
     def v1_admin_merchants(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_merchants(db_path, {}, _query_params_from_request(request))
+        return _v1_admin_merchants(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
 
     @app.get("/v1/admin/merchants/{merchant_id}/report")
     def v1_admin_merchant_report(
         merchant_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _v1_admin_merchant_report(
-            db_path, merchant_id, {}, _query_params_from_request(request)
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
         )
 
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────

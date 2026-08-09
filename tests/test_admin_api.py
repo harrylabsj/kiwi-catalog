@@ -58,14 +58,19 @@ PRODUCT_PAYLOAD = {
 }
 
 
-def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict]:
+def _call_http(
+    app, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None
+) -> tuple[int, dict]:
     path_only = path.split("?", 1)[0]
     query_bytes = path.split("?", 1)[1].encode() if "?" in path else b""
+    scope_headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
+    for key, value in (headers or {}).items():
+        scope_headers.append((key.lower().encode("latin1"), value.encode("latin1")))
     scope = {
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [(b"content-type", b"application/json")],
+        "headers": scope_headers,
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",
@@ -179,7 +184,8 @@ class AdminApiTest(unittest.TestCase):
             _call_http(self.app, "GET", "/v1/agents/search?q=display")
         _call_http(self.app, "GET", "/v1/listings/search?q=touch")
         status, payload = _call_http(
-            self.app, "GET", f"/v1/admin/dashboard?days=7&admin_token={ADMIN_TOKEN}"
+            self.app, "GET", "/v1/admin/dashboard?days=7",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 200, payload)
         counts = payload["counts"]
@@ -199,7 +205,8 @@ class AdminApiTest(unittest.TestCase):
         seeded = self._seed_merchant()
         _call_http(self.app, "GET", f"/v1/merchants/self?owner_token={seeded['token']}")
         status, payload = _call_http(
-            self.app, "GET", f"/v1/admin/dashboard?days=1&admin_token={ADMIN_TOKEN}"
+            self.app, "GET", "/v1/admin/dashboard?days=1",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["usage"][-1]["counts"]["merchant_self_check"], 1)
@@ -209,7 +216,8 @@ class AdminApiTest(unittest.TestCase):
     def test_merchant_list_aggregates(self) -> None:
         seeded = self._seed_merchant()
         status, payload = _call_http(
-            self.app, "GET", f"/v1/admin/merchants?admin_token={ADMIN_TOKEN}"
+            self.app, "GET", "/v1/admin/merchants",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(len(payload["results"]), 1)
@@ -226,7 +234,8 @@ class AdminApiTest(unittest.TestCase):
         status, payload = _call_http(
             self.app,
             "GET",
-            f"/v1/admin/merchants/{seeded['merchant_id']}/report?admin_token={ADMIN_TOKEN}",
+            f"/v1/admin/merchants/{seeded['merchant_id']}/report",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["merchant"]["name"], "Acme Merchant")
@@ -238,7 +247,8 @@ class AdminApiTest(unittest.TestCase):
 
     def test_merchant_report_unknown_404(self) -> None:
         status, payload = _call_http(
-            self.app, "GET", f"/v1/admin/merchants/mkt_zzz/report?admin_token={ADMIN_TOKEN}"
+            self.app, "GET", "/v1/admin/merchants/mkt_zzz/report",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 404, payload)
 
