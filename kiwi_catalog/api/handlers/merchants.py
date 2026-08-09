@@ -101,26 +101,16 @@ def submit_application(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         return {"ok": True, "application": application}
 
 
-def _auth_payload_with_query_token(
-    payload: dict[str, Any], query: dict[str, Any]
-) -> dict[str, Any]:
-    """GET 无 body，admin token 经 query string 传递（审查 P2 既有惯例：
-    listings 自查端点同构；token 经 query 已记录 CLAUDE.md 不修）。"""
-    merged = dict(payload or {})
-    q_token = str(query.get("admin_token") or "").strip()
-    if q_token:
-        merged["admin_token"] = q_token
-    return merged
-
-
 def list_applications(
     db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
 ) -> dict[str, Any]:
     """GET /v1/merchants/applications?status=…（admin）。
 
     供门户后台渲染待审列表；status 过滤可选，不传返回全部（倒序）。
+    admin token 只经 Authorization header（KC-SEC-02：凭据不得进 query——
+    会落入访问日志/浏览器历史；fallback 栈已合并 header 为 _auth_token）。
     """
-    api_auth.require_admin_token(_auth_payload_with_query_token(payload, query))
+    api_auth.require_admin_token(payload)
     status = str(query.get("status") or "").strip()
     if status and status not in APPLICATION_STATUSES:
         raise ValidationError(f"status must be one of {APPLICATION_STATUSES}")
@@ -204,16 +194,15 @@ def self_status(
 ) -> dict[str, Any]:
     """GET /v1/merchants/self?owner_token=…（token 即身份，商家自查）。
 
-    返回 merchant_id、token 状态与名下 agent / listing 计数。GET 无 body，
-    token 经 query string（审查 P2：已记录 CLAUDE.md 不修）。admin 可带
-    admin_token + merchant_id 查任意商家。
+    返回 merchant_id、token 状态与名下 agent / listing 计数。owner token
+    经 query string（token 即身份的既有语义，CLAUDE.md 记录）；admin 查询
+    任意商家时 admin token 只经 Authorization header（KC-SEC-02）。
     """
     merchant_id = str(query.get("merchant_id") or "").strip()
     presented = str(query.get("owner_token") or payload.get("owner_token") or "").strip()
-    auth_payload = _auth_payload_with_query_token(payload, query)
     with db_session(db_path) as conn:
         if merchant_id:
-            api_auth.require_admin_token(auth_payload)
+            api_auth.require_admin_token(payload)
             token_row: sqlite3.Row | None = tokens_service.require_token_row(conn, merchant_id)
         else:
             if not presented:

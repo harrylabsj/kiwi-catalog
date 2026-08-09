@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api import auth as api_auth
-from kiwi_catalog.api.handlers.merchants import _auth_payload_with_query_token
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import admin_reports
 
@@ -34,7 +33,7 @@ def dashboard(
     db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
 ) -> dict[str, Any]:
     """GET /v1/admin/dashboard?days=14（admin）——运营总览。"""
-    api_auth.require_admin_token(_auth_payload_with_query_token(payload, query))
+    api_auth.require_admin_token(payload)
     days = int(query.get("days") or admin_reports.DEFAULT_DAYS)
     with db_session(db_path) as conn:
         summary = admin_reports.dashboard_summary(conn, days=days)
@@ -45,7 +44,7 @@ def merchant_list(
     db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
 ) -> dict[str, Any]:
     """GET /v1/admin/merchants?limit=100（admin）——商家列表。"""
-    api_auth.require_admin_token(_auth_payload_with_query_token(payload, query))
+    api_auth.require_admin_token(payload)
     limit = int(query.get("limit") or 100)
     with db_session(db_path) as conn:
         return {"ok": True, "results": admin_reports.merchant_list(conn, limit=limit)}
@@ -55,6 +54,6 @@ def merchant_report(
     db_path: str | Path, merchant_id: str, payload: dict[str, Any], query: dict[str, Any]
 ) -> dict[str, Any]:
     """GET /v1/admin/merchants/{merchant_id}/report（admin）——商家报告。"""
-    api_auth.require_admin_token(_auth_payload_with_query_token(payload, query))
+    api_auth.require_admin_token(payload)
     with db_session(db_path) as conn:
         return {"ok": True, **admin_reports.merchant_report(conn, merchant_id)}

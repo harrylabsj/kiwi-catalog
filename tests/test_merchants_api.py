@@ -73,15 +73,20 @@ PRODUCT_PAYLOAD = {
 }
 
 
-def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict, dict]:
+def _call_http(
+    app, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None
+) -> tuple[int, dict, dict]:
     """(status, json_payload, headers)；HTML 页面 json 解析失败时 payload={}。"""
     path_only = path.split("?", 1)[0]
     query_bytes = path.split("?", 1)[1].encode() if "?" in path else b""
+    scope_headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
+    for key, value in (headers or {}).items():
+        scope_headers.append((key.lower().encode("latin1"), value.encode("latin1")))
     scope = {
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [(b"content-type", b"application/json")],
+        "headers": scope_headers,
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",
@@ -208,8 +213,18 @@ class MerchantsApiTest(unittest.TestCase):
         self._apply()
         status, payload = _call_http(self.app, "GET", "/v1/merchants/applications")[:2]
         self.assertEqual(status, 403, payload)
+        # KC-SEC-02：admin token 只经 Authorization header；query 携带被拒
         status, payload = _call_http(
-            self.app, "GET", "/v1/merchants/applications?status=pending&admin_token=" + ADMIN_TOKEN
+            self.app,
+            "GET",
+            "/v1/merchants/applications?status=pending&admin_token=" + ADMIN_TOKEN,
+        )[:2]
+        self.assertEqual(status, 403, payload)
+        status, payload = _call_http(
+            self.app,
+            "GET",
+            "/v1/merchants/applications?status=pending",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )[:2]
         self.assertEqual(status, 200, payload)
         self.assertEqual(len(payload["results"]), 1)
@@ -372,7 +387,8 @@ class MerchantsApiTest(unittest.TestCase):
         status, payload = _call_http(
             self.app,
             "GET",
-            f"/v1/merchants/self?merchant_id={issued['merchant_id']}&admin_token=" + ADMIN_TOKEN,
+            f"/v1/merchants/self?merchant_id={issued['merchant_id']}",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )[:2]
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["merchant_id"], issued["merchant_id"])
@@ -415,6 +431,20 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertIn("text/html", headers.get("content-type", ""))
             self.assertIn("admin_token", payload.get("_raw", ""))
             self.assertIn("no-store", headers.get("cache-control", ""))
+
+    def test_portal_admin_escapes_api_values_and_keeps_token_out_of_query(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+        ):
+            _, admin_payload, _ = _call_http(self.app, "GET", "/portal/admin")
+            admin_raw = admin_payload.get("_raw", "")
+            self.assertIn("function escHtml", admin_raw)
+            self.assertIn("escHtml(a.agent_name)", admin_raw)
+            self.assertIn("escHtml(a.purpose)", admin_raw)
+            _, dashboard_payload, _ = _call_http(self.app, "GET", "/portal/dashboard")
+            dashboard_raw = dashboard_payload.get("_raw", "")
+            self.assertIn("return getJson(path, token);", dashboard_raw)
+            self.assertNotIn("admin_token=' + encodeURIComponent(token)", dashboard_raw)
 
     def test_portal_pages_use_official_theme(self) -> None:
         """门户页与官网共用主题（nav/hero/section/card 类 + --kiwi-* 变量）。"""
