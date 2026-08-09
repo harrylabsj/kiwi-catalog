@@ -25,7 +25,9 @@ import sqlite3
 import time
 from typing import Any
 
-from kiwi_catalog.agent_catalog.sqlite_repository import search_catalog_agents as _repo_search
+from kiwi_catalog.agent_catalog.sqlite_repository import (
+    search_catalog_agents as _repo_search,
+)
 from kiwi_catalog.services.catalog_runtime_metrics import record_search
 
 

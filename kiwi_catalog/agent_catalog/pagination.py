@@ -68,12 +68,18 @@ def agent_cursor_predicate(cursor: str) -> tuple[str, list[Any]]:
     rank, last_verified_at, name, catalog_agent_id = keys
     clauses = [
         f"{AGENT_STATUS_RANK_CASE} > ?",
-        f"{AGENT_STATUS_RANK_CASE} = ? and "
-        f"(ca.last_verified_at < ? or ca.last_verified_at is null)",
-        f"{AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
-        f"and {AGENT_SORT_NAME} > ?",
-        f"{AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
-        f"and {AGENT_SORT_NAME} = ? and ca.catalog_agent_id > ?",
+        (
+            f"{AGENT_STATUS_RANK_CASE} = ? and "
+            f"(ca.last_verified_at < ? or ca.last_verified_at is null)"
+        ),
+        (
+            f"{AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
+            f"and {AGENT_SORT_NAME} > ?"
+        ),
+        (
+            f"{AGENT_STATUS_RANK_CASE} = ? and ca.last_verified_at is ? "
+            f"and {AGENT_SORT_NAME} = ? and ca.catalog_agent_id > ?"
+        ),
     ]
     params: list[Any] = [
         rank,

@@ -19,10 +19,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 VERSION = "0.1.0"  # kiwi-catalog standalone
 from kiwi_catalog.db.migrations import (
@@ -37,7 +38,7 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 def now_iso() -> str:
     # 统一 UTC（fresh_until 等跨模块时间戳逐字符比较的前提；历史教训：
     # 本地 naive 与 UTC-aware 混用会让 freshness TTL 偏移服务器时区差）。
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def encode_json(value: Any) -> str:

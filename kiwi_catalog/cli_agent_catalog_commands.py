@@ -33,7 +33,10 @@ from kiwi_catalog.core.errors import NotFoundError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import agent_catalog_writes
 from kiwi_catalog.services.agent_catalog import get_catalog_agent, search_catalog_agents
-from kiwi_catalog.services.agent_catalog_metrics import catalog_doctor_report, catalog_stats
+from kiwi_catalog.services.agent_catalog_metrics import (
+    catalog_doctor_report,
+    catalog_stats,
+)
 from kiwi_catalog.services.agent_verification import (
     InvalidStateTransitionError,
     VerificationService,
