@@ -325,7 +325,8 @@ def destroy_session(conn: sqlite3.Connection, session_token: str) -> None:
 def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str, Any]:
     """登录态账号视图：资料 + merchant + token（解密明文）+ 计数。
 
-    token 只在 status=active 时解密展示；工单状态一并返回（pending 审批中）。
+    active token 会在每次已认证账号视图中解密展示（可恢复模型）；工单状态一并返回。
+    调用方必须将会话视为敏感凭据，疑似泄露时应轮换 token。
     """
     merchant_id = str(account.get("merchant_id") or "")
     application_id = int(account.get("application_id") or 0)
