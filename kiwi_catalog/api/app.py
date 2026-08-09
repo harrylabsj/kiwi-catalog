@@ -145,4 +145,3 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     app.state.db_path = str(db_path)
     register_fastapi_routes(app, db_path)
     return app
-
