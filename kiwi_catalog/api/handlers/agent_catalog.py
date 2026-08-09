@@ -22,15 +22,11 @@ audit, and the §6.2 claim proof.
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
-
-import jsonschema
-from jsonschema import ValidationError as SchemaValidationError
 
 from kiwi_catalog.agent_catalog.serializers import (
     catalog_agent_record,
@@ -59,6 +55,11 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
 )
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
+from kiwi_catalog.api.agent_catalog_input import (
+    _payload_reason,
+    _register_input_schema,  # noqa: F401 —— facade 私有兼容 re-export
+    _validate_register_input,
+)
 from kiwi_catalog.api.handlers.common import (
     MAX_SQLITE_INTEGER,
     require_field,
@@ -395,45 +396,6 @@ def _verification_response(
 
 # ── Handlers ───────────────────────────────────────────────────────────────
 
-# 认证/幂等字段在校验前剥离（与 listings contracts.py 的 _AUTH_FIELDS 同模式）。
-_REGISTER_AUTH_FIELDS = {
-    "owner_token",
-    "_auth_token",
-    "admin_token",
-    "idempotency_key",
-    "_idempotency_key",
-}
-
-_REGISTER_INPUT_SCHEMA: jsonschema.Draft7Validator | None = None
-
-
-def _register_input_schema() -> jsonschema.Draft7Validator:
-    """模块级惰性加载 register-input.schema.json（CD #8 schema 硬拒落盘）。"""
-    global _REGISTER_INPUT_SCHEMA
-    if _REGISTER_INPUT_SCHEMA is None:
-        schema_path = (
-            Path(__file__).resolve().parent.parent.parent / "contracts" / "register-input.schema.json"
-        )
-        with open(schema_path, encoding="utf-8") as fh:
-            _REGISTER_INPUT_SCHEMA = jsonschema.Draft7Validator(json.load(fh))
-    return _REGISTER_INPUT_SCHEMA
-
-
-def _validate_register_input(payload: dict[str, Any]) -> None:
-    """register 输入契约硬校验（additionalProperties:false）。
-
-    完成定义 #8：注册输入只能是 schema 声明的公开字段——私有经营数据
-    （成本/底价/私密库存/凭据）在 schema 层拒绝，未知字段一律 422。
-    认证/幂等字段剥离后再校验；domain 的 hostname 形态由
-    normalize_canonical_domain 负责（schema 只查存在性）。
-    """
-    candidate = {k: v for k, v in (payload or {}).items() if k not in _REGISTER_AUTH_FIELDS}
-    try:
-        _register_input_schema().validate(candidate)
-    except SchemaValidationError as exc:
-        raise ValidationError(f"register payload invalid: {exc.message}") from exc
-
-
 def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/agent-catalog/agents/register (§10.2).
 
@@ -766,11 +728,6 @@ def _moderation_action(
                 conn, endpoint, actor_key, idempotency_key, request_hash
             )
             raise
-
-
-def _payload_reason(payload: dict[str, Any]) -> str:
-    """Optional operator reason from the request body (recorded in §23 audit)."""
-    return str((payload or {}).get("reason") or "").strip()
 
 
 def suspend_catalog_agent(
