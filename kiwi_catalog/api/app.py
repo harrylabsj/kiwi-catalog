@@ -727,7 +727,11 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         - 空 body 视为 {}（与 fallback ``json.loads(... or "{}")`` 一致）；
         - GET 200 响应带 etag，显式 If-None-Match 匹配 → 304（fallback §18）。
         """
-        if request.method in ("POST", "PUT", "PATCH"):
+        # Match fallback routing order: unknown paths and disallowed methods
+        # must resolve to 404/405 before attempting to parse an untrusted body.
+        # Otherwise a malformed body can mask the route error on only one stack.
+        path_known, method_allowed = resolve_route(request.method, request.url.path)
+        if request.method in ("POST", "PUT", "PATCH") and path_known and method_allowed:
             maximum = max_request_body_bytes()
             content_length = request.headers.get("content-length")
             if content_length:
