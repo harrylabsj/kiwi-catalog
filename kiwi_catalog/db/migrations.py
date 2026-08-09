@@ -26,8 +26,8 @@ Extraction date: 2026-08-06.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 CURRENT_SCHEMA_VERSION = 16
 
@@ -323,8 +323,10 @@ def migration_008_three_state_domains(conn: sqlite3.Connection) -> None:
     new_columns: list[tuple[str, str]] = [
         (
             "verification_level",
-            "text not null default 'discovered' check(verification_level in ("
-            " 'discovered','profile_valid','domain_verified','agent_verified','commerce_verified'))",
+            (
+                "text not null default 'discovered' check(verification_level in ("
+                " 'discovered','profile_valid','domain_verified','agent_verified','commerce_verified'))"
+            ),
         ),
         (
             "freshness_state",

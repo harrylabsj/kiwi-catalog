@@ -16,15 +16,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kiwi_catalog.api.auth import payload_token
-from kiwi_catalog.core.errors import IdempotencyConflict, RateLimitError, ValidationError
+from kiwi_catalog.core.errors import IdempotencyConflict, ValidationError
 from kiwi_catalog.core.tokens import token_digest
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
 
@@ -61,7 +59,7 @@ def request_hash(values: dict[str, Any]) -> str:
 def catalog_write_window_start(current: datetime, window_seconds: int = CATALOG_WRITE_RATE_LIMIT_WINDOW_SECONDS) -> str:
     epoch_seconds = int(current.timestamp())
     window_epoch = epoch_seconds - (epoch_seconds % window_seconds)
-    return datetime.fromtimestamp(window_epoch).replace(microsecond=0).isoformat()
+    return datetime.fromtimestamp(window_epoch, tz=UTC).replace(microsecond=0).isoformat()
 
 
 def catalog_write_actor_key(payload: dict[str, Any], canonical_domain: str = "") -> str:
@@ -127,7 +125,10 @@ def enforce_agent_catalog_rate_limit(
     Delegates to the shared fixed-window core (v3.0-P5) — see
     ``shopping_cli.services.rate_limit`` for the backend abstraction.
     """
-    from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
+    from kiwi_catalog.services.rate_limit import (
+        SQLiteRateLimitBackend,
+        enforce_rate_limit,
+    )
 
     backend = SQLiteRateLimitBackend(
         conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
@@ -232,7 +233,7 @@ def complete_catalog_write_idempotency(
     ) + 1
     if complete_catalog_write_idempotency._prune_count % _IDEMPOTENCY_PRUNE_EVERY == 0:
         try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=_IDEMPOTENCY_RETENTION_DAYS)).isoformat()
+            cutoff = (datetime.now(UTC) - timedelta(days=_IDEMPOTENCY_RETENTION_DAYS)).isoformat()
             conn.execute(
                 "delete from agent_catalog_write_idempotency"
                 " where status = 'completed' and updated_at < ?",
