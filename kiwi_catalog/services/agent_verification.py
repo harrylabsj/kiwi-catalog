@@ -115,6 +115,11 @@ from kiwi_catalog.services.verification_queue_serialization import (
 from kiwi_catalog.services.verification_queue_serialization import (
     serialize_verification_result as _serialize_verification_result,
 )
+from kiwi_catalog.services.verification_queue_types import (
+    VerificationQueueConfig,
+    VerificationTask,
+    VerificationTaskResult,
+)
 
 # The ladder rungs that carry a persisted profile (anything above DISCOVERED).
 _LADDER_RUNGS: frozenset[str] = frozenset(
@@ -1039,61 +1044,6 @@ def _failed_evidence(verification_type: str, reason: str, details: dict[str, Any
 # cannot stall the pipeline.  Every task opens its own database connection
 # through the injected *service_factory* — a ``VerificationService`` instance
 # is never shared across threads (see the service class docstring above).
-
-
-@dataclass(frozen=True)
-class VerificationQueueConfig:
-    """Tuning knobs for the bounded in-process verification queue (§25 Phase 2)."""
-
-    max_pending: int = 100
-    """Maximum number of queued (not yet started) tasks.  Enqueueing beyond
-    this raises :class:`VerificationQueueFullError` (fail-closed)."""
-
-    concurrency: int = 2
-    """Maximum number of verification tasks executed simultaneously."""
-
-    task_timeout_seconds: float = 30.0
-    """Per-task wall-clock deadline.  A task that exceeds it is reported with
-    ``status == "timeout"`` and the worker frees its slot for the next task."""
-
-    def __post_init__(self) -> None:
-        if self.max_pending < 1:
-            raise ValueError("max_pending must be >= 1")
-        if self.concurrency < 1:
-            raise ValueError("concurrency must be >= 1")
-        if self.task_timeout_seconds <= 0:
-            raise ValueError("task_timeout_seconds must be > 0")
-
-
-@dataclass(frozen=True)
-class VerificationTask:
-    """One queued verification job."""
-
-    catalog_agent_id: str
-    task_id: str
-    kind: str = "verify"
-    actor: str = "verification_worker"
-    enqueued_at: float = 0.0
-
-
-@dataclass(frozen=True)
-class VerificationTaskResult:
-    """Outcome of a queued verification job."""
-
-    task_id: str
-    catalog_agent_id: str
-    kind: str
-    status: str
-    """``enqueued`` | ``completed`` | ``failed`` | ``timeout``."""
-
-    verification_status: str
-    """Final ``catalog_agents.verification_status`` (empty unless completed)."""
-
-    error: str = ""
-    enqueued_at: float = 0.0
-    started_at: float = 0.0
-    finished_at: float = 0.0
-    result: VerificationResult | None = None
 
 
 class VerificationQueueFullError(ShoppingCliError):
