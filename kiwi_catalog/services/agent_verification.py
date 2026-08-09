@@ -104,6 +104,12 @@ from kiwi_catalog.discovery.verifier import (
 )
 from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
+from kiwi_catalog.services.verification_audit_policy import (
+    FunnelStep as _FunnelStep,
+)
+from kiwi_catalog.services.verification_audit_policy import (
+    finalize_audit_plan as _finalize_audit_plan,
+)
 from kiwi_catalog.services.verification_degradation import (
     ProfileFailurePlan as _ProfileFailurePlan,
 )
@@ -121,7 +127,7 @@ from kiwi_catalog.services.verification_profile_policy import (
     LADDER_RUNGS as _LADDER_RUNGS,
 )
 from kiwi_catalog.services.verification_profile_policy import (
-    VERIFIED_RUNGS as _VERIFIED_RUNGS,
+    VERIFIED_RUNGS as _VERIFIED_RUNGS,  # noqa: F401 —— facade re-export
 )
 from kiwi_catalog.services.verification_profile_policy import (
     ProfileFailure as _ProfileFailure,
@@ -844,55 +850,27 @@ class VerificationService:
         actor: str,
         failure_kind: str | None,
     ) -> VerificationResult:
-        """Write the §23 audit events for a completed pipeline run."""
-        # The profile stage wrote snapshots → the run refreshed the profile cache.
-        if stages and stages[0].stage == "profile" and stages[0].snapshot_ids:
-            self._write_audit(
-                catalog_agent_id,
-                actor,
-                "catalog_agent_refreshed",
-                {
-                    "verification_status": status,
-                    "stage_count": len(stages),
-                    "trust_policy_version": self._policy.policy_version,
-                },
-            )
+        """Write the §23 audit events for a completed pipeline run.
 
-        if failure_kind is None:
-            # §24 funnel: a run reaching any verified rung counts as verified.
-            if status in _VERIFIED_RUNGS:
-                record_funnel("verified")
-            if status == COMMERCE_VERIFIED:
-                self._write_audit(
-                    catalog_agent_id,
-                    actor,
-                    "catalog_agent_verified",
-                    {
-                        "verification_status": status,
-                        "trust_policy_version": self._policy.policy_version,
-                    },
-                )
-        else:
-            last_stage = stages[-1] if stages else StageResult("verification", failure_kind, status)
-            self._write_audit(
-                catalog_agent_id,
-                actor,
-                "catalog_agent_verification_failed",
-                {
-                    "failed_stage": last_stage.stage,
-                    "reason": last_stage.reason,
-                    "target_status": status,
-                    "trust_policy_version": self._policy.policy_version,
-                },
-            )
-            if failure_kind == STALE:
-                self._write_audit(
-                    catalog_agent_id,
-                    actor,
-                    "catalog_agent_stale",
-                    {"reason": last_stage.reason},
-                )
-
+        The pure decision — which events, their details, the §24 funnel, and
+        the empty-stages fallback — lives in the side-effect-free
+        :func:`verification_audit_policy.finalize_audit_plan` leaf.  This
+        method only executes the plan's steps in order (``append_catalog_audit``
+        then ``record_funnel``), preserving the pre-extraction event order,
+        details fields, pinned ``trust_policy_version`` and public-data-only
+        §17.3 boundary.
+        """
+        plan = _finalize_audit_plan(
+            status=status,
+            stages=stages,
+            policy_version=self._policy.policy_version,
+            failure_kind=failure_kind,
+        )
+        for step in plan.steps:
+            if isinstance(step, _FunnelStep):
+                record_funnel(step.stage)
+            else:
+                self._write_audit(catalog_agent_id, actor, step.event, step.details)
         return VerificationResult(catalog_agent_id, previous, status, tuple(stages))
 
     def _write_audit(self, catalog_agent_id: str, actor: str, event: str, details: dict[str, Any]) -> None:
