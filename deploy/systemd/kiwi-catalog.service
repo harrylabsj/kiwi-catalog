@@ -14,7 +14,7 @@ User=kiwi-catalog
 Group=kiwi-catalog
 WorkingDirectory=/opt/kiwi-catalog
 EnvironmentFile=-/etc/kiwi-catalog/env
-ExecStart=/opt/kiwi-catalog/.venv/bin/kiwi-catalog-api --db /var/lib/kiwi-catalog/catalog.sqlite --host 0.0.0.0 --port 8600
+ExecStart=/opt/kiwi-catalog/.venv/bin/kiwi-catalog-api --db /var/lib/kiwi-catalog/catalog.sqlite --host 127.0.0.1 --port 8600
 Restart=on-failure
 RestartSec=3
 
