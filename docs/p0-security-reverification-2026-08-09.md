@@ -7,7 +7,10 @@
 ## 代码证据
 
 - 门户动态数据统一经 `escHtml` 或 `textContent` 写入；内嵌脚本使用 per-response nonce；响应提供 `Content-Security-Policy: frame-ancestors 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`。相关安全提交：`ed51fe2`、`cd943f9`。
-- `/v1/merchants/*`、`/v1/admin/*` 及 `GET /v1/agents/{id}/listings` 的 admin 凭据统一来自 `Authorization: Bearer`。`GET /v1/agents/{id}/listings?admin_token=...` 即使 token 正确也会 fail-closed；legacy `owner_token` query 自查语义保留。修复提交：`6a32c9e`。
+- 门户管理界面的 GET 请求与 `GET /v1/agents/{id}/listings` 的 admin 凭据来自
+  `Authorization: Bearer`；后者对 `?admin_token=...` fail-closed，legacy
+  `owner_token` query 自查语义保留。现有 POST 调用的 JSON `admin_token` 兼容路径
+  未改变，且不进入 URL/query。修复提交：`6a32c9e`。
 - FastAPI 与 fallback ASGI 双栈都透传 Authorization；不再从 listings query 派生 `admin_token`。
 
 ## 独立验收
