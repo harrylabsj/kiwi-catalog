@@ -47,6 +47,14 @@ from kiwi_catalog.agent_catalog.state_domains import (
 from kiwi_catalog.agent_catalog.state_domains import (
     fold_verification_status as _fold_verification_status,
 )
+from kiwi_catalog.agent_catalog.verification_evidence import (
+    insert_profile_snapshot,  # noqa: F401 —— facade re-export
+    insert_verification,  # noqa: F401 —— facade re-export
+    latest_profile_snapshot,  # noqa: F401 —— facade re-export
+    latest_verification,  # noqa: F401 —— facade re-export
+    list_profile_snapshots,  # noqa: F401 —— facade re-export
+    list_verifications,  # noqa: F401 —— facade re-export
+)
 from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
 
@@ -792,154 +800,6 @@ def set_state_domains(
 def set_catalog_agent_merchant(conn: sqlite3.Connection, catalog_agent_id: str, merchant_id: str) -> None:
     """Bind a catalog agent to a merchant (claim/ownership change §6.2)."""
     _update_catalog_agent(conn, catalog_agent_id, merchant_id=str(merchant_id or ""))
-
-
-# ── agent_profile_snapshots (§5.5) ──────────────────────────────────────────
-
-
-def insert_profile_snapshot(
-    conn: sqlite3.Connection,
-    *,
-    catalog_agent_id: str,
-    profile_type: str,
-    source_url: str,
-    etag: str,
-    last_modified: str,
-    content_hash: str,
-    raw_json: str,
-    fetched_at: str,
-    fresh_until: str,
-    validation_status: str = "valid",
-) -> int:
-    """Insert a new agent_profile_snapshots row (history is append-only)."""
-    cursor = conn.execute(
-        """
-        insert into agent_profile_snapshots(
-            catalog_agent_id, profile_type, source_url, etag, last_modified,
-            content_hash, raw_json, fetched_at, fresh_until, validation_status
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            catalog_agent_id,
-            profile_type,
-            source_url,
-            etag,
-            last_modified,
-            content_hash,
-            raw_json,
-            fetched_at,
-            fresh_until,
-            validation_status,
-        ),
-    )
-    if cursor.lastrowid is None:
-        raise RuntimeError("profile snapshot insert did not return an id")
-    return cursor.lastrowid
-
-
-def latest_profile_snapshot(
-    conn: sqlite3.Connection,
-    catalog_agent_id: str,
-    profile_type: str,
-) -> dict[str, Any] | None:
-    """Return the most recent snapshot row for a profile type, or None."""
-    row = conn.execute(
-        """
-        select * from agent_profile_snapshots
-        where catalog_agent_id = ? and profile_type = ?
-        order by snapshot_id desc
-        limit 1
-        """,
-        (catalog_agent_id, profile_type),
-    ).fetchone()
-    return _row_to_dict(row) if row is not None else None
-
-
-def list_profile_snapshots(
-    conn: sqlite3.Connection,
-    catalog_agent_id: str,
-) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        select * from agent_profile_snapshots
-        where catalog_agent_id = ?
-        order by snapshot_id
-        """,
-        (catalog_agent_id,),
-    ).fetchall()
-    return [_row_to_dict(r) for r in rows]
-
-
-# ── agent_verifications (§5.6) ──────────────────────────────────────────────
-
-
-def insert_verification(
-    conn: sqlite3.Connection,
-    *,
-    catalog_agent_id: str,
-    verification_type: str,
-    result: str,
-    evidence_json: str,
-    checked_at: str,
-    expires_at: str,
-) -> int:
-    """Insert a new agent_verifications row.  Returns the verification id."""
-    cursor = conn.execute(
-        """
-        insert into agent_verifications(
-            catalog_agent_id, verification_type, result, evidence_json,
-            checked_at, expires_at
-        ) values (?, ?, ?, ?, ?, ?)
-        """,
-        (catalog_agent_id, verification_type, result, evidence_json, checked_at, expires_at),
-    )
-    if cursor.lastrowid is None:
-        raise RuntimeError("verification insert did not return an id")
-    return cursor.lastrowid
-
-
-def latest_verification(
-    conn: sqlite3.Connection,
-    catalog_agent_id: str,
-    verification_type: str,
-    result: str | None = None,
-) -> dict[str, Any] | None:
-    """最新一条指定类型的验证证据（v0.3 §7.1 级别重算依据）。
-
-    审查 P1-7：降级重算必须按「最新 passed 证据」而非「最新一条证据」——
-    否则一次失败的验证写入的 failed 行会屏蔽历史 passed 证据，后续重算
-    持续退化到 DISCOVERED。
-    """
-    if result is not None:
-        row = conn.execute(
-            "select * from agent_verifications"
-            " where catalog_agent_id = ? and verification_type = ? and result = ?"
-            " order by checked_at desc, verification_id desc limit 1",
-            (catalog_agent_id, verification_type, result),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "select * from agent_verifications"
-            " where catalog_agent_id = ? and verification_type = ?"
-            " order by checked_at desc, verification_id desc limit 1",
-            (catalog_agent_id, verification_type),
-        ).fetchone()
-    return None if row is None else _row_to_dict(row)
-
-
-def list_verifications(
-    conn: sqlite3.Connection,
-    catalog_agent_id: str,
-) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        """
-        select * from agent_verifications
-        where catalog_agent_id = ?
-        order by verification_id
-        """,
-        (catalog_agent_id,),
-    ).fetchall()
-    return [_row_to_dict(r) for r in rows]
 
 
 # ── agent_trust_observations (§5.7, private-only) ─────────────────────────────
