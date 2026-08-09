@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 from typing import Any
 
+from kiwi_catalog.agent_catalog.row_serialization import row_to_dict
 
 AGENT_STATUS_RANK = {
     "commerce_verified": 0,
@@ -80,3 +82,26 @@ def agent_cursor_predicate(cursor: str) -> tuple[str, list[Any]]:
         rank, last_verified_at, name, catalog_agent_id,
     ]
     return "(" + " or ".join(clauses) + ")", params
+
+
+def paginate_agent_rows(
+    rows: list[sqlite3.Row], limit: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Project a fetched agent page and encode its deterministic next cursor.
+
+    Repository queries intentionally fetch one extra row. Keeping the final
+    page shaping here makes the three catalog list/search entry points share
+    the same cursor boundary and row projection without changing their SQL.
+    """
+    has_more = len(rows) > limit
+    result_rows = rows[:limit]
+    next_cursor: str | None = None
+    if has_more and result_rows:
+        last = result_rows[-1]
+        next_cursor = encode_agent_cursor(
+            agent_status_rank(str(last["verification_status"] or "")),
+            last["last_verified_at"],
+            str(last["display_name"] or ""),
+            str(last["catalog_agent_id"]),
+        )
+    return [row_to_dict(row) for row in result_rows], next_cursor

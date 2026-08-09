@@ -25,6 +25,13 @@ import json
 import sqlite3
 from typing import Any
 
+from kiwi_catalog.agent_catalog.pagination import (
+    agent_cursor_predicate as _agent_cursor_predicate,
+)
+from kiwi_catalog.agent_catalog.pagination import (
+    paginate_agent_rows as _paginate_agent_rows,
+)
+from kiwi_catalog.agent_catalog.row_serialization import row_to_dict as _row_to_dict
 from kiwi_catalog.agent_catalog.state_domains import (
     ACTIVE,
     ADMINISTRATIVE_STATES,
@@ -36,17 +43,12 @@ from kiwi_catalog.agent_catalog.state_domains import (
     SUSPENDED,
     UNREACHABLE,
     VERIFICATION_LEVELS,
+)
+from kiwi_catalog.agent_catalog.state_domains import (
     fold_verification_status as _fold_verification_status,
 )
-from kiwi_catalog.agent_catalog.pagination import (
-    agent_cursor_predicate as _agent_cursor_predicate,
-    agent_status_rank as _agent_status_rank,
-    encode_agent_cursor as _encode_agent_cursor,
-)
-from kiwi_catalog.agent_catalog.row_serialization import row_to_dict as _row_to_dict
 from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
-
 
 # ── §8.3 keyset pagination（审查 P1-6）─────────────────────────────────────
 # 三处列表/搜索共用同一排序键：verification_status rank → last_verified_at
@@ -600,20 +602,7 @@ def search_catalog_agents(
 
     rows = conn.execute(sql, params).fetchall()
 
-    has_more = len(rows) > limit
-    result_rows = rows[:limit]
-    next_cursor: str | None = None
-    if has_more and result_rows:
-        last = result_rows[-1]
-        next_cursor = _encode_agent_cursor(
-            _agent_status_rank(str(last["verification_status"] or "")),
-            last["last_verified_at"],
-            str(last["display_name"] or ""),
-            str(last["catalog_agent_id"]),
-        )
-
-    results = [_row_to_dict(r) for r in result_rows]
-    return results, next_cursor
+    return _paginate_agent_rows(rows, limit)
 
 
 # ── List (paginated) ─────────────────────────────────────────────────────────
@@ -669,20 +658,7 @@ def list_catalog_agents(
 
     rows = conn.execute(sql, params).fetchall()
 
-    has_more = len(rows) > limit
-    result_rows = rows[:limit]
-    next_cursor: str | None = None
-    if has_more and result_rows:
-        last = result_rows[-1]
-        next_cursor = _encode_agent_cursor(
-            _agent_status_rank(str(last["verification_status"] or "")),
-            last["last_verified_at"],
-            str(last["display_name"] or ""),
-            str(last["catalog_agent_id"]),
-        )
-
-    results = [_row_to_dict(r) for r in result_rows]
-    return results, next_cursor
+    return _paginate_agent_rows(rows, limit)
 
 
 def list_catalog_agents_by_merchant(
@@ -732,20 +708,7 @@ def list_catalog_agents_by_merchant(
 
     rows = conn.execute(sql, params).fetchall()
 
-    has_more = len(rows) > limit
-    result_rows = rows[:limit]
-    next_cursor: str | None = None
-    if has_more and result_rows:
-        last = result_rows[-1]
-        next_cursor = _encode_agent_cursor(
-            _agent_status_rank(str(last["verification_status"] or "")),
-            last["last_verified_at"],
-            str(last["display_name"] or ""),
-            str(last["catalog_agent_id"]),
-        )
-
-    results = [_row_to_dict(r) for r in result_rows]
-    return results, next_cursor
+    return _paginate_agent_rows(rows, limit)
 
 
 # ── Verification / snapshot persistence (W3) ────────────────────────────────
@@ -1246,7 +1209,10 @@ def enforce_catalog_register_domain_limit(
     Delegates to the shared fixed-window core (v3.0-P5) — see
     ``kiwi_catalog.services.rate_limit`` for the backend abstraction.
     """
-    from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
+    from kiwi_catalog.services.rate_limit import (
+        SQLiteRateLimitBackend,
+        enforce_rate_limit,
+    )
 
     backend = SQLiteRateLimitBackend(
         conn, table="agent_catalog_register_limits", key_column="canonical_domain"
