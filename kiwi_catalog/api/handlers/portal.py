@@ -31,6 +31,7 @@ fallback 栈渲染的轻量 HTML（零新依赖）：申请表单 / 审核后台
 from __future__ import annotations
 
 import os
+import secrets
 from typing import Any
 
 _PORTAL_ADMIN_ENABLED_ENV = "KIWI_CATALOG_PORTAL_ADMIN_ENABLED"
@@ -172,18 +173,39 @@ th { color: var(--kiwi-800); font-weight: 700; white-space: nowrap; font-size: 0
 
 
 def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
+    # CSP（KC-SEC-01 硬化）：script 走 per-response nonce——页面内嵌脚本
+    # 是唯一合法执行源，匿名数据即使绕过转义也无法执行（meta CSP 对
+    # 同源注入有效）。style 允许 inline（页面样式内嵌且无用户数据）。
+    nonce = secrets.token_urlsafe(16)
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}'; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'none'; "
+        "object-src 'none'"
+    )
     return {
         "__html__": (
             "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            f"<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"
             f"<title>{title} — Kiwi Merchant Portal</title>"
             f"<style>{_OFFICIAL_CSS}{_PORTAL_EXTRA_CSS}</style></head>"
-            f"<body>{body}<script>{_PORTAL_JS}{extra_js}</script></body></html>"
+            f"<body>{body}<script nonce=\"{nonce}\">{_PORTAL_JS}{extra_js}</script></body></html>"
         )
     }
 
 
 _PORTAL_JS = """
+function escHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>\"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;'
+  }[c]));
+}
 function postJson(url, body, token) {
   const headers = {'Content-Type': 'application/json'};
   if (token) headers['Authorization'] = 'Bearer ' + token;
@@ -196,6 +218,7 @@ function getJson(url, token) {
   return fetch(url, {method: 'GET', headers}).then(r => r.json());
 }
 """
+
 
 _OFFICIAL_HOME = "https://kiwi.harrylabsj.com/"
 
@@ -228,7 +251,7 @@ _ADMIN_NAV = """
 
 _FOOTER = """
 <footer class="footer"><div class="footer-inner">
-  <p>Kiwi Merchant Portal · 令牌只显示一次，遗失请联系运营轮换 · 明文令牌永不出现在日志中</p>
+  <p>Kiwi Merchant Portal · 登录后可查看当前令牌，遗失或疑似泄露请联系运营轮换 · 明文令牌永不出现在日志中</p>
 </div></footer>
 """
 
@@ -332,11 +355,11 @@ function showToken(r) {
   const card = document.getElementById('result_card');
   const out = document.getElementById('result');
   card.style.display = 'block';
-  out.innerHTML = '<p class="small">商家 ID</p><div class="token-box">' + r.merchant_id
+  out.innerHTML = '<p class="small">商家 ID</p><div class="token-box">' + escHtml(r.merchant_id)
     + '</div><p class="small">访问令牌 — 复制保存，关闭页面后不可再见</p>'
-    + '<div class="token-box">' + r.token + '</div>'
-    + '<p class="small">在 kiwi CLI 中用 --merchant-id ' + r.merchant_id
-    + ' --merchant-token ' + r.token_prefix + '… 注册 Agent，或用 owner_token 字段调用 /v1/listings/publish。</p>';
+    + '<div class="token-box">' + escHtml(r.token) + '</div>'
+    + '<p class="small">在 kiwi CLI 中用 --merchant-id ' + escHtml(r.merchant_id)
+    + ' --merchant-token ' + escHtml(r.token_prefix) + '… 注册 Agent，或用 owner_token 字段调用 /v1/listings/publish。</p>';
 }
 function loadList() {
   const token = document.getElementById('admin_token').value.trim();
@@ -350,12 +373,12 @@ function loadList() {
     r.results.forEach(a => {
       const row = document.createElement('div');
       row.className = 'app-row';
-      row.innerHTML = '<div><strong>' + a.agent_name + '</strong><br>'
-        + '<span class="small mono">' + a.domain + ' · ' + a.contact_email + '</span>'
-        + (a.purpose ? '<br><span class="small">' + a.purpose + '</span>' : '')
+      row.innerHTML = '<div><strong>' + escHtml(a.agent_name) + '</strong><br>'
+        + '<span class="small mono">' + escHtml(a.domain) + ' · ' + escHtml(a.contact_email) + '</span>'
+        + (a.purpose ? '<br><span class="small">' + escHtml(a.purpose) + '</span>' : '')
         + '</div>'
-        + '<div class="app-actions"><button data-app="' + a.application_id + '" class="btn-mini">批准签发</button>'
-        + '<button data-rej="' + a.application_id + '" class="btn-mini">拒绝</button></div>';
+        + '<div class="app-actions"><button data-app="' + escHtml(a.application_id) + '" class="btn-mini">批准签发</button>'
+        + '<button data-rej="' + escHtml(a.application_id) + '" class="btn-mini">拒绝</button></div>';
       list.appendChild(row);
     });
   });
@@ -440,7 +463,7 @@ const METRIC_COLORS = {
 };
 
 function adminApi(path, token) {
-  return getJson(path + (path.includes('?') ? '&' : '?') + 'admin_token=' + encodeURIComponent(token));
+  return getJson(path, token);
 }
 
 function renderKpis(d) {
@@ -450,7 +473,7 @@ function renderKpis(d) {
     ['待审申请', c.pending_applications], ['有效令牌', c.active_tokens],
   ];
   document.getElementById('kpis').innerHTML = kpis.map(([lbl, n]) =>
-    '<div class="kpi"><div class="num">' + n + '</div><div class="lbl">' + lbl + '</div></div>'
+    '<div class="kpi"><div class="num">' + escHtml(n) + '</div><div class="lbl">' + escHtml(lbl) + '</div></div>'
   ).join('');
 }
 
@@ -458,7 +481,7 @@ function renderUsage(usage) {
   const max = Math.max(1, ...usage.map(u => u.total));
   document.getElementById('usage').innerHTML =
     '<div class="bars">' + usage.map(u =>
-      '<div class="bar" title="' + u.day + ' 总 ' + u.total + '"><div class="fill" style="height:' + Math.max(2, Math.round(u.total / max * 100)) + '%"></div><div class="d">' + u.day.slice(5) + '</div></div>'
+      '<div class="bar" title="' + escHtml(u.day) + ' 总 ' + escHtml(u.total) + '"><div class="fill" style="height:' + Math.max(2, Math.round(u.total / max * 100)) + '%"></div><div class="d">' + escHtml(u.day.slice(5)) + '</div></div>'
     ).join('') + '</div>';
   document.getElementById('legend').innerHTML = Object.entries(METRIC_LABELS).map(([k, v]) =>
     '<span><span class="sw" style="background:' + METRIC_COLORS[k] + '"></span>' + v + '</span>'
@@ -469,41 +492,41 @@ function renderApps(token, apps) {
   const el = document.getElementById('apps');
   if (!apps.length) { el.innerHTML = '<p class="small muted">没有待审申请</p>'; return; }
   el.innerHTML = '<table><tr><th>#</th><th>名称</th><th>域名</th><th>邮箱</th><th>用途</th><th></th></tr>' +
-    apps.map(a => '<tr><td>' + a.application_id + '</td><td>' + a.agent_name + '</td><td class="mono">' + a.domain +
-      '</td><td>' + a.contact_email + '</td><td class="small muted">' + (a.purpose || '-') + '</td><td>' +
-      '<button class="btn-mini" data-app="' + a.application_id + '">批准</button>' +
-      '<button class="btn-mini" data-rej="' + a.application_id + '">拒绝</button></td></tr>').join('') + '</table>';
+    apps.map(a => '<tr><td>' + escHtml(a.application_id) + '</td><td>' + escHtml(a.agent_name) + '</td><td class="mono">' + escHtml(a.domain) +
+      '</td><td>' + escHtml(a.contact_email) + '</td><td class="small muted">' + escHtml(a.purpose || '-') + '</td><td>' +
+      '<button class="btn-mini" data-app="' + escHtml(a.application_id) + '">批准</button>' +
+      '<button class="btn-mini" data-rej="' + escHtml(a.application_id) + '">拒绝</button></td></tr>').join('') + '</table>';
 }
 
 function renderMerchants(list) {
   const el = document.getElementById('merchants');
   if (!list.length) { el.innerHTML = '<p class="small muted">还没有商家</p>'; return; }
   el.innerHTML = '<table><tr><th>商家 ID</th><th>名称</th><th>Agent</th><th>商品</th><th>令牌</th><th>签发</th><th></th></tr>' +
-    list.map(m => '<tr><td class="mono">' + m.merchant_id + '</td><td>' + m.name + '</td><td>' + m.agents_count +
-      '</td><td>' + m.listings_count + '</td><td>' + m.token_status + '</td><td class="small muted">' +
-      (m.token_issued_at || '-').slice(0, 10) + '</td><td><button class="btn-mini" data-report="' +
-      m.merchant_id + '">报告</button></td></tr>').join('') + '</table>';
+    list.map(m => '<tr><td class="mono">' + escHtml(m.merchant_id) + '</td><td>' + escHtml(m.name) + '</td><td>' + escHtml(m.agents_count) +
+      '</td><td>' + escHtml(m.listings_count) + '</td><td>' + escHtml(m.token_status) + '</td><td class="small muted">' +
+      escHtml((m.token_issued_at || '-').slice(0, 10)) + '</td><td><button class="btn-mini" data-report="' +
+      escHtml(m.merchant_id) + '">报告</button></td></tr>').join('') + '</table>';
 }
 
 function renderReport(r, token) {
   const m = r.merchant;
-  let html = '<p class="small muted">' + m.merchant_id + ' · 创建 ' + (m.created_at || '').slice(0, 10) + ' · 更新 ' + (m.updated_at || '').slice(0, 10) + '</p>';
+  let html = '<p class="small muted">' + escHtml(m.merchant_id) + ' · 创建 ' + escHtml((m.created_at || '').slice(0, 10)) + ' · 更新 ' + escHtml((m.updated_at || '').slice(0, 10)) + '</p>';
   html += '<div class="section-title">Token 生命周期</div>';
   html += r.tokens.length ? '<table><tr><th>状态</th><th>签发</th><th>轮换</th><th>吊销</th></tr>' + r.tokens.map(t =>
-    '<tr><td>' + t.status + '</td><td>' + (t.issued_at || '-').slice(0, 10) + '</td><td>' + (t.rotated_at || '-').slice(0, 10) + '</td><td>' + (t.revoked_at || '-').slice(0, 10) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无令牌</p>';
-  html += '<div class="section-title">Agents（' + r.agents.length + '）</div>';
+    '<tr><td>' + escHtml(t.status) + '</td><td>' + escHtml((t.issued_at || '-').slice(0, 10)) + '</td><td>' + escHtml((t.rotated_at || '-').slice(0, 10)) + '</td><td>' + escHtml((t.revoked_at || '-').slice(0, 10)) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无令牌</p>';
+  html += '<div class="section-title">Agents（' + escHtml(r.agents.length) + '）</div>';
   html += r.agents.length ? '<table><tr><th>ID</th><th>名称</th><th>域名</th><th>验证</th><th>状态</th></tr>' + r.agents.map(a =>
-    '<tr><td class="mono">' + a.catalog_agent_id + '</td><td>' + a.display_name + '</td><td class="mono">' + a.canonical_domain +
-    '</td><td>' + a.verification_level + '</td><td>' + a.administrative_state + '</td></tr>').join('') + '</table>' : '<p class="small muted">无 Agent</p>';
-  html += '<div class="section-title">商品（' + r.listings.length + '）</div>';
+    '<tr><td class="mono">' + escHtml(a.catalog_agent_id) + '</td><td>' + escHtml(a.display_name) + '</td><td class="mono">' + escHtml(a.canonical_domain) +
+    '</td><td>' + escHtml(a.verification_level) + '</td><td>' + escHtml(a.administrative_state) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无 Agent</p>';
+  html += '<div class="section-title">商品（' + escHtml(r.listings.length) + '）</div>';
   html += r.listings.length ? '<table><tr><th>ID</th><th>标题</th><th>类目</th><th>状态</th><th>发布</th></tr>' + r.listings.map(l =>
-    '<tr><td class="mono">' + l.listing_id + '</td><td>' + l.title + '</td><td>' + l.category + '</td><td>' +
-    l.publication_state + '</td><td>' + (l.published_at || '').slice(0, 10) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无商品</p>';
-  html += '<div class="section-title">审计事件（' + r.audit_events.length + '）</div>';
+    '<tr><td class="mono">' + escHtml(l.listing_id) + '</td><td>' + escHtml(l.title) + '</td><td>' + escHtml(l.category) + '</td><td>' +
+    escHtml(l.publication_state) + '</td><td>' + escHtml((l.published_at || '').slice(0, 10)) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无商品</p>';
+  html += '<div class="section-title">审计事件（' + escHtml(r.audit_events.length) + '）</div>';
   html += r.audit_events.length ? '<table><tr><th>时间</th><th>事件</th><th>操作者</th><th>详情</th></tr>' + r.audit_events.map(e =>
-    '<tr><td class="small muted">' + (e.created_at || '').slice(0, 16) + '</td><td>' + e.event + '</td><td>' + e.actor +
-    '</td><td class="small muted">' + e.details + '</td></tr>').join('') + '</table>' : '<p class="small muted">无审计事件</p>';
-  document.getElementById('report_title').textContent = '商家报告：' + m.name;
+    '<tr><td class="small muted">' + escHtml((e.created_at || '').slice(0, 16)) + '</td><td>' + escHtml(e.event) + '</td><td>' + escHtml(e.actor) +
+    '</td><td class="small muted">' + escHtml(e.details) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无审计事件</p>';
+  document.getElementById('report_title').textContent = '商家报告：' + String(m.name == null ? '' : m.name);
   document.getElementById('report').innerHTML = html;
   document.getElementById('report_card').style.display = 'block';
   document.getElementById('content').style.display = 'none';
@@ -791,7 +814,7 @@ function loadMe() {
     document.getElementById('content').style.display = 'block';
     const p = document.getElementById('profile');
     let html = '<h3>' + esc(r.email) + '</h3>';
-    html += '<p class="small">账号 ID ' + r.account_id + (r.merchant_id ? ' · 商家 ' + esc(r.merchant_id) : '') + '</p>';
+    html += '<p class="small">账号 ID ' + esc(r.account_id) + (r.merchant_id ? ' · 商家 ' + esc(r.merchant_id) : '') + '</p>';
     if (r.application) {
       html += '<p>申请状态：<strong>' + esc(r.application.status) + '</strong>'
         + (r.application.status === 'rejected' && r.application.review_note ? '（' + esc(r.application.review_note) + '）' : '')
@@ -804,7 +827,7 @@ function loadMe() {
     const tb = document.getElementById('token_box');
     const rt = document.getElementById('request_token');
     if (r.token && r.token.status === 'active') {
-      tb.innerHTML = '<p class="small">商家令牌（mkt_…，保管好；遗失可联系运营轮换）</p>'
+      tb.innerHTML = '<p class="small">商家令牌（mkt_…，当前登录会话可查看；遗失或疑似泄露请联系运营轮换）</p>'
         + '<div class="token-box">' + esc(r.token.token) + '</div>'
         + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
         + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')

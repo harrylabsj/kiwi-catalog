@@ -196,6 +196,15 @@ class MarketplaceASGIApp:
             body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
             content_type = b"application/json"
             extra_headers = []
+        # 安全响应头（KC-SEC-01 硬化）：凭据页/JSON API 一律 nosniff + 禁
+        # Referrer 泄漏（admin token 已改 header-only，referrer 兜底防
+        # 凭据随导航外泄）。
+        extra_headers.extend(
+            [
+                (b"x-content-type-options", b"nosniff"),
+                (b"referrer-policy", b"no-referrer"),
+            ]
+        )
         cookies = response.get("__cookies__") if isinstance(response, dict) else None
         if cookies:
             extra_headers.extend(
