@@ -109,6 +109,12 @@ from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
 from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_from_epoch
 from kiwi_catalog.services.verification_helpers import outcome_for as _outcome_for
+from kiwi_catalog.services.verification_queue_serialization import (
+    deserialize_verification_result as _deserialize_verification_result,
+)
+from kiwi_catalog.services.verification_queue_serialization import (
+    serialize_verification_result as _serialize_verification_result,
+)
 
 # The ladder rungs that carry a persisted profile (anything above DISCOVERED).
 _LADDER_RUNGS: frozenset[str] = frozenset(
@@ -1088,58 +1094,6 @@ class VerificationTaskResult:
     started_at: float = 0.0
     finished_at: float = 0.0
     result: VerificationResult | None = None
-
-
-def _serialize_verification_result(result: VerificationResult | None) -> str:
-    """Serialize a VerificationResult for the v15 queue ledger (result_json)."""
-    if result is None:
-        return "{}"
-    return encode_json(
-        {
-            "catalog_agent_id": result.catalog_agent_id,
-            "previous_status": result.previous_status,
-            "status": result.status,
-            "stages": [
-                {
-                    "stage": stage.stage,
-                    "outcome": stage.outcome,
-                    "target_status": stage.target_status,
-                    "reason": stage.reason,
-                    "verification_id": stage.verification_id,
-                    "snapshot_ids": list(stage.snapshot_ids),
-                    "evidence": stage.evidence,
-                }
-                for stage in result.stages
-            ],
-        }
-    )
-
-
-def _deserialize_verification_result(raw: str) -> VerificationResult | None:
-    """Rebuild a VerificationResult from ledger result_json (or None)."""
-    if not raw or raw == "{}":
-        return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    return VerificationResult(
-        catalog_agent_id=str(payload.get("catalog_agent_id", "")),
-        previous_status=str(payload.get("previous_status", "")),
-        status=str(payload.get("status", "")),
-        stages=tuple(
-            StageResult(
-                stage=str(s.get("stage", "")),
-                outcome=str(s.get("outcome", "")),
-                target_status=str(s.get("target_status", "")),
-                reason=str(s.get("reason", "") or ""),
-                verification_id=s.get("verification_id"),
-                snapshot_ids=tuple(int(x) for x in (s.get("snapshot_ids") or [])),
-                evidence=s.get("evidence"),
-            )
-            for s in (payload.get("stages") or [])
-        ),
-    )
 
 
 class VerificationQueueFullError(ShoppingCliError):
