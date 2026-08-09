@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from kiwi_catalog.services.agent_verification import VerificationResult
+    from kiwi_catalog.services.verification_stages import VerificationResult
 
 
 @dataclass(frozen=True)

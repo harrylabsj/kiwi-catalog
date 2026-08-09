@@ -17,12 +17,9 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
 
 from kiwi_catalog.db.session import encode_json
-
-if TYPE_CHECKING:
-    from kiwi_catalog.services.agent_verification import VerificationResult
+from kiwi_catalog.services.verification_stages import StageResult, VerificationResult
 
 
 def serialize_verification_result(result: VerificationResult | None) -> str:
@@ -58,10 +55,6 @@ def deserialize_verification_result(raw: str) -> VerificationResult | None:
         payload = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    # Local import: this module is imported by agent_verification at module
-    # load time, so the dataclasses must be resolved lazily at call time to
-    # avoid a circular import.
-    from kiwi_catalog.services.agent_verification import StageResult, VerificationResult
 
     return VerificationResult(
         catalog_agent_id=str(payload.get("catalog_agent_id", "")),
