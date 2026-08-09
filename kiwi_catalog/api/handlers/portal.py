@@ -228,18 +228,22 @@ _OFFICIAL_HOME = "https://kiwi.harrylabsj.com/"
 
 
 def _nav(active: str = "") -> str:
-    """商家侧一级导航：Home（官网首页）+ API Token + 我的（My Account）。
+    """商家侧一级导航：Home / For Buyers / For Merchants / For Developers / My Account。
 
-    Kiwi logo 与 Home 都指向官网首页（kiwi.harrylabsj.com）。
+    前四项与官网（kiwi.harrylabsj.com）导航一致，指向官网各页（Demo 已在
+    官网首页，不再单列）；My Account 为门户本地页（/portal/account）。令牌
+    申请/复制入口收敛在 My Account 页内（有令牌显示复制按钮，无令牌显示
+    申请按钮）。
     """
-    portal_cls = ' class="active"' if active == "portal" else ""
     account_cls = ' class="active"' if active == "account" else ""
     return f"""
 <nav class="nav"><div class="nav-inner">
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
   <div class="nav-links">
     <a href="{_OFFICIAL_HOME}">Home</a>
-    <a href="/portal"{portal_cls}>API Token</a>
+    <a href="{_OFFICIAL_HOME}buyers.html">For Buyers</a>
+    <a href="{_OFFICIAL_HOME}merchants.html">For Merchants</a>
+    <a href="{_OFFICIAL_HOME}developers.html">For Developers</a>
     <a href="/portal/account"{account_cls}>My Account</a>
   </div>
 </div></nav>
@@ -842,14 +846,20 @@ function loadMe() {
         navigator.clipboard.writeText(document.querySelector('.token-box').textContent.trim());
       });
       rt.style.display = 'none';
+      document.getElementById('apply_form').style.display = 'none';
     } else if (r.application && r.application.status === 'pending') {
       tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
       rt.style.display = 'none';
       document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。填写商家信息提交申请，平台审核通过后签发。</p>';
-      rt.style.display = 'none';
-      document.getElementById('apply_form').style.display = 'block';
+      tb.innerHTML = '<p class="small muted">还没有令牌。点击「令牌申请」填写商家信息提交，平台审核通过后签发。</p>'
+        + '<button class="btn-form" id="apply_token_btn">令牌申请</button>';
+      rt.style.display = 'block';
+      document.getElementById('apply_form').style.display = 'none';
+      document.getElementById('apply_token_btn').addEventListener('click', () => {
+        document.getElementById('apply_token_btn').style.display = 'none';
+        document.getElementById('apply_form').style.display = 'block';
+      });
     }
   });
 }

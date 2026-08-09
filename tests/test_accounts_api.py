@@ -471,19 +471,36 @@ class AccountsApiTest(unittest.TestCase):
     # ── 导航 ───────────────────────────────────────────────────────────────
 
     def test_portal_nav_has_my_account(self) -> None:
-        """「我的」页一级导航保留 My Account（防迷失）；无令牌页链接。"""
+        """「我的」页一级导航：Home / For Buyers / For Merchants / For Developers / My Account。
+
+        官网四项链接到 kiwi.harrylabsj.com 各页（Demo 在官网首页，不单列）；
+        My Account 为本地页；令牌申请收敛到页内（无独立导航链接）。
+        """
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
-        self.assertIn(">My Account</a>", raw)
-        self.assertIn(">API Token</a>", raw)
+        for label in (">Home</a>", ">For Buyers</a>", ">For Merchants</a>",
+                      ">For Developers</a>", ">My Account</a>"):
+            self.assertIn(label, raw)
+        self.assertNotIn(">Demo</a>", raw)
+        self.assertIn("buyers.html", raw)
+        self.assertIn("merchants.html", raw)
+        self.assertIn("developers.html", raw)
+        self.assertNotIn("demo.html", raw)
+        self.assertIn("复制令牌", raw)  # 有令牌态：复制令牌按钮（静态 JS 模板）
+        self.assertNotIn(">API Token</a>", raw)
+        self.assertNotIn(">令牌申请</a>", raw)
         self.assertNotIn("/portal/status", raw)
         self.assertNotIn(">Merchant Portal<", raw)  # 导航无 Merchant Portal（title 后缀除外）
 
-    def test_home_nav_points_to_token_apply(self) -> None:
+    def test_home_nav_points_to_my_account(self) -> None:
+        """`/portal` 一级导航指向 My Account；不再有独立令牌申请导航链接。"""
         _, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
-        self.assertIn(">API Token</a>", raw)
+        self.assertIn(">My Account</a>", raw)
         self.assertIn("/portal/account", raw)
+        self.assertIn(">For Merchants</a>", raw)
+        self.assertNotIn(">API Token</a>", raw)
+        self.assertNotIn(">令牌申请</a>", raw)
 
     def test_status_page_removed(self) -> None:
         status, _, _ = _call_http(self.app, "GET", "/portal/status")
