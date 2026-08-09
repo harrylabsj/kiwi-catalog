@@ -64,14 +64,19 @@ PRODUCT_PAYLOAD = {
 }
 
 
-def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict]:
+def _call_http(
+    app, method: str, path: str, body: bytes = b"", headers: dict[str, str] | None = None
+) -> tuple[int, dict]:
     path_only = path.split("?", 1)[0]
     query_bytes = path.split("?", 1)[1].encode() if "?" in path else b""
+    scope_headers: list[tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
+    for key, value in (headers or {}).items():
+        scope_headers.append((key.lower().encode("latin1"), value.encode("latin1")))
     scope = {
         "type": "http",
         "method": method,
         "path": path_only,
-        "headers": [(b"content-type", b"application/json")],
+        "headers": scope_headers,
         "query_string": query_bytes,
         "http_version": "1.1",
         "scheme": "http",
@@ -426,18 +431,29 @@ class ListingsApiTest(unittest.TestCase):
 
     def test_list_agent_listings_admin_exempt_for_bound_agent(self) -> None:
         """审查 P2：已绑定 merchant 的 agent 自查，admin token 必须豁免
-        （此前只走 owner HMAC 校验，admin 恒 403——与 withdraw/reinstate 不一致）。"""
+        （此前只走 owner HMAC 校验，admin 恒 403——与 withdraw/reinstate 不一致）。
+        KC-SEC-02：admin 凭据只经 Authorization header；query 携带被拒。"""
         self._publish()
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
+            # 有效 admin token 在 query、无 header → 403（fail-closed）
             status, payload = _call_http(
                 self.app,
                 "GET",
                 f"/v1/agents/{self.agent_id}/listings?admin_token=admin-tok",
             )
-        self.assertEqual(status, 200, payload)
+            self.assertEqual(status, 403, payload)
+            # Authorization: Bearer 携带 admin token → 豁免
+            status, payload = _call_http(
+                self.app,
+                "GET",
+                f"/v1/agents/{self.agent_id}/listings",
+                headers={"Authorization": "Bearer admin-tok"},
+            )
+            self.assertEqual(status, 200, payload)
 
     def test_list_agent_listings_unbound_agent_admin_only(self) -> None:
-        """未绑定 merchant 的 agent 无 owner 可归属：仅 admin 可读（含治理状态面）。"""
+        """未绑定 merchant 的 agent 无 owner 可归属：仅 admin 可读（含治理状态面）。
+        admin 凭据只经 Authorization header；query 携带被拒。"""
         body = {
             **REGISTER_BODY,
             "domain": "unbound.example",  # 独立 domain：注册接口按 domain 去重
@@ -452,10 +468,52 @@ class ListingsApiTest(unittest.TestCase):
         self.assertEqual(status, 403, payload)
         self.assertIn("no merchant binding", payload.get("error", ""))
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
+            # 有效 admin token 在 query、无 header → 403
             status, payload = _call_http(
                 self.app, "GET", f"/v1/agents/{unbound}/listings?admin_token=admin-tok"
             )
-        self.assertEqual(status, 200, payload)
+            self.assertEqual(status, 403, payload)
+            self.assertIn("no merchant binding", payload.get("error", ""))
+            # Authorization: Bearer 携带 admin token → 200
+            status, payload = _call_http(
+                self.app,
+                "GET",
+                f"/v1/agents/{unbound}/listings",
+                headers={"Authorization": "Bearer admin-tok"},
+            )
+            self.assertEqual(status, 200, payload)
+
+    def test_list_agent_listings_query_auth_excludes_admin_token(self) -> None:
+        """KC-SEC-02：query 派生 auth 不含 admin_token。
+
+        自查接口 GET 无 body，owner_token 经 query 是 legacy 兼容红线；但
+        admin 凭据不得进 query——handler 只把 owner_token 并入 auth payload，
+        admin 只认 transport 的 _auth_token（Authorization header）。白盒断言
+        query 里出现的 admin_token 不会落入传给鉴权 helper 的 payload。
+        """
+        self._publish()
+        from kiwi_catalog.api.handlers import listings as listings_handlers
+
+        captured: dict = {}
+
+        def _fake_require(payload, merchant_id, conn=None, db_path=None):
+            captured["payload"] = payload
+            captured["merchant_id"] = merchant_id
+
+        with mock.patch(
+            "kiwi_catalog.api.handlers.listings._require_owner_token_for_merchant",
+            side_effect=_fake_require,
+        ):
+            listings_handlers.v1_list_agent_listings(
+                self.db_path,
+                self.agent_id,
+                {"owner_token": self.token, "admin_token": "admin-tok"},
+                {"_auth_token": "admin-tok"},
+            )
+        self.assertNotIn("admin_token", captured["payload"])
+        self.assertEqual(captured["payload"].get("owner_token"), self.token)
+        # transport 层 Bearer 合并的 _auth_token 原样透传（admin 校验唯一来源）
+        self.assertEqual(captured["payload"].get("_auth_token"), "admin-tok")
 
     def test_list_agent_listings_with_freshness_filter(self) -> None:
         self._publish()

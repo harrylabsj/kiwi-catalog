@@ -212,7 +212,7 @@ RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}/listings",
         lambda db_path, payload, query, catalog_agent_id: _v1_list_agent_listings(
-            db_path, catalog_agent_id, query or {}
+            db_path, catalog_agent_id, query or {}, payload or {}
         ),
     ),
 RouteEntry(
@@ -579,8 +579,10 @@ def _v1_get_listing(db_path, listing_id, payload=None, query=None):
     return listings_handlers.v1_get_listing(db_path, listing_id)
 
 
-def _v1_list_agent_listings(db_path, catalog_agent_id, query):
-    return listings_handlers.v1_list_agent_listings(db_path, catalog_agent_id, query)
+def _v1_list_agent_listings(db_path, catalog_agent_id, query, auth_payload=None):
+    return listings_handlers.v1_list_agent_listings(
+        db_path, catalog_agent_id, query, auth_payload or {}
+    )
 
 
 def _v1_publish_listing(db_path, payload):
@@ -1048,8 +1050,14 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_list_agent_listings(
         catalog_agent_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
+        # admin token 只经 Authorization header（KC-SEC-02，与 fallback 一致）；
+        # owner_token 自查仍走 query。payload_with_auth 把 Bearer 合并为
+        # _auth_token 供 handler 做 admin 校验。
         return _v1_list_agent_listings(
-            db_path, catalog_agent_id, _query_params_from_request(request)
+            db_path,
+            catalog_agent_id,
+            _query_params_from_request(request),
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
         )
 
     @app.post("/v1/listings/publish")

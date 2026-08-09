@@ -22,7 +22,6 @@ FastAPI branch (skipped when fastapi is unavailable).
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +116,78 @@ class FastApiDualStackTest(unittest.TestCase):
             # FastAPI 默认参数传空字符串：数值/布尔过滤视为未提供（不 400）
             resp = client.get("/v1/listings/search")
             self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_list_agent_listings_fastapi_threads_admin_header(self) -> None:
+        """KC-SEC-02：FastAPI 栈 listings 自查路由 admin 只经 Authorization header。
+
+        fallback 栈经 payload_with_auth 把 Bearer 合并进 payload；FastAPI 路由
+        同样必须透传 header，否则双栈切换后 admin 豁免 / 未绑定 agent 读取失效。
+        owner_token query 自查为 legacy 兼容，保持不变。
+        """
+        import os
+        from unittest import mock
+
+        from fastapi.testclient import TestClient
+
+        from kiwi_catalog.api.auth import owner_token
+
+        owner_secret = "test-owner-secret"
+        admin_token = "admin-tok"
+        merchant_id = "mrc_fastapi"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": owner_secret,
+                "KIWI_CATALOG_ADMIN_TOKEN": admin_token,
+            },
+            clear=False,
+        ):
+            token = owner_token(merchant_id)
+            with TestClient(self.app) as client:
+                reg = client.post(
+                    "/v1/agents/register",
+                    json={
+                        "domain": "fastapi-admin.example",
+                        "display_name": "FastAPI Admin",
+                        "agent_card_url": "https://fastapi-admin.example/.well-known/agent-card.json",
+                        "hosting_mode": "direct_only",
+                        "handoff_destination_types": ["external_checkout_url"],
+                        "merchant_id": merchant_id,
+                        "owner_token": token,
+                    },
+                )
+                self.assertEqual(reg.status_code, 200, reg.text)
+                agent_id = reg.json()["agent"]["catalog_agent_id"]
+                pub = client.post(
+                    "/v1/listings/publish",
+                    json={
+                        "listing_type": "product",
+                        "owner_agent_id": agent_id,
+                        "merchant_id": merchant_id,
+                        "owner_token": token,
+                        "source_product_ref": "SKU-001",
+                        "title": "FastAPI Admin Display",
+                        "category": "industrial-display",
+                        "handoff_destination_types": ["external_checkout_url"],
+                    },
+                )
+                self.assertEqual(pub.status_code, 200, pub.text)
+                # admin token 在 query、无 header → 403（fail-closed）
+                resp = client.get(
+                    f"/v1/agents/{agent_id}/listings?admin_token={admin_token}"
+                )
+                self.assertEqual(resp.status_code, 403, resp.text)
+                # Authorization: Bearer admin → 200 豁免
+                resp = client.get(
+                    f"/v1/agents/{agent_id}/listings",
+                    headers={"Authorization": f"Bearer {admin_token}"},
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertEqual(len(resp.json()["results"]), 1)
+                # legacy owner_token query 自查 → 200
+                resp = client.get(f"/v1/agents/{agent_id}/listings?owner_token={token}")
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertEqual(len(resp.json()["results"]), 1)
 
     def test_error_shapes_match_fallback(self) -> None:
         """审查 P2：错误信封 {ok:false,error} + 状态码与 fallback 对齐。"""
