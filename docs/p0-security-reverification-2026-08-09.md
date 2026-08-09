@@ -2,7 +2,7 @@
 
 ## 结论
 
-代码侧 P0 已完成：门户存储型 XSS 防护、CSP/响应头硬化，以及 admin token 不进入 query string 的路径收口均已落地。生产侧仍有两项必须由部署管理员执行的动作：轮换 `KIWI_CATALOG_ADMIN_TOKEN`，并检索/清理反向代理、APM 与访问日志中的历史 `admin_token` query 记录。
+代码侧 P0 已完成：门户存储型 XSS 防护、CSP/响应头硬化，以及 admin token 不进入 query string 的路径收口均已落地。生产 admin token 已完成轮换并验证旧 token 失效；历史日志中的 query 记录仍需按组织凭据事件流程脱敏/封存或限制访问后，P0 才可完全关单。
 
 ## 代码证据
 
@@ -41,4 +41,14 @@
 - 回填：轮换时间、旧 token 失效结果、服务版本/提交、验证 URL（不含凭据）、日志
   系统与时间范围、处置方式、操作者和审批号。回填内容不得包含 token 明文。
 
-本地工作区没有生产主机、日志或有效远程运维授权，因此本记录不宣称上述生产动作已经完成。
+## 生产执行证据（2026-08-09）
+
+- 已部署经本地验收的源码包（提交 `6a32c9e`，包 SHA-256
+  `ec990076b1fd0fa1f973b5bbfae85c54b973fe836efbc2d06de9056ca46c3050`）；部署前源码备份位于生产 `/opt/kiwi-catalog-backups/`，服务重启后健康检查为 `200`。
+- `KIWI_CATALOG_ADMIN_TOKEN` 已轮换，`KIWI_CATALOG_OWNER_TOKEN_SECRET` 未改动；环境文件保持 `0600 root:root`。
+- 认证回归：新 token `200`；旧 token `403`；无 Authorization 的
+  `admin_token=probe-invalid` `403`；Authorization + 假 query `200`。探针值不是真实凭据。
+- 轮换前 24 小时 journald 计到 16 条 `admin_token=`（未读取正文）；轮换后仅新增 2 条上述假探针记录；当前 token 命中数为 `0`。Caddy 日志文件命中数为 `0`；journald 文件权限为 `640 root:systemd-journal`。
+- 尚未删除或重写历史审计日志：缺少明确的组织保留/脱敏批准。历史记录已因旧 token 失效而不可用于认证，但仍需凭据事件流程完成处置并记录操作者与范围。
+
+本地工作区不保存生产凭据；上述生产执行证据仅记录状态码、哈希和计数，不包含 token 明文或日志正文。历史日志处置仍以生产组织的保留/脱敏批准为准。
