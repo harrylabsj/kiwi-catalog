@@ -1,7 +1,7 @@
 # kiwi-catalog standalone service (阶段 4 部署)
 # 单容器形态：SQLite 文件放持久卷，SSRF fetcher 的 socket 级防护原样工作。
 
-FROM python:3.13-slim
+FROM python:3.13.11-slim-bookworm@sha256:20080e807bfc404f8450b185cf0fc95d553462673598549613735f70a5b4d5d0
 
 # Run the service as an unprivileged user.
 RUN groupadd --gid 10001 kiwi && \
@@ -10,10 +10,15 @@ RUN groupadd --gid 10001 kiwi && \
 WORKDIR /app
 
 COPY pyproject.toml ./
+COPY uv.lock ./
 COPY README.md LICENSE ./
 COPY kiwi_catalog ./kiwi_catalog
 
-RUN pip install --no-cache-dir .[api]
+RUN python -m pip install --no-cache-dir "uv==0.10.6" \
+    && uv export --locked --no-dev --extra api --no-emit-project --format requirements.txt > /tmp/requirements.txt \
+    && python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+    && python -m pip install --no-cache-dir --no-deps . \
+    && rm -f /tmp/requirements.txt
 
 # Keep the SQLite volume writable after dropping privileges.
 RUN mkdir -p /data && chown kiwi:kiwi /data
