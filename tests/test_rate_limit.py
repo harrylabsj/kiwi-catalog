@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime
+from unittest import mock
 
 from kiwi_catalog.agent_catalog.sqlite_repository import enforce_catalog_register_domain_limit
 from kiwi_catalog.api.idempotency import enforce_agent_catalog_rate_limit
@@ -38,6 +39,27 @@ from kiwi_catalog.services.rate_limit import (
 )
 
 T0 = datetime.fromisoformat("2026-08-06T10:00:00")  # aligned to any window
+
+
+class _FixedDatetime:
+    """Deterministic stand-in for ``rate_limit.datetime`` in default-path tests.
+
+    ``now`` returns a fixed aware-UTC instant; ``fromtimestamp`` delegates to
+    the real ``datetime`` so epoch window math stays exact.
+    """
+
+    _real_datetime = datetime
+    fixed_now = datetime(2026, 8, 6, 10, 0, 30, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.fixed_now if tz is None else cls.fixed_now.astimezone(tz)
+
+    @classmethod
+    def fromtimestamp(cls, timestamp, tz=None):
+        if tz is None:
+            return cls._real_datetime.fromtimestamp(timestamp)
+        return cls._real_datetime.fromtimestamp(timestamp, tz)
 
 
 class _AutoCloseConnection(sqlite3.Connection):
@@ -142,6 +164,87 @@ class EnforceRateLimitTest(unittest.TestCase):
                 enforce_catalog_register_domain_limit(
                     conn, "merchant.example", limit=2, current=T0
                 )
+
+
+class FixedWindowStartUtcTest(unittest.TestCase):
+    """Batch 5: fixed-window keys are computed in explicit UTC.
+
+    Naive ``current`` is interpreted as UTC wall-clock; aware ``current`` is
+    normalized by absolute instant.  Output stays naive-UTC ISO text (no tz
+    suffix) so window_start strings remain byte-compatible with existing rows.
+    """
+
+    def test_naive_and_aware_same_instant_produce_same_window(self) -> None:
+        naive = datetime.fromisoformat("2026-08-06T10:00:30")
+        aware = datetime.fromisoformat("2026-08-06T10:00:30+00:00")
+        self.assertEqual(fixed_window_start(naive, 60), fixed_window_start(aware, 60))
+        self.assertEqual(fixed_window_start(naive, 60), "2026-08-06T10:00:00")
+
+    def test_fixed_window_boundary_unchanged(self) -> None:
+        # 窗口边界两侧（60s 与 3600s）各归一到最近窗口起点；输出无时区后缀。
+        self.assertEqual(
+            fixed_window_start(datetime.fromisoformat("2026-08-06T10:00:00+00:00"), 60),
+            "2026-08-06T10:00:00",
+        )
+        self.assertEqual(
+            fixed_window_start(datetime.fromisoformat("2026-08-06T09:59:59+00:00"), 60),
+            "2026-08-06T09:59:00",
+        )
+        self.assertEqual(
+            fixed_window_start(datetime.fromisoformat("2026-08-06T10:00:00+00:00"), 3600),
+            "2026-08-06T10:00:00",
+        )
+        self.assertEqual(
+            fixed_window_start(datetime.fromisoformat("2026-08-06T10:59:59+00:00"), 3600),
+            "2026-08-06T10:00:00",
+        )
+
+    def test_cross_timezone_aware_input_does_not_drift(self) -> None:
+        # 同一绝对时刻在不同时区的表示 → 同一 UTC 窗口键。
+        in_kolkata = datetime.fromisoformat("2026-08-06T10:00:30+05:30")  # 04:30:30 UTC
+        in_utc = datetime.fromisoformat("2026-08-06T04:30:30+00:00")
+        expected = "2026-08-06T04:30:00"
+        self.assertEqual(fixed_window_start(in_kolkata, 60), expected)
+        self.assertEqual(fixed_window_start(in_utc, 60), expected)
+        self.assertEqual(fixed_window_start(in_kolkata, 60), fixed_window_start(in_utc, 60))
+
+    def test_default_path_writes_naive_utc_text(self) -> None:
+        conn = _conn()
+        backend = SQLiteRateLimitBackend(
+            conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
+        )
+        with mock.patch("kiwi_catalog.services.rate_limit.datetime", _FixedDatetime):
+            enforce_rate_limit(
+                backend, key="actor-x", limit=2, window_seconds=60, description="test"
+            )
+            row = conn.execute(
+                "select window_start, updated_at from agent_catalog_write_rate_limits"
+            ).fetchone()
+        # 默认 now = 固定 10:00:30 UTC → 窗口 10:00:00；两列都是 naive-UTC 文本。
+        self.assertEqual(row["window_start"], "2026-08-06T10:00:00")
+        self.assertEqual(row["updated_at"], "2026-08-06T10:00:30")
+        self.assertNotIn("+00:00", row["window_start"])
+        self.assertNotIn("+00:00", row["updated_at"])
+
+    def test_prune_cutoff_is_naive_utc_text(self) -> None:
+        conn = _conn()
+        backend = SQLiteRateLimitBackend(
+            conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
+        )
+        old_window = "2026-07-30T09:00:00"  # 早于 cutoff (2026-07-30T10:00:30) → 删
+        recent_window = "2026-08-06T09:00:00"  # 晚于 cutoff → 留
+        for window in (old_window, recent_window):
+            conn.execute(
+                "insert into agent_catalog_write_rate_limits"
+                " (actor_key, window_start, request_count, updated_at) values (?, ?, 0, ?)",
+                ("actor-prune", window, "2026-08-06T10:00:00"),
+            )
+        with mock.patch("kiwi_catalog.services.rate_limit.datetime", _FixedDatetime):
+            backend._prune_expired_windows()
+        rows = conn.execute(
+            "select window_start from agent_catalog_write_rate_limits order by window_start"
+        ).fetchall()
+        self.assertEqual([r["window_start"] for r in rows], [recent_window])
 
 
 class PluggableBackendSeamTest(unittest.TestCase):
