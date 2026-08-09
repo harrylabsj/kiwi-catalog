@@ -806,89 +806,25 @@ def _register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return {key: value for key, value in request.query_params.multi_items()}
 
 
-    def _error_response(status: int, exc: Exception) -> JSONResponse:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=status)
-
-    @app.exception_handler(AuthError)
-    def _auth_error(_request: Any, exc: AuthError) -> JSONResponse:
-        return _error_response(403, exc)
-
-    @app.exception_handler(PermissionDenied)
-    def _permission_error(_request: Any, exc: PermissionDenied) -> JSONResponse:
-        return _error_response(403, exc)
-
-    @app.exception_handler(NotFoundError)
-    def _not_found_error(_request: Any, exc: NotFoundError) -> JSONResponse:
-        return _error_response(404, exc)
-
-    @app.exception_handler(ConflictError)
-    def _conflict_error(_request: Any, exc: ConflictError) -> JSONResponse:
-        return _error_response(409, exc)
-
-    @app.exception_handler(IdempotencyConflict)
-    def _idempotency_error(_request: Any, exc: IdempotencyConflict) -> JSONResponse:
-        return _error_response(409, exc)
-
-    @app.exception_handler(RateLimitError)
-    def _rate_limit_error(_request: Any, exc: RateLimitError) -> JSONResponse:
-        return _error_response(429, exc)
-
-    @app.exception_handler(ValidationError)
-    def _validation_error(_request: Any, exc: ValidationError) -> JSONResponse:
-        return _error_response(400, exc)
-
-    @app.exception_handler(ShoppingCliError)
-    def _shopping_error(_request: Any, exc: ShoppingCliError) -> JSONResponse:
-        return _error_response(400, exc)
-
     # ── 审查 P2：错误形状与 fallback 对齐 ───────────────────────────────
     # fallback 的 404/405/400/500 都是 {"ok": false, "error": ...} 信封 +
     # 明确文案；FastAPI 默认的 {"detail": ...} / 纯文本 500 让依赖 ok/error
-    # 信封的客户端在双栈切换后解析失败。
+    # 信封的客户端在双栈切换后解析失败。错误映射提取到 error_handlers
+    #（transport 类型注入，模块本身不硬依赖 FastAPI/Starlette）。
 
     from fastapi.exceptions import RequestValidationError
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
-    @app.exception_handler(RequestValidationError)
-    def _request_validation_error(
-        _request: Any, exc: RequestValidationError
-    ) -> JSONResponse:
-        # fallback 语义：请求体/参数不符合契约 → 400 信封（FastAPI 默认 422 detail）
-        first = exc.errors()[:3]
-        # 非 JSON body（如 form 编码）时 FastAPI 的 input 字段是 bytes——
-        # 不 default=str 会在错误信封序列化时二次抛错变 500（冒烟实测）
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "invalid request: "
-                + json.dumps(
-                    first,
-                    default=lambda o: o.decode("utf-8", "replace")
-                    if isinstance(o, bytes)
-                    else str(o),
-                ),
-            },
-            status_code=400,
-        )
+    from kiwi_catalog.api.error_handlers import register_exception_handlers
 
-    @app.exception_handler(StarletteHTTPException)
-    def _http_exception(
-        request: _FastAPIRequest, exc: StarletteHTTPException
-    ) -> JSONResponse:
-        if exc.status_code == 404:
-            message = f"No route for {request.method} {request.url.path}"
-        elif exc.status_code == 405:
-            message = f"Method not allowed for {request.method} {request.url.path}"
-        else:
-            message = str(exc.detail)
-        return JSONResponse({"ok": False, "error": message}, status_code=exc.status_code)
-
-    @app.exception_handler(Exception)
-    def _unhandled_exception(request: Any, exc: Exception) -> JSONResponse:
-        logging.getLogger(__name__).exception("unhandled request error: %r", exc)
-        return JSONResponse(
-            {"ok": False, "error": "internal server error"}, status_code=500
-        )
+    register_exception_handlers(
+        app,
+        json_response=JSONResponse,
+        request_type=_FastAPIRequest,
+        request_validation_error=RequestValidationError,
+        http_exception=StarletteHTTPException,
+        logger_name=__name__,
+    )
 
     @app.get("/health")
     def health() -> dict[str, Any]:
