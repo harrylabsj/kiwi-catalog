@@ -99,6 +99,20 @@ class KiwiCatalogServiceTest(unittest.TestCase):
         # 切割分水岭：托管协商端点被排除。
         self.assertNotIn("/a2a/agents/{catalog_agent_id}", paths)
 
+    def test_fallback_default_routes_come_from_catalog_route_info(self) -> None:
+        """默认 MarketplaceASGIApp（不传 route_provider）必须可构造，且 routes
+        来自 catalog_route_info —— 与 FastAPI 是否安装无关。"""
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+
+        app = MarketplaceASGIApp(self.db_file)
+        expected = catalog_route_info()
+        self.assertEqual(app.routes, expected)
+        self.assertTrue(app.routes)
+        # 默认路由集合即 catalog_route_info：含注册路由、不含托管协商端点。
+        paths = {route.path for route in app.routes}
+        self.assertIn("/v1/agent-catalog/agents/register", paths)
+        self.assertNotIn("/a2a/agents/{catalog_agent_id}", paths)
+
     def test_register_search_stats_end_to_end_on_fresh_db(self) -> None:
         status, body = _request(
             self.app, "POST", "/v1/agent-catalog/agents/register",
