@@ -20,8 +20,8 @@ URL 的 ValueError）必须映射为类型化错误，不得以 500 逃逸验证
 
 from __future__ import annotations
 
-import http.client
 import unittest
+from typing import Any
 from unittest import mock
 
 from kiwi_catalog.discovery.fetcher import (

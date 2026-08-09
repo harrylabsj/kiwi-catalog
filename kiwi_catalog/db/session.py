@@ -25,12 +25,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.0"  # kiwi-catalog standalone
 from kiwi_catalog.db.migrations import (
     CURRENT_SCHEMA_VERSION,
     run_migrations,
 )
 from kiwi_catalog.db.models import INDEXES, SCHEMA
+
+VERSION = "0.1.0"  # kiwi-catalog standalone
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 

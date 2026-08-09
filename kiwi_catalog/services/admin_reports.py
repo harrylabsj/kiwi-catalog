@@ -171,16 +171,16 @@ def merchant_report(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any
         ],
         "listings": [
             {
-                "listing_id": l["listing_id"],
-                "listing_type": l["listing_type"],
-                "title": l["title"],
-                "category": l["category"],
-                "publication_state": l["publication_state"],
-                "freshness_state": l["listing_freshness_state"],
-                "published_at": l["published_at"],
-                "updated_at": l["updated_at"],
+                "listing_id": listing["listing_id"],
+                "listing_type": listing["listing_type"],
+                "title": listing["title"],
+                "category": listing["category"],
+                "publication_state": listing["publication_state"],
+                "freshness_state": listing["listing_freshness_state"],
+                "published_at": listing["published_at"],
+                "updated_at": listing["updated_at"],
             }
-            for l in listings
+            for listing in listings
         ],
         "tokens": [
             {
