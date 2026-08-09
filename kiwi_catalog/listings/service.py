@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kiwi_catalog.core.errors import NotFoundError, PermissionDenied
@@ -37,10 +37,10 @@ from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.listings import sqlite_repository as repo
 from kiwi_catalog.listings.domain import (
     ACTIVE,
+    DEFAULT_TTL_HOURS,
     PRODUCT,
     SUSPENDED,
     WITHDRAWN,
-    DEFAULT_TTL_HOURS,
 )
 from kiwi_catalog.listings.serialization import new_listing_id
 
@@ -62,7 +62,7 @@ def _default_fresh_until(listing_type: str, published_fresh_until: str | None = 
     hours = DEFAULT_TTL_HOURS.get(listing_type, DEFAULT_TTL_HOURS[PRODUCT])
     # 与 now_iso() 同格式（UTC + 无微秒）：expire 比较是纯字符串比较，
     # 微秒/时区不一致会让 TTL 偏移（历史教训）。
-    return (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=hours)).isoformat()
+    return (datetime.now(UTC).replace(microsecond=0) + timedelta(hours=hours)).isoformat()
 
 
 def _owner_agent(conn: sqlite3.Connection, owner_agent_id: str) -> dict[str, Any] | None:

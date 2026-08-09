@@ -26,27 +26,20 @@
 
 from __future__ import annotations
 
-import json
 import re
+import sqlite3
 import urllib.parse
 from typing import Any
-
-import sqlite3
 
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.listings.domain import (
     ACTIVE,
     ATTRIBUTE_PATH_SEGMENT_RE,
-    COMMERCIAL_HINTS_KEYS,
     LISTING_FRESHNESS_STATES,
     LISTING_TYPES,
     MAX_ATTRIBUTE_PATH_DEPTH,
 )
-from kiwi_catalog.listings.sqlite_repository import (
-    decode_cursor,
-    encode_cursor,
-    expire_stale_listings,
-)
+from kiwi_catalog.listings.sqlite_repository import expire_stale_listings
 
 # ── 搜索分页游标（审查 P1-6）──────────────────────────────────────────────
 # 搜索的排序键是 (freshness rank, updated_at desc, id desc)；旧游标只编码
@@ -148,10 +141,10 @@ def search_listings(
         raise SearchQueryError(f"unknown listing search query keys: {sorted(unknown)}")
     # attribute.<path> 过滤键单独收集
     attribute_filters: list[tuple[str, str]] = []
-    for key in query:
+    for key, value in query.items():
         if key.startswith(_ATTRIBUTE_FILTER_PREFIX):
             path = _validate_attribute_path(key[len(_ATTRIBUTE_FILTER_PREFIX):])
-            attribute_filters.append((path, str(query[key])))
+            attribute_filters.append((path, str(value)))
 
     limit = 20
     raw_limit = query.get("limit")
