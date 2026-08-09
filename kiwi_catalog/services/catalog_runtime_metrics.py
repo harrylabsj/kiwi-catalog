@@ -88,8 +88,7 @@ class RuntimeMetricsRegistry:
                 return
             rec["count"] += 1.0
             rec["sum"] += duration_s
-            if duration_s > rec["max"]:
-                rec["max"] = duration_s
+            rec["max"] = max(rec["max"], duration_s)
 
     def set_gauge(self, name: str, value: float) -> None:
         """Set gauge *name* to *value* (last write wins)."""

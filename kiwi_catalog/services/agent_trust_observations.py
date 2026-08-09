@@ -87,7 +87,9 @@ def record_observation(
         text = str(raw or "").strip()
         if text:
             try:
-                datetime.fromisoformat(text.replace("Z", "+00:00"))
+                # Python >=3.11 的 fromisoformat 原生接受尾部 "Z"（等价 UTC），
+                # 无需手写 "Z" → "+00:00" 替换（FURB162）。
+                datetime.fromisoformat(text)
             except ValueError as exc:
                 raise ValidationError(
                     f"{label} must be ISO-8601, got {text!r}"

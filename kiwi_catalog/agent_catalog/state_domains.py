@@ -32,6 +32,8 @@ rejected > suspended > unreachable > stale > verification_level。
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from kiwi_catalog.core.errors import ShoppingCliError
 
 # ── VerificationLevel（v0.3 §7.1）──────────────────────────────────────────
@@ -165,7 +167,7 @@ class FreshnessStateMachine:
     UNREACHABLE    → FRESH（刷新成功）/ STALE（部分可达，按策略）
     """
 
-    _TRANSITIONS: dict[str, frozenset[str]] = {
+    _TRANSITIONS: ClassVar[dict[str, frozenset[str]]] = {
         FRESH: frozenset({FRESH, STALE, UNREACHABLE}),
         STALE: frozenset({FRESH, UNREACHABLE}),
         UNREACHABLE: frozenset({FRESH, STALE}),
@@ -195,7 +197,7 @@ class AdministrativeStateMachine:
     REJECTED   → ∅（终态；仅显式申诉/治理流程可产生新的行政决定）
     """
 
-    _TRANSITIONS: dict[str, frozenset[str]] = {
+    _TRANSITIONS: ClassVar[dict[str, frozenset[str]]] = {
         ACTIVE: frozenset({SUSPENDED, REJECTED}),
         SUSPENDED: frozenset({ACTIVE}),
         REJECTED: frozenset(),
