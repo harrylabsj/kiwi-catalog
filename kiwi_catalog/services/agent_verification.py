@@ -109,6 +109,23 @@ from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
 from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_from_epoch
 from kiwi_catalog.services.verification_helpers import outcome_for as _outcome_for
+from kiwi_catalog.services.verification_queue_ledger import (
+    cleanup_terminal_tasks as _cleanup_terminal_tasks,
+)
+from kiwi_catalog.services.verification_queue_ledger import delete_task as _delete_task
+from kiwi_catalog.services.verification_queue_ledger import (
+    fetch_task_row as _fetch_task_row,
+)
+from kiwi_catalog.services.verification_queue_ledger import finish_task as _finish_task
+from kiwi_catalog.services.verification_queue_ledger import (
+    insert_pending_task as _insert_pending_task,
+)
+from kiwi_catalog.services.verification_queue_ledger import (
+    load_pending_tasks as _load_pending_tasks,
+)
+from kiwi_catalog.services.verification_queue_ledger import (
+    mark_task_running as _mark_task_running,
+)
 from kiwi_catalog.services.verification_queue_serialization import (
     deserialize_verification_result as _deserialize_verification_result,
 )
@@ -1127,12 +1144,7 @@ class VerificationQueue:
         if self._db_conn is None:
             return 0
         with self._results_cv:
-            rows = self._db_conn.execute(
-                "select task_id, catalog_agent_id, kind, actor, enqueued_at"
-                " from verification_queue_tasks where status in ('pending','running')"
-                " order by enqueued_at"
-            ).fetchall()
-            for row in rows:
+            for row in _load_pending_tasks(self._db_conn):
                 task = VerificationTask(
                     catalog_agent_id=str(row["catalog_agent_id"]),
                     task_id=str(row["task_id"]),
@@ -1149,20 +1161,15 @@ class VerificationQueue:
         if self._db_conn is None:
             return
         with self._results_cv:
-            self._db_conn.execute(
-                "insert into verification_queue_tasks("
-                " task_id, catalog_agent_id, kind, actor, status, enqueued_at,"
-                " created_at, updated_at)"
-                " values (?, ?, ?, ?, 'pending', ?, ?, ?)",
-                (
-                    task.task_id,
-                    task.catalog_agent_id,
-                    task.kind,
-                    task.actor,
-                    task.enqueued_at,
-                    now_iso(),
-                    now_iso(),
-                ),
+            _insert_pending_task(
+                self._db_conn,
+                task_id=task.task_id,
+                catalog_agent_id=task.catalog_agent_id,
+                kind=task.kind,
+                actor=task.actor,
+                enqueued_at=task.enqueued_at,
+                created_at=now_iso(),
+                updated_at=now_iso(),
             )
             self._db_conn.commit()
 
@@ -1171,9 +1178,7 @@ class VerificationQueue:
         if self._db_conn is None:
             return
         with self._results_cv:
-            self._db_conn.execute(
-                "delete from verification_queue_tasks where task_id = ?", (task_id,)
-            )
+            _delete_task(self._db_conn, task_id)
             self._db_conn.commit()
 
     def _persist_running(self, task_id: str, started_at: float) -> None:
@@ -1181,11 +1186,11 @@ class VerificationQueue:
         if self._db_conn is None:
             return
         with self._results_cv:
-            self._db_conn.execute(
-                "update verification_queue_tasks"
-                " set status = 'running', started_at = ?, updated_at = ?"
-                " where task_id = ?",
-                (started_at, now_iso(), task_id),
+            _mark_task_running(
+                self._db_conn,
+                task_id=task_id,
+                started_at=started_at,
+                updated_at=now_iso(),
             )
             self._db_conn.commit()
 
@@ -1202,32 +1207,22 @@ class VerificationQueue:
         if self._db_conn is None:
             return
         with self._results_cv:
-            self._db_conn.execute(
-                "update verification_queue_tasks"
-                " set status = ?, verification_status = ?, error = ?,"
-                " result_json = ?, finished_at = ?, updated_at = ?"
-                " where task_id = ? and status = 'running'",
-                (
-                    status,
-                    verification_status,
-                    error,
-                    _serialize_verification_result(result),
-                    self._now(),
-                    now_iso(),
-                    task_id,
-                ),
+            _finish_task(
+                self._db_conn,
+                task_id=task_id,
+                status=status,
+                verification_status=verification_status,
+                error=error,
+                result_json=_serialize_verification_result(result),
+                finished_at=self._now(),
+                updated_at=now_iso(),
             )
             # 审查 P2：惰性清理终态行（键空间此前只增不删；finished_at 是
             # epoch REAL，与 _now() 同单位）
             self._finish_count = getattr(self, "_finish_count", 0) + 1
             if self._finish_count % 256 == 0:
                 try:
-                    self._db_conn.execute(
-                        "delete from verification_queue_tasks"
-                        " where status in ('completed','failed','timeout')"
-                        " and finished_at < ?",
-                        (self._now() - 7 * 86400,),
-                    )
+                    _cleanup_terminal_tasks(self._db_conn, self._now() - 7 * 86400)
                 except sqlite3.Error:
                     pass  # 清理失败不影响任务结果写
             self._db_conn.commit()
@@ -1236,9 +1231,7 @@ class VerificationQueue:
         """Rebuild a finished result from the ledger (restart path for wait())."""
         if self._db_conn is None:
             return None
-        row = self._db_conn.execute(
-            "select * from verification_queue_tasks where task_id = ?", (task_id,)
-        ).fetchone()
+        row = _fetch_task_row(self._db_conn, task_id)
         if row is None or row["status"] in ("pending", "running"):
             return None
         return VerificationTaskResult(
