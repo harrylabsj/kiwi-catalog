@@ -43,6 +43,7 @@ from kiwi_catalog.agent_catalog.pagination import (
     agent_status_rank as _agent_status_rank,
     encode_agent_cursor as _encode_agent_cursor,
 )
+from kiwi_catalog.agent_catalog.row_serialization import row_to_dict as _row_to_dict
 from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
 
@@ -58,13 +59,6 @@ def _like_escaped(term: str) -> str:
     配 ``escape '\\'`` 使用。"""
     escaped = str(term).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
-
-
-def _row_to_dict(row: sqlite3.Row, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    d = dict(row)
-    if overrides:
-        d.update(overrides)
-    return d
 
 
 # ── catalog_agents ──────────────────────────────────────────────────────────
