@@ -214,14 +214,11 @@ class AuditShadowTableTest(unittest.TestCase):
         )
         self.assertIn("agent_trust_observations", migrated_tables)
         # 弱引用统一：两条路径都没有 FK 约束。
-        self.assertEqual(
-            len(
-                sqlite3.connect(db)
-                .execute("pragma foreign_key_list(catalog_agents)")
-                .fetchall(),
-            ),
-            0,
-        )
+        with sqlite3.connect(db) as conn:
+            self.assertEqual(
+                len(conn.execute("pragma foreign_key_list(catalog_agents)").fetchall()),
+                0,
+            )
 
 
 if __name__ == "__main__":

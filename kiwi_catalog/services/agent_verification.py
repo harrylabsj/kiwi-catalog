@@ -1609,6 +1609,19 @@ class VerificationQueue:
     def __exit__(self, *exc: Any) -> None:
         self.shutdown(wait=True)
 
+    def __del__(self) -> None:
+        """GC 兜底：wait=False 的调用方负责最终 shutdown，但若对象被丢弃
+        前未关 ledger 连接（测试/短期嵌入场景），随 GC 关闭防泄漏
+        （审查附录 A ResourceWarning）。worker 为 daemon 线程，此时无在途写。
+        """
+        try:
+            conn = self._db_conn
+            if conn is not None and not self._shutdown.is_set():
+                conn.close()
+                self._db_conn = None
+        except Exception:  # noqa: BLE001 —— GC 路径绝不抛
+            pass
+
     # ── Internals ────────────────────────────────────────────────────────
 
     def _worker_loop(self) -> None:

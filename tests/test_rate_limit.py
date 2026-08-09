@@ -40,8 +40,18 @@ from kiwi_catalog.services.rate_limit import (
 T0 = datetime.fromisoformat("2026-08-06T10:00:00")  # aligned to any window
 
 
+class _AutoCloseConnection(sqlite3.Connection):
+    """测试连接随 GC 自动 close——消除 SQLite ResourceWarning（审查附录 A）。"""
+
+    def __del__(self) -> None:  # noqa: D105
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect(":memory:", factory=_AutoCloseConnection)
     conn.row_factory = sqlite3.Row
     init_db(conn)
     return conn
