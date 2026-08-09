@@ -25,6 +25,9 @@ import json
 import sqlite3
 from typing import Any
 
+from kiwi_catalog.agent_catalog.catalog_audit import (
+    append_catalog_audit,  # noqa: F401 —— facade re-export
+)
 from kiwi_catalog.agent_catalog.pagination import (
     agent_cursor_predicate as _agent_cursor_predicate,
 )
@@ -914,36 +917,6 @@ def upsert_profile_endpoints(
                     row["endpoint_id"],
                 ),
             )
-
-
-# ── Audit ───────────────────────────────────────────────────────────────────
-
-
-def append_catalog_audit(
-    conn: sqlite3.Connection,
-    catalog_agent_id: str,
-    actor: str,
-    event: str,
-    details: dict[str, Any] | None = None,
-) -> int:
-    """Write a catalog-scoped audit event.  Returns the new event id."""
-    from kiwi_catalog.db.session import encode_json as _encode
-
-    payload = dict(details or {})
-    payload.setdefault("schema_version", 1)
-    payload.setdefault("event_type", str(event or ""))
-    payload.setdefault("catalog_agent_id", catalog_agent_id)
-
-    cursor = conn.execute(
-        """
-        insert into audit_events(conversation_id, actor, event, details_json, created_at)
-        values (?, ?, ?, ?, ?)
-        """,
-        ("", actor, event, _encode(payload), now_iso()),
-    )
-    if cursor.lastrowid is None:
-        raise RuntimeError("audit event insert did not return an id")
-    return cursor.lastrowid
 
 
 # ── Registration abuse controls (§17.4) ─────────────────────────────────────
