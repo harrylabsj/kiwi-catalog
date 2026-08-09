@@ -104,8 +104,19 @@ from kiwi_catalog.discovery.verifier import (
 )
 from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
+from kiwi_catalog.services.verification_degradation import (
+    ProfileFailurePlan as _ProfileFailurePlan,
+)
+from kiwi_catalog.services.verification_degradation import (
+    highest_supported_level as _highest_supported_level,
+)
+from kiwi_catalog.services.verification_degradation import (
+    profile_failure_plan as _profile_failure_plan,
+)
 from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_from_epoch
-from kiwi_catalog.services.verification_helpers import outcome_for as _outcome_for
+from kiwi_catalog.services.verification_helpers import (
+    outcome_for as _outcome_for,  # noqa: F401 —— facade re-export
+)
 from kiwi_catalog.services.verification_profile_policy import (
     LADDER_RUNGS as _LADDER_RUNGS,
 )
@@ -122,7 +133,7 @@ from kiwi_catalog.services.verification_profile_policy import (
     ReusedSnapshotFetch as _ReusedSnapshotFetch,
 )
 from kiwi_catalog.services.verification_profile_policy import (
-    parse_iso_ts as _parse_iso_ts,
+    parse_iso_ts as _parse_iso_ts,  # noqa: F401 —— facade re-export
 )
 from kiwi_catalog.services.verification_profile_policy import (
     profile_is_stale as _profile_is_stale,
@@ -775,23 +786,24 @@ class VerificationService:
           保留最后已验证快照与级别（v0.3 §13#14）；
         * target == REJECTED（SSRF / 校验 / 缺端点）→ 证据失效，按证据
           重算降级 verification_level（v0.3 §7.1）。
+
+        The §7.2 handling plan is decided by the pure
+        :func:`verification_degradation.profile_failure_plan` leaf; this
+        method only drives the persistence it prescribes.
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        if exc.target_status in (STALE, UNREACHABLE):
-            self._apply_freshness(agent, exc.target_status)
-            target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
-            stages = [*stages, StageResult("profile", _outcome_for(exc.target_status), target, reason=exc.reason)]
-            return self._finalize(catalog_agent_id, previous, target, stages, actor, exc.target_status)
-        degraded = self._degrade_level_to_supported(agent)
-        self._apply_level(agent, degraded)
-        # 审查 P3：REJECTED（证据失效）后 freshness 置 STALE——否则 freshness
-        # 仍 FRESH + 级别在阶梯上时，/verify（永不 force）被 freshness 门短路
-        # 成 no-op，agent 只能靠 /refresh 恢复；置 STALE 让下次 verify 真正
-        # 重验证（与「抓取失败只动 freshness」的 STALE/UNREACHABLE 分支一致）。
-        self._apply_freshness(agent, STALE)
+        plan: _ProfileFailurePlan = _profile_failure_plan(exc.target_status)
+        if plan.recompute_level:
+            # 审查 P3：REJECTED（证据失效）后 freshness 置 STALE——否则 freshness
+            # 仍 FRESH + 级别在阶梯上时，/verify（永不 force）被 freshness 门短路
+            # 成 no-op，agent 只能靠 /refresh 恢复；置 STALE 让下次 verify 真正
+            # 重验证（与「抓取失败只动 freshness」的 STALE/UNREACHABLE 分支一致）。
+            degraded = self._degrade_level_to_supported(agent)
+            self._apply_level(agent, degraded)
+        self._apply_freshness(agent, plan.freshness_state)
         target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
-        stages = [*stages, StageResult("profile", "rejected", target, reason=exc.reason)]
-        return self._finalize(catalog_agent_id, previous, target, stages, actor, REJECTED)
+        stages = [*stages, StageResult("profile", plan.stage_outcome, target, reason=exc.reason)]
+        return self._finalize(catalog_agent_id, previous, target, stages, actor, plan.failure_kind)
 
     def _degrade_level_to_supported(
         self, agent: dict[str, Any], *, from_level: str | None = None
@@ -807,29 +819,21 @@ class VerificationService:
           清零——基准必须是 run 开始时的原级别，否则 can_degrade 全拦截）；
           granular 入口不传 → 以 DB 当前级为基准（行为不变）。
         - 证据只认最新 passed 行（failed 行不得屏蔽历史 passed 证据）。
+
+        The decision itself lives in the pure
+        :func:`verification_degradation.highest_supported_level` leaf; this
+        method supplies the DB evidence lookup and the state-machine
+        ``can_degrade`` check.
         """
         agent_id = str(agent["catalog_agent_id"])
-        current = from_level or agent["verification_level"]
-        now_ts = self._now()
-        for kind, level in (
-            ("commerce_capability", COMMERCE_VERIFIED),
-            ("agent_identity", AGENT_VERIFIED),
-            ("domain_control", DOMAIN_VERIFIED),
-        ):
-            # 允许「严格更低」+「同级」：passed 证据支撑当前级时应保持同级
-            # （审查 P1-7——can_degrade 是严格小于，同级证据会被拦成 DISCOVERED）。
-            if level != current and not self._level_machine.can_degrade(current, level):
-                continue
-            row = latest_verification(self._conn, agent_id, kind, result="passed")
-            if row is None:
-                continue
-            expires_at = str(row.get("expires_at") or "")
-            if expires_at:
-                parsed = _parse_iso_ts(expires_at)
-                if parsed is None or parsed < now_ts:
-                    continue
-            return level
-        return DISCOVERED
+        return _highest_supported_level(
+            current_level=from_level or str(agent["verification_level"]),
+            now_ts=self._now(),
+            can_degrade=self._level_machine.can_degrade,
+            latest_passed=lambda kind: latest_verification(
+                self._conn, agent_id, kind, result="passed"
+            ),
+        )
 
     def _finalize(
         self,
