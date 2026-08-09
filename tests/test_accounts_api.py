@@ -486,7 +486,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("merchants.html", raw)
         self.assertIn("developers.html", raw)
         self.assertNotIn("demo.html", raw)
-        self.assertIn("复制令牌", raw)  # 有令牌态：复制令牌按钮（静态 JS 模板）
+        self.assertIn("复制令牌", raw)  # 令牌态双按钮：复制令牌 + 申请令牌（静态模板）
+        self.assertIn("申请令牌", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
         self.assertNotIn("/portal/status", raw)

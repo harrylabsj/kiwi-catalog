@@ -139,6 +139,8 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
   padding: 7px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
   cursor: pointer; font-family: inherit; margin-left: 6px;
 }
+.btn-mini:disabled { opacity: 0.45; cursor: not-allowed; }
+.token-actions { display: flex; gap: 10px; margin: 12px 0 4px; }
 .token-box { background: var(--kiwi-100); color: var(--kiwi-900); border-left: 4px solid var(--kiwi-600); border-radius: 0 var(--radius) var(--radius) 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.92rem; padding: 12px 14px; word-break: break-all; margin: 10px 0; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
 .small { font-size: 0.83rem; color: var(--ink-soft); }
@@ -784,6 +786,10 @@ def portal_account() -> dict[str, Any]:
     <div class="card form-card">
       <div id="profile"></div>
       <div id="token_box"></div>
+      <div class="token-actions">
+        <button class="btn-mini" id="copy_token">复制令牌</button>
+        <button class="btn-mini" id="show_apply">申请令牌</button>
+      </div>
       <div id="apply_form" style="display:none">
         <label for="a_domain">店铺域名（如 acme.example）</label>
         <input id="a_domain" placeholder="acme.example" autocomplete="off">
@@ -833,36 +839,39 @@ function loadMe() {
     document.getElementById('p_name').value = r.merchant_name || '';
     document.getElementById('p_phone').value = r.phone || '';
     const tb = document.getElementById('token_box');
-    const rt = document.getElementById('request_token');
+    const copyBtn = document.getElementById('copy_token');
+    const applyBtn = document.getElementById('show_apply');
     if (r.token && r.token.status === 'active') {
       tb.innerHTML = '<p class="small">商家令牌（mkt_…，当前登录会话可查看；遗失或疑似泄露请联系运营轮换）</p>'
         + '<div class="token-box">' + esc(r.token.token) + '</div>'
         + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
         + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
         + (r.token.revoked_at ? ' · 已吊销 ' + esc(r.token.revoked_at.slice(0, 10)) : '')
-        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>'
-        + '<button class="btn-mini" id="copy_token">复制令牌</button>';
-      document.getElementById('copy_token').addEventListener('click', () => {
-        navigator.clipboard.writeText(document.querySelector('.token-box').textContent.trim());
-      });
-      rt.style.display = 'none';
+        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>';
+      copyBtn.disabled = false;
+      applyBtn.disabled = true;  // 有令牌：申请令牌变灰
       document.getElementById('apply_form').style.display = 'none';
     } else if (r.application && r.application.status === 'pending') {
       tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
-      rt.style.display = 'none';
+      copyBtn.disabled = true;
+      applyBtn.disabled = true;
       document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。点击「令牌申请」填写商家信息提交，平台审核通过后签发。</p>'
-        + '<button class="btn-form" id="apply_token_btn">令牌申请</button>';
-      rt.style.display = 'block';
+      tb.innerHTML = '<p class="small muted">还没有令牌。点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
+      copyBtn.disabled = true;  // 无令牌：复制令牌变灰
+      applyBtn.disabled = false;
       document.getElementById('apply_form').style.display = 'none';
-      document.getElementById('apply_token_btn').addEventListener('click', () => {
-        document.getElementById('apply_token_btn').style.display = 'none';
-        document.getElementById('apply_form').style.display = 'block';
-      });
     }
   });
 }
+document.getElementById('copy_token').addEventListener('click', () => {
+  const box = document.querySelector('.token-box');
+  if (box) navigator.clipboard.writeText(box.textContent.trim());
+});
+document.getElementById('show_apply').addEventListener('click', () => {
+  document.getElementById('show_apply').disabled = true;
+  document.getElementById('apply_form').style.display = 'block';
+});
 document.getElementById('request_token').addEventListener('click', () => {
   const btn = document.getElementById('request_token');
   btn.disabled = true;
