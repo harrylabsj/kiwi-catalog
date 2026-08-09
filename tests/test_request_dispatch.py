@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -110,3 +110,27 @@ def test_dispatch_request_405_when_only_a_path_parameter_route_matches() -> None
     """Path params participate in the known-path decision for wrong methods."""
     with pytest.raises(MethodNotAllowedError):
         dispatch_request(ROUTES, "DELETE", "/items/abc-123", ":db:", {}, {}, match_path)
+
+
+def test_resolve_route_skips_non_str_template_fail_closed() -> None:
+    """非 str route 模板 fail-closed：不视为匹配，不把 None/Any 强转字符串。
+
+    resolve_route 走 app 门面（路由表真实存在）；这里只测其纯路由判定契约——
+    path_template/path 为非 str（异常值）时该 route 被跳过而非喂给 _match_path。
+    """
+    from kiwi_catalog.api.app import resolve_route
+
+    class _WeirdTemplateRoute:
+        def __init__(self, template: object) -> None:
+            self.path_template = template
+            self.methods = {"GET"}
+
+    class _PathOnlyRoute:
+        path = "/legacy"
+        methods: ClassVar[set[str]] = {"GET"}
+
+    table = [_WeirdTemplateRoute(42), _WeirdTemplateRoute(None), _PathOnlyRoute()]
+    # 正常 str template（path 兼容回退）仍匹配
+    assert resolve_route("GET", "/legacy", table) == (True, True)
+    # 非 str template 被跳过：不匹配、不崩溃、不强转
+    assert resolve_route("GET", "/42", table) == (False, False)

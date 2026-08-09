@@ -107,7 +107,7 @@ def publish_listing(
     canonical: dict[str, Any],
     *,
     actor: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
     """upsert 一条 listing（行级幂等，见模块 docstring）。
 
     Returns (row, created: bool)。
@@ -164,7 +164,7 @@ def publish_listing(
                 raise
             existing = raced
             created = False
-            row = repo.update_listing(
+            updated = repo.update_listing(
                 conn,
                 str(existing["listing_id"]),
                 updated_at=timestamp,
@@ -172,8 +172,12 @@ def publish_listing(
                 listing_digest=digest,
                 **content_fields,
             )
+            # 竞态重读已确认存在，update 后仍读空：事务窗口内不可能，但
+            # fail-closed——异常而非返回空行。
+            assert updated is not None
+            row = updated
     else:
-        row = repo.update_listing(
+        updated = repo.update_listing(
             conn,
             str(existing["listing_id"]),
             updated_at=timestamp,
@@ -181,8 +185,9 @@ def publish_listing(
             listing_digest=digest,
             **content_fields,
         )
+        assert updated is not None  # update 后立即重读，事务窗口内必存在
+        row = updated
         created = False
-        assert row is not None  # update 后立即重读，事务窗口内必存在
     return row, created
 
 
