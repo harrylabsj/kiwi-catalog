@@ -123,6 +123,12 @@ from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_fr
 from kiwi_catalog.services.verification_helpers import (
     outcome_for as _outcome_for,  # noqa: F401 —— facade re-export
 )
+from kiwi_catalog.services.verification_profile_index import (
+    ProfileIndex as _ProfileIndex,
+)
+from kiwi_catalog.services.verification_profile_index import (
+    build_profile_index as _build_profile_index,
+)
 from kiwi_catalog.services.verification_profile_policy import (
     LADDER_RUNGS as _LADDER_RUNGS,
 )
@@ -606,31 +612,18 @@ class VerificationService:
         ucp: UcpProfileResult,
         urls: dict[str, str],
     ) -> None:
-        """Index public profile metadata (§5.3, §5.4, §5.2)."""
-        capabilities = list(card.capabilities) + list(ucp.capabilities)
-        skills = list(card.skills) + list(ucp.skills)
-        replace_capabilities(self._conn, catalog_agent_id, capabilities)
-        replace_skills(self._conn, catalog_agent_id, skills)
-        upsert_profile_endpoints(
-            self._conn,
-            catalog_agent_id,
-            [
-                {
-                    "kind": "agent_card",
-                    "url": urls["agent_card"],
-                    "protocol": "a2a",
-                    "protocol_version": card.version,
-                    "preference": 1,
-                },
-                {
-                    "kind": "ucp_profile",
-                    "url": urls["ucp_profile"],
-                    "protocol": "ucp",
-                    "protocol_version": ucp.specification_version,
-                    "preference": 1,
-                },
-            ],
-        )
+        """Index public profile metadata (§5.3, §5.4, §5.2).
+
+        The pure §5.3/§5.4/§5.2 row shaping lives in the side-effect-free
+        :func:`verification_profile_index.build_profile_index` leaf; this
+        method only executes the three persistence calls in their original
+        order, preserving the merged content/order/duplicates, protocol
+        versions and preference values.
+        """
+        index: _ProfileIndex = _build_profile_index(card, ucp, urls)
+        replace_capabilities(self._conn, catalog_agent_id, index.capabilities)
+        replace_skills(self._conn, catalog_agent_id, index.skills)
+        upsert_profile_endpoints(self._conn, catalog_agent_id, index.endpoints)
 
     # ── Domain / identity / commerce stages ────────────────────────────────
 
