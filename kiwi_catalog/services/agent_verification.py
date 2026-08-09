@@ -49,11 +49,11 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     append_catalog_audit,
@@ -98,7 +98,6 @@ from kiwi_catalog.discovery.verifier import (
     REJECTED,
     STALE,
     SUSPENDED,
-    TERMINAL_STATES,
     UNREACHABLE,
     IdentityVerifier,
     InvalidStateTransitionError,
@@ -108,6 +107,8 @@ from kiwi_catalog.discovery.verifier import (
 )
 from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
+from kiwi_catalog.services.verification_helpers import iso_from_epoch as _iso_from_epoch
+from kiwi_catalog.services.verification_helpers import outcome_for as _outcome_for
 
 # The ladder rungs that carry a persisted profile (anything above DISCOVERED).
 _LADDER_RUNGS: frozenset[str] = frozenset(
@@ -209,21 +210,6 @@ class _ReusedSnapshotFetch:
     @property
     def is_success(self) -> bool:
         return True
-
-
-def _outcome_for(target_status: str) -> str:
-    return {
-        REJECTED: "rejected",
-        UNREACHABLE: "unreachable",
-        STALE: "stale",
-    }.get(target_status, "failed")
-
-
-def _iso_from_epoch(ts: float) -> str:
-    # 审查 P3：截断微秒与 now_iso()（UTC、无微秒）同格式——带微秒的 ISO 与
-    # 无微秒 ISO 做纯字符串比较时，同一秒内 'T15:06:40.500000+00:00' <
-    # 'T15:06:40+00:00' 为 False（'.' > '+'），过期判定最多滞后 1 秒。
-    return datetime.fromtimestamp(ts, tz=timezone.utc).replace(microsecond=0).isoformat()
 
 
 class VerificationService:
