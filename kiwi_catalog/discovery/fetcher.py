@@ -57,7 +57,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from kiwi_catalog.discovery.trust import TrustPolicy
 from kiwi_catalog.services.catalog_runtime_metrics import record_profile_fetch
@@ -134,9 +134,9 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | N
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.is_link_local or ip in _LINK_LOCAL_V6:
             return "link-local address"
-        for net in _EXTRA_BLOCKED_V6:
-            if ip in net:
-                return f"blocked range {net}"
+        for net_v6 in _EXTRA_BLOCKED_V6:
+            if ip in net_v6:
+                return f"blocked range {net_v6}"
         # IPv4-mapped IPv6 (::ffff:a.b.c.d) — extract and check the v4 part
         if ip.ipv4_mapped:
             v4 = ip.ipv4_mapped
@@ -148,9 +148,9 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | N
         if ip.is_link_local:
             return "link-local address"
         # Extra blocked v4 ranges
-        for net in _EXTRA_BLOCKED_V4:
-            if ip in net:
-                return f"blocked range {net}"
+        for net_v4 in _EXTRA_BLOCKED_V4:
+            if ip in net_v4:
+                return f"blocked range {net_v4}"
     return None
 
 
@@ -800,8 +800,20 @@ class ProfileFetcher:
 # ── Streaming body read with hard byte limit ──────────────────────────────────
 
 
+class _ReadableBody(Protocol):
+    """Minimal read interface shared by ``http.client.HTTPResponse`` and
+    ``urllib.error.HTTPError`` (4xx error bodies).
+
+    Only ``read(size)`` is needed here — the byte limit and the total-fetch
+    deadline live in :func:`_read_limited`, so both success and error bodies
+    stay bounded under the same policy.
+    """
+
+    def read(self, amt: int) -> bytes: ...
+
+
 def _read_limited(
-    response: http.client.HTTPResponse,
+    response: _ReadableBody,
     max_bytes: int,
     *,
     deadline: float | None = None,

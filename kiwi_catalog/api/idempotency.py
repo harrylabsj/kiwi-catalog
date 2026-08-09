@@ -213,6 +213,11 @@ def claim_catalog_write_idempotency(
 
 _IDEMPOTENCY_RETENTION_DAYS = 7
 _IDEMPOTENCY_PRUNE_EVERY = 128
+# Process-wide completion counter driving lazy pruning every *PRUNE_EVERY*
+# completions.  A module-level int (rather than a function attribute) keeps
+# the count explicit and mypy-clean while preserving the per-process count
+# and the every-128-calls cleanup cadence exactly.
+_IDEMPOTENCY_COMPLETION_COUNT = 0
 
 
 def complete_catalog_write_idempotency(
@@ -223,15 +228,14 @@ def complete_catalog_write_idempotency(
     request_hash_value: str,
     response: dict[str, Any],
 ) -> None:
+    global _IDEMPOTENCY_COMPLETION_COUNT
     if not idempotency_key:
         return
     stored = dict(response)
     # 审查 P3：惰性清理已完成行（键空间此前只增不删——60/min/actor 上限下
     # 每日约 8.6 万行）。updated_at 是 ISO 文本，字符串比较即时间序。
-    complete_catalog_write_idempotency._prune_count = getattr(
-        complete_catalog_write_idempotency, "_prune_count", 0
-    ) + 1
-    if complete_catalog_write_idempotency._prune_count % _IDEMPOTENCY_PRUNE_EVERY == 0:
+    _IDEMPOTENCY_COMPLETION_COUNT += 1
+    if _IDEMPOTENCY_COMPLETION_COUNT % _IDEMPOTENCY_PRUNE_EVERY == 0:
         try:
             cutoff = (datetime.now(UTC) - timedelta(days=_IDEMPOTENCY_RETENTION_DAYS)).isoformat()
             conn.execute(

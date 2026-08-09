@@ -1582,10 +1582,11 @@ class VerificationQueue:
             )
             self._persist_finish(task.task_id, status="timeout", error=result.error)
             return result
-        # box["result"] 缺失 = 执行线程在落结果前异常退出（如 ledger 写失败）：
-        # 兜底 failed 结果，绝不 KeyError 杀 worker（并发预算减一且无恢复）。
-        result = box.get("result")
-        if result is None:
+        # box["result"] 缺失或非 VerificationTaskResult = 执行线程在落结果前
+        # 异常退出（如 ledger 写失败）：兜底 failed 结果，绝不 KeyError/类型
+        # 异常杀 worker（并发预算减一且无恢复）。
+        boxed_result = box.get("result")
+        if not isinstance(boxed_result, VerificationTaskResult):
             result = VerificationTaskResult(
                 task_id=task.task_id,
                 catalog_agent_id=task.catalog_agent_id,
@@ -1603,6 +1604,8 @@ class VerificationQueue:
                 )
             except Exception:  # noqa: BLE001 —— ledger 写失败不杀 worker
                 pass
+        else:
+            result = boxed_result
         return result
 
     def _execute_task(self, task: VerificationTask, box: dict[str, Any]) -> None:
