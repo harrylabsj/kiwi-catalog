@@ -228,7 +228,7 @@ _OFFICIAL_HOME = "https://kiwi.harrylabsj.com/"
 
 
 def _nav(active: str = "") -> str:
-    """商家侧一级导航：Home（官网首页）+ 令牌申请 + 我的（My Account）。
+    """商家侧一级导航：Home（官网首页）+ API Token + 我的（My Account）。
 
     Kiwi logo 与 Home 都指向官网首页（kiwi.harrylabsj.com）。
     """
@@ -239,7 +239,7 @@ def _nav(active: str = "") -> str:
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
   <div class="nav-links">
     <a href="{_OFFICIAL_HOME}">Home</a>
-    <a href="/portal"{portal_cls}>令牌申请</a>
+    <a href="/portal"{portal_cls}>API Token</a>
     <a href="/portal/account"{account_cls}>My Account</a>
   </div>
 </div></nav>

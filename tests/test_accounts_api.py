@@ -475,14 +475,14 @@ class AccountsApiTest(unittest.TestCase):
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
         self.assertIn(">My Account</a>", raw)
-        self.assertIn(">令牌申请</a>", raw)
+        self.assertIn(">API Token</a>", raw)
         self.assertNotIn("/portal/status", raw)
         self.assertNotIn(">Merchant Portal<", raw)  # 导航无 Merchant Portal（title 后缀除外）
 
     def test_home_nav_points_to_token_apply(self) -> None:
         _, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
-        self.assertIn(">令牌申请</a>", raw)
+        self.assertIn(">API Token</a>", raw)
         self.assertIn("/portal/account", raw)
 
     def test_status_page_removed(self) -> None:
