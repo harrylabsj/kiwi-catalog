@@ -23,4 +23,19 @@
 2. 在 Caddy/access log、APM、WAF 和集中日志中搜索 `admin_token=`，按凭据事件处理并清理/限制历史暴露；确认新代码上线后不再出现该 query 参数。
 3. 记录轮换时间、旧 token 失效验证、日志检索范围和操作者，作为发布前 P0 复核证据。
 
+### 部署管理员交接步骤（不在本地执行）
+
+- 通过受控终端生成新 token，仅替换 `/etc/kiwi-catalog/env` 中的
+  `KIWI_CATALOG_ADMIN_TOKEN`；保留仍在使用的
+  `KIWI_CATALOG_OWNER_TOKEN_SECRET`，并维持文件权限 `0600`。
+- `systemctl restart kiwi-catalog` 后确认服务健康；使用新 token 的
+  `Authorization: Bearer <new-token>` 请求 `/v1/admin/dashboard?days=1`，再用无
+  Authorization header 的 `?admin_token=probe-invalid` 请求确认 query 凭据返回
+  `401/403`。探针值必须是一次性假值，不得把真实凭据放入 URL。
+- 在 Caddy、systemd、APM、WAF 和集中日志的保留范围内检索
+  `admin_token=`；按组织凭据事件流程脱敏、封存或限制访问，禁止未经批准直接删除
+  审计记录。新版本上线后再次检索并记录“无新增 query 凭据”的时间窗口。
+- 回填：轮换时间、旧 token 失效结果、服务版本/提交、验证 URL（不含凭据）、日志
+  系统与时间范围、处置方式、操作者和审批号。回填内容不得包含 token 明文。
+
 本地工作区没有生产主机、日志或有效远程运维授权，因此本记录不宣称上述生产动作已经完成。
