@@ -52,9 +52,9 @@ class MarketplaceASGIApp:
     def _routes(self) -> list[Any]:
         provider = self._route_provider
         if provider is None:
-            from kiwi_catalog.api.route_registry import route_info
+            from kiwi_catalog.api.route_registry import catalog_route_info
 
-            provider = route_info
+            provider = catalog_route_info
         return provider()
 
     def _handler(self) -> HandleRequest:
