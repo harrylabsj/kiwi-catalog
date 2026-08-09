@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog import VERSION
+from kiwi_catalog.api.error_envelope import error_result
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
@@ -636,29 +637,29 @@ def handle_request(
             raise MethodNotAllowedError(f"Method not allowed for {method} {path}")
         raise NotFoundError(f"No route for {method} {path}")
     except AuthError as exc:
-        return 403, {"ok": False, "error": str(exc)}
+        return error_result(403, exc)
     except PermissionDenied as exc:
-        return 403, {"ok": False, "error": str(exc)}
+        return error_result(403, exc)
     except IdempotencyConflict as exc:
-        return 409, {"ok": False, "error": str(exc)}
+        return error_result(409, exc)
     except ConflictError as exc:
-        return 409, {"ok": False, "error": str(exc)}
+        return error_result(409, exc)
     except NotFoundError as exc:
-        return 404, {"ok": False, "error": str(exc)}
+        return error_result(404, exc)
     except RateLimitError as exc:
-        return 429, {"ok": False, "error": str(exc)}
+        return error_result(429, exc)
     except PayloadTooLargeError as exc:
-        return 413, {"ok": False, "error": str(exc)}
+        return error_result(413, exc)
     except MethodNotAllowedError as exc:
-        return 405, {"ok": False, "error": str(exc)}
+        return error_result(405, exc)
     except ValidationError as exc:
-        return 400, {"ok": False, "error": str(exc)}
+        return error_result(400, exc)
     except ShoppingCliError as exc:
-        return 400, {"ok": False, "error": str(exc)}
+        return error_result(400, exc)
     except Exception as exc:
         # 错误（如 schema 漂移/遗留表引用）无法定位。
         logging.getLogger(__name__).exception("unhandled request error: %r", exc)
-        return 500, {"ok": False, "error": "internal server error"}
+        return error_result(500, "internal server error")
 
 
 
