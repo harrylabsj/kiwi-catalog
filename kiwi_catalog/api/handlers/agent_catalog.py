@@ -40,7 +40,6 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     _list_capabilities_by_agent,
     _list_endpoints_by_agent,
     _list_skills_by_agent,
-    append_catalog_audit,
     enforce_catalog_register_domain_limit,
     get_catalog_agent_by_domain,
     get_catalog_agent_with_merchant,
