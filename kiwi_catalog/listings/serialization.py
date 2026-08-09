@@ -29,7 +29,6 @@ import secrets
 from typing import Any
 
 from kiwi_catalog.agent_catalog.state_domains import DISCOVERED
-from kiwi_catalog.listings.domain import FRESH, STALE
 
 _LISTING_ID_PREFIX = "lst_"
 

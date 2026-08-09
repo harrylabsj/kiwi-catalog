@@ -21,9 +21,8 @@ SQLite 实现见 sqlite_repository.py；tests/test_repository_abstraction.py 的
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
-
 import sqlite3
+from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable

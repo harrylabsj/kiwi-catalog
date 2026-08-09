@@ -143,21 +143,21 @@ def _validate_handoff_destination_types(value: Any) -> list[str]:
 
 def _parse_fresh_until(value: Any) -> str:
     """publisher 声明的 fresh_until（ISO-8601）。只接受明确未来时间，超 TTL 上限拒绝。"""
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
 
     if not isinstance(value, str):
         raise ValidationError("fresh_until must be an ISO-8601 string")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValidationError("fresh_until must be ISO-8601") from exc
     if parsed.tzinfo is None:
         raise ValidationError("fresh_until must include timezone")
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # 审查 P3：校验与输出统一按无微秒比较——声明未来 0.5s 的 fresh_until
     # 若用带微秒的 delta 判定「未来」、输出却截断微秒，会归一化到与 now
     # 同秒（立即过期）；截断后再算 delta，语义与存储一致。
-    normalized = parsed.astimezone(timezone.utc).replace(microsecond=0)
+    normalized = parsed.astimezone(UTC).replace(microsecond=0)
     now_truncated = now.replace(microsecond=0)
     delta = (normalized - now_truncated).total_seconds()
     if delta <= 0:
@@ -171,7 +171,7 @@ def _parse_fresh_until(value: Any) -> str:
     # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
     # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
     # 整秒边界提前 1 秒判过期）。
-    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
 
 
 def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:

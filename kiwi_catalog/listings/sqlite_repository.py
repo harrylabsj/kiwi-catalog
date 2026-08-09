@@ -26,7 +26,7 @@ import urllib.parse
 from typing import Any
 
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
-from kiwi_catalog.listings.domain import FRESH, LISTING_FRESHNESS_STATES
+from kiwi_catalog.listings.domain import FRESH
 
 _JSON_COLUMNS = (
     "attributes_json",
