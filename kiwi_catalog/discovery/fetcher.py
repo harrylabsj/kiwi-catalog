@@ -55,8 +55,9 @@ import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from kiwi_catalog.discovery.trust import TrustPolicy
 from kiwi_catalog.services.catalog_runtime_metrics import record_profile_fetch
