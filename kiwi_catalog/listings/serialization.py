@@ -81,6 +81,9 @@ def listing_record(row: dict[str, Any]) -> dict[str, Any]:
         result["commercial_hints"] = commercial_hints
     if handoff:
         result["handoff_destination_types"] = list(handoff)
+    handoff_ref = row.get("handoff_destination_ref")
+    if handoff_ref:
+        result["handoff_destination_ref"] = str(handoff_ref)
     return result
 
 

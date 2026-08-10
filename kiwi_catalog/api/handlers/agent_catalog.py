@@ -37,7 +37,6 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
     _list_endpoints_by_agent,
     _list_skills_by_agent,
     enforce_catalog_register_domain_limit,
-    get_catalog_agent_by_domain,
     get_catalog_agent_with_merchant,
     list_capabilities,
     list_endpoints,
@@ -73,7 +72,7 @@ from kiwi_catalog.core.errors import (
 )
 from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
-from kiwi_catalog.services import agent_catalog_writes, usage_metrics
+from kiwi_catalog.services import agent_catalog_writes, buyer_search_events, usage_metrics
 from kiwi_catalog.services.agent_catalog import (
     search_catalog_agents as _search_catalog_agents_service,
 )
@@ -150,6 +149,41 @@ def get_catalog_agent(db_path: str | Path, catalog_agent_id: str) -> dict[str, A
         }
 
 
+_AGENT_SEARCH_FILTER_KEYS = (
+    "category",
+    "skill",
+    "capability",
+    "protocol",
+    "hosting_mode",
+    "verification_level",
+    "freshness_state",
+    "administrative_state",
+    "handoff_destination_types",
+)
+
+
+def _record_agent_search_event(
+    conn: Any, query: dict[str, Any], results: list[dict[str, Any]]
+) -> None:
+    """买家搜 agent 埋点（运营数据源）：query/filters + 返回摘要（前 N 条）。"""
+    buyer_search_events.record_search_event(
+        conn,
+        search_type="agent",
+        query=str(query.get("q") or ""),
+        filters={
+            k: query[k] for k in _AGENT_SEARCH_FILTER_KEYS if str(query.get(k) or "").strip()
+        },
+        result_count=len(results),
+        result_summary=[
+            {
+                "catalog_agent_id": r.get("catalog_agent_id") or r.get("id") or "",
+                "display_name": r.get("display_name") or r.get("name") or "",
+            }
+            for r in (results or [])[:buyer_search_events.SUMMARY_CAP]
+        ],
+    )
+
+
 def search_agent_catalog(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
     """GET /v1/agent-catalog/agents/search — filtered search (§8.2)."""
     limit = result_limit(query.get("limit"), default=20)
@@ -169,6 +203,7 @@ def search_agent_catalog(db_path: str | Path, query: dict[str, Any]) -> dict[str
             cursor=str(query.get("cursor") or "").strip(),
         )
         result["ok"] = True
+        _record_agent_search_event(conn, query, result.get("results") or [])
         return result
 
 
@@ -435,26 +470,32 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
         try:
             merchant_id = str(payload.get("merchant_id") or "").strip()
             actor = _register_actor(conn, payload, merchant_id)
-            # 审查 P1-4b + P1-A（2026-08-10 复验复现）：重注册已治理 agent
-            # （suspended / rejected）= 复活，任何非 admin actor 都必须证明
-            # 控制权——admin token，或【既有绑定商户】的 owner token。
-            # 原守卫只挡匿名（actor=="cli"）路径：商户带自己 token（走
-            # _register_actor 的 merchant 分支）即可解禁并抢绑任意被治理
-            # agent。控制权证明对象必须是既有绑定商户而非请求声称的
-            # merchant_id；证明通过后强制保持原绑定，禁止借 token 抹除/改绑。
-            existing_row = get_catalog_agent_by_domain(conn, canonical)
-            if (
-                existing_row is not None
-                and str(existing_row.get("administrative_state") or "")
-                in agent_catalog_writes.RE_REGISTERABLE_ADMIN
-            ):
-                if actor != "admin":
-                    bound = str(existing_row.get("merchant_id") or "").strip()
-                    if bound:
-                        api_auth.require_merchant_token(payload, bound, conn)
-                        merchant_id = bound
-                    else:
-                        api_auth.require_admin_token(payload)
+            # 审查 P2（v17 删域名唯一索引后）：一域多商家——重注册的控制权证明
+            # 不能按「域名最新行」判定（会误拦在共享域名上开新 agent 的商家，
+            # 且 created_at 同秒时选中任意商家行）。服务层 merchant 路径只操作
+            # 调用方自己的 agent（按 merchant 主键选目标），匿名路径对 merchant
+            # 绑定行显式冲突——因此这里只需把关：匿名复活 governed **未绑定**
+            # 行需 admin（无 owner 可证明控制权）。merchant 调用方复活自己名下
+            # 的 governed agent 由其 token 证明（_register_actor 已按 merchant_id
+            # 校验），不会触及其他商家的行。
+            if not merchant_id:
+                domain_rows = conn.execute(
+                    "select merchant_id, administrative_state from catalog_agents"
+                    " where canonical_domain = ?",
+                    (canonical,),
+                ).fetchall()
+                merchant_bound = any(str(r["merchant_id"] or "").strip() for r in domain_rows)
+                has_active = any(
+                    str(r["administrative_state"]) not in agent_catalog_writes.RE_REGISTERABLE_ADMIN
+                    for r in domain_rows
+                )
+                governed_unbound = any(
+                    not str(r["merchant_id"] or "").strip()
+                    and str(r["administrative_state"]) in agent_catalog_writes.RE_REGISTERABLE_ADMIN
+                    for r in domain_rows
+                )
+                if not merchant_bound and not has_active and governed_unbound and actor != "admin":
+                    api_auth.require_admin_token(payload)
             result = agent_catalog_writes.register_catalog_agent(
                 conn,
                 domain=canonical,
@@ -873,6 +914,7 @@ def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
             cursor=str(query.get("cursor") or "").strip(),
         )
         results = _record_rows(rows, conn)
+        _record_agent_search_event(conn, query, results)
         return {"ok": True, "results": results, "next_cursor": next_cursor}
 
 

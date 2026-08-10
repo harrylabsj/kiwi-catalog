@@ -48,6 +48,7 @@ from kiwi_catalog.api.route_table import (
     _v1_admin_dashboard,
     _v1_admin_merchant_report,
     _v1_admin_merchants,
+    _v1_admin_searches,
     _v1_approve_application,
     _v1_claim_agent,
     _v1_get_agent,
@@ -589,6 +590,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             _query_params_from_request(request),
         )
 
+    @app.get("/v1/admin/searches")
+    def v1_admin_searches(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_searches(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
     from fastapi.responses import HTMLResponse
 
@@ -614,6 +623,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/admin")
     def portal_admin_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_admin())
+
+    @app.get("/portal/admin/searches")
+    def portal_admin_searches_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_admin_searches())
 
     @app.get("/portal/dashboard")
     def portal_dashboard_page() -> HTMLResponse:

@@ -150,6 +150,32 @@ class ListingsApiTest(unittest.TestCase):
         self.assertNotIn("floor_price", listing)
         self.assertNotIn("cost", listing)
 
+    def test_publish_carries_handoff_destination_ref(self) -> None:
+        """每商品成交入口（v19）：publish 带 handoff_destination_ref → 存储并返回。"""
+        status, payload = self._publish(
+            {
+                "handoff_destination_types": ["external_checkout_url"],
+                "handoff_destination_ref": "https://merchant.example/checkout/sku-001",
+            }
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            payload["listing"]["handoff_destination_ref"],
+            "https://merchant.example/checkout/sku-001",
+        )
+        # upsert 幂等：同 key 重发布保留 ref
+        status2, payload2 = self._publish(
+            {
+                "handoff_destination_types": ["external_checkout_url"],
+                "handoff_destination_ref": "https://merchant.example/checkout/sku-001",
+            }
+        )
+        self.assertEqual(status2, 200, payload2)
+        self.assertEqual(
+            payload2["listing"]["handoff_destination_ref"],
+            "https://merchant.example/checkout/sku-001",
+        )
+
     def test_publish_requires_owner_token(self) -> None:
         status, payload = self._publish(token="")
         self.assertEqual(status, 403, payload)

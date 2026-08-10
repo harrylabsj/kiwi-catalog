@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 19
 
 
 @dataclass(frozen=True)
@@ -689,6 +689,57 @@ def migration_016_account_profile(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_017_drop_domain_unique_index(conn: sqlite3.Connection) -> None:
+    """注册规则（2026-08-10 用户要求）：一个域名可注册多个商家，一个商家只能有一个 agent。
+
+    - 删除 `idx_catalog_agents_canonical_domain_unique`（一域一 agent 的数据层
+      兜底）——域名不再是全局唯一键，不同商家的 agent 可注册同一域名；
+    - 保留 `idx_catalog_agents_merchant_unique`（一商家一 agent）不变。
+    register 写入层已改为以 merchant 为主键（services/agent_catalog_writes.py）。
+    """
+    conn.execute("drop index if exists idx_catalog_agents_canonical_domain_unique")
+
+
+_BUYER_SEARCH_EVENTS_DDL = [
+    """
+create table if not exists buyer_search_events (
+        event_id integer primary key autoincrement,
+        search_type text not null,
+        query text not null default '',
+        filters_json text not null default '{}',
+        result_count integer not null default 0,
+        result_summary_json text not null default '[]',
+        created_at text not null
+    )
+    """,
+    """
+create index if not exists idx_buyer_search_events_created
+        on buyer_search_events(created_at desc, event_id desc)
+
+    """,
+]
+
+
+def migration_018_buyer_search_events(conn: sqlite3.Connection) -> None:
+    """买家搜索事件保留（运营数据源）。
+
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（test_shadow_tables 守护）。
+    """
+    for statement in _BUYER_SEARCH_EVENTS_DDL:
+        conn.execute(statement)
+
+
+def migration_019_listing_handoff_destination_ref(conn: sqlite3.Connection) -> None:
+    """commerce_listings.handoff_destination_ref 列（每商品成交入口，KTH）。
+
+    幂等 ALTER（参照 v16 模式）；fresh 路径由 models.py SCHEMA 创建，旧库在此补列。
+    """
+    if not _column_exists(conn, "commerce_listings", "handoff_destination_ref"):
+        conn.execute(
+            "alter table commerce_listings add column handoff_destination_ref text not null default ''"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -706,6 +757,9 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(14, "accounts", migration_014_accounts),
     Migration(15, "email_verification", migration_015_email_verification),
     Migration(16, "account_profile", migration_016_account_profile),
+    Migration(17, "drop_domain_unique_index", migration_017_drop_domain_unique_index),
+    Migration(18, "buyer_search_events", migration_018_buyer_search_events),
+    Migration(19, "listing_handoff_destination_ref", migration_019_listing_handoff_destination_ref),
 )
 
 

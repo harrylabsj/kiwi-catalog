@@ -60,6 +60,7 @@ _PUBLISH_KEYS: frozenset[str] = frozenset({
     "tags",
     "commercial_hints",
     "handoff_destination_types",
+    "handoff_destination_ref",  # 每商品成交入口（KTH destination_ref）
     "fresh_until",  # publisher 声明的 TTL 上限；无声明用服务端默认
 })
 
@@ -241,6 +242,13 @@ def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "handoff_destination_types" in payload:
         canonical["handoff_destination_types"] = _validate_handoff_destination_types(
             payload["handoff_destination_types"]
+        )
+    if "handoff_destination_ref" in payload:
+        # 每商品成交入口（KTH destination_ref）：URL 类为 https URL，联系/会话
+        # 类为 opaque ref。URL 安全性（SSRF）由 handoff 执行侧（url-safety）负责，
+        # 这里只做有界字符串校验。
+        canonical["handoff_destination_ref"] = _require_str(
+            payload["handoff_destination_ref"], "handoff_destination_ref"
         )
     if "fresh_until" in payload:
         canonical["fresh_until"] = _parse_fresh_until(payload["fresh_until"])
