@@ -15,11 +15,13 @@ dependencies = ["cryptography", "jsonschema"]
 license = {file = "LICENSE"}
 
 [project.optional-dependencies]
-api = ["fastapi>=0.110", "uvicorn>=0.27"]
+api = ["fastapi>=0.141.1", "uvicorn>=0.27"]
 dev = ["httpx>=0.28", "mypy", "pytest", "ruff", "types-jsonschema"]
 
 [tool.uv]
-constraint-dependencies = ["fastapi<0.117", "starlette<0.49", "uvicorn<0.36"]
+# Keep the optional API stack above the currently published Starlette security
+# floor while retaining an upper bound for deliberate compatibility upgrades.
+constraint-dependencies = ["fastapi>=0.141.1,<0.142", "starlette>=1.3.1,<1.7", "uvicorn<0.36"]
 
 [tool.ruff]
 target-version = "py311"

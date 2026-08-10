@@ -402,7 +402,14 @@ document.getElementById('list').addEventListener('click', e => {
     postJson('/v1/merchants/applications/' + app + '/approve', {}, token)
       .then(r => { if (r.ok) { showToken(r); loadList(); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   } else if (rej) {
-    postJson('/v1/merchants/applications/' + rej + '/reject', {}, token)
+    const note = prompt('拒绝理由（必填，将展示给商家）：');
+    if (note === null) { return; }
+    if (!note.trim()) {
+      document.getElementById('out').textContent = '拒绝理由不能为空';
+      document.getElementById('out').className = 'err';
+      return;
+    }
+    postJson('/v1/merchants/applications/' + rej + '/reject', {review_note: note.trim()}, token)
       .then(r => { if (r.ok) { loadList(); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   }
 });
@@ -570,7 +577,14 @@ document.getElementById('apps').addEventListener('click', e => {
     postJson('/v1/merchants/applications/' + app + '/approve', {}, token)
       .then(r => { if (r.ok) { loadDashboard(token); alert('已签发：' + r.merchant_id + '\\n令牌（仅显示一次）：\\n' + r.token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   } else if (rej) {
-    postJson('/v1/merchants/applications/' + rej + '/reject', {}, token)
+    const note = prompt('拒绝理由（必填，将展示给商家）：');
+    if (note === null) { return; }
+    if (!note.trim()) {
+      document.getElementById('out').textContent = '拒绝理由不能为空';
+      document.getElementById('out').className = 'err';
+      return;
+    }
+    postJson('/v1/merchants/applications/' + rej + '/reject', {review_note: note.trim()}, token)
       .then(r => { if (r.ok) { loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   }
 });
