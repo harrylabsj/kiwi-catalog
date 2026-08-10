@@ -20,7 +20,7 @@ merchant 要向 kiwi-catalog 注册 Agent 并发布产品 listing，需要 owner
 **硬伤**：HMAC 模型下同一 merchant_id 永远同一 token，**无法单点轮换/吊销**。
 泄露只能换 secret（= 全量轮换）或 suspend + 换 merchant_id 重注册。
 
-## 2. 决策（2026-08-08 项目维护者拍板）
+## 2. 决策（2026-08-08 项目决策）
 
 | 决策点 | 选择 |
 | --- | --- |
