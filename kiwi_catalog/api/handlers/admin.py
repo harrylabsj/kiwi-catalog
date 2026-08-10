@@ -25,8 +25,25 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api import auth as api_auth
+from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import admin_reports
+
+
+def _parse_int_query(raw: Any, default: int, name: str) -> int:
+    """解析可选整数 query 参数；非数字/负值 → ValidationError（400）。
+
+    审查 P3：此前 int(raw) 对非数字输入抛 ValueError → 未类型化 500。
+    """
+    if raw is None or str(raw) == "":
+        return default
+    try:
+        value = int(str(raw))
+    except (TypeError, ValueError):
+        raise ValidationError(f"{name} must be an integer") from None
+    if value < 0:
+        raise ValidationError(f"{name} must be a non-negative integer")
+    return value
 
 
 def dashboard(
@@ -34,7 +51,8 @@ def dashboard(
 ) -> dict[str, Any]:
     """GET /v1/admin/dashboard?days=14（admin）——运营总览。"""
     api_auth.require_admin_token(payload)
-    days = int(query.get("days") or admin_reports.DEFAULT_DAYS)
+    # 审查 P3：非数字参数此前 int() 抛 ValueError → 未类型化 500。映射 400。
+    days = _parse_int_query(query.get("days"), admin_reports.DEFAULT_DAYS, "days")
     with db_session(db_path) as conn:
         summary = admin_reports.dashboard_summary(conn, days=days)
         return {"ok": True, **summary}
@@ -45,7 +63,7 @@ def merchant_list(
 ) -> dict[str, Any]:
     """GET /v1/admin/merchants?limit=100（admin）——商家列表。"""
     api_auth.require_admin_token(payload)
-    limit = int(query.get("limit") or 100)
+    limit = _parse_int_query(query.get("limit"), 100, "limit")
     with db_session(db_path) as conn:
         return {"ok": True, "results": admin_reports.merchant_list(conn, limit=limit)}
 
