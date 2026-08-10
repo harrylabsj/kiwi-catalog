@@ -762,6 +762,58 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         self.assertEqual(payload["verification_level"], "domain_verified")
         self.assertEqual(payload["administrative_state"], "active")
 
+    def test_sync_verify_commits_preliminary_writes_before_fetch(self) -> None:
+        """审查 P2-O：verify 抓取开始时外层事务必须无挂起写。
+
+        限流计数 + 幂等 claim 的写事务必须在抓取前 commit——此前写锁跨
+        2×30s 网络抓取（WAL 单写者 + busy_timeout 5s），并发 register/
+        publish/withdraw 全部 database is locked → 500（攻击者可匿名放大）。
+        """
+        from unittest import mock as _mock
+
+        import kiwi_catalog.api.handlers.agent_catalog as handlers_mod
+        from kiwi_catalog.db.session import db_session as real_db_session
+        from kiwi_catalog.services.agent_verification import VerificationResult
+
+        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = "test-admin"
+        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
+
+        captured: dict = {}
+
+        class _RecordingSession:
+            def __init__(self, path: str) -> None:
+                self._inner = real_db_session(path)
+
+            def __enter__(self):
+                captured["conn"] = self._inner.__enter__()
+                return captured["conn"]
+
+            def __exit__(self, *args):
+                return self._inner.__exit__(*args)
+
+        def fake_verify_service(db_path, conn):
+            service = _mock.Mock()
+            service.name = "fake"
+
+            def _verify(catalog_agent_id, actor=None):
+                # 抓取开始时刻：外层事务必须已无挂起写（pre-writes 已 commit）
+                captured["in_transaction_at_verify"] = captured["conn"].in_transaction
+                return VerificationResult(catalog_agent_id, "discovered", "discovered", ())
+
+            service.verify = _verify
+            return service
+
+        with _mock.patch("kiwi_catalog.api.handlers.agent_catalog.db_session", _RecordingSession):
+            with _mock.patch.object(handlers_mod, "_verification_service", fake_verify_service):
+                status, payload = _call_http(
+                    self.app,
+                    "POST",
+                    f"/v1/agent-catalog/agents/{self.cagt_id}/verify",
+                    json.dumps({"admin_token": "test-admin", "idempotency_key": "v2"}).encode(),
+                )
+        self.assertEqual(status, 200, payload)
+        self.assertIs(captured["in_transaction_at_verify"], False)
+
 
 if __name__ == "__main__":
     unittest.main()
