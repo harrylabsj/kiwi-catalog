@@ -19,7 +19,7 @@
   弱密码/非法邮箱校验；
 - 登录：正确/错误密码；限流；会话有效期；
 - me：未登录 403；登录后返回工单状态；审批后返回 token 明文（找回）；
-- token-request：pending 去重、active 去重、rejected 冲突；
+- token-request：pending 去重、active 去重、rejected 后可重新申请（新工单）；
 - 登出后 me 403；
 - /portal/register、/portal/login、/portal/account 页面 200。
 """
@@ -380,6 +380,51 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "active")
+
+    def test_token_request_after_rejection_allowed(self) -> None:
+        """被拒绝后可重新申请：新建 pending 工单，原被拒工单保留为审计记录。"""
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        # 首次申请 → pending
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
+        # 运营拒绝（带理由）
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            app_id = conn.execute(
+                "select application_id from merchant_applications order by application_id limit 1"
+            ).fetchone()["application_id"]
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            f"/v1/merchants/applications/{app_id}/reject",
+            json.dumps({"admin_token": ADMIN_TOKEN, "review_note": "domain unverifiable"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        # 重新申请 → 新 pending 工单（非 409）
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
+        # 审计：原被拒工单保留，共 2 条
+        with db_session(self.db_path) as conn:
+            rows = conn.execute(
+                "select status from merchant_applications order by application_id"
+            ).fetchall()
+        self.assertEqual([r["status"] for r in rows], ["rejected", "pending"])
 
     # ── 账户基本信息 ───────────────────────────────────────────────────────
 
