@@ -896,7 +896,7 @@ class VerificationService:
         """
         self._conn.commit()
 
-    def close(self) -> None:
+    def close(self, commit: bool = True) -> None:
         """Commit pending writes and close the underlying connection.
 
         The bounded verification queue creates one service (and therefore one
@@ -906,9 +906,15 @@ class VerificationService:
         ``commit`` runs here as a safety net for callers that finish a
         transaction simply by closing the service; the queue itself commits
         explicitly after each task so it can report a persistence failure.
+
+        ``commit=False`` 用于 cancelled/runaway 路径（审查 P2-N）：timeout
+        已返回后线程仍在跑的写必须随连接关闭回滚——此前 finally 无条件
+        close()，close 内部先 commit，timeout 响应后 catalog 状态仍被推进
+        （调用方按「timeout=未执行」重试会与仍在跑的 runaway 写交叠）。
         """
         try:
-            self._conn.commit()
+            if commit:
+                self._conn.commit()
         finally:
             self._conn.close()
 
@@ -1508,9 +1514,10 @@ class VerificationQueue:
             # 审查 P2（超时语义）：supervisor 已置 cancelled 时不得 commit——
             # 此前 runner 先 commit 后查 cancelled，timeout 已返回后 catalog
             # 状态仍被推进（调用方按「timeout=未执行」重试会叠加重叠验证）。
-            # 不 commit → 连接关闭时回滚，catalog 三域/审计保持原样
-            # （_load_profiles 的快照缓存可能已刷新——文档化语义：timeout
-            # = catalog 状态不被推进，快照缓存可能已刷新）。
+            # 不 commit → finally 的 close(commit=False) 随连接关闭回滚，
+            # catalog 三域/审计保持原样（_load_profiles 的快照缓存可能已
+            # 刷新——文档化语义：timeout = catalog 状态不被推进，快照缓存
+            # 可能已刷新）。
             if cancelled.is_set():
                 return
             commit = getattr(service, "commit", None)
@@ -1543,7 +1550,10 @@ class VerificationQueue:
             close = getattr(service, "close", None)
             if close is not None:
                 try:
-                    close()
+                    # 审查 P2-N：cancelled（timeout 已返回）时不得 commit——
+                    # runaway 线程的写随连接关闭回滚（此前 close 内部先
+                    # commit，timeout 后 catalog 状态仍被推进，实验复现）。
+                    close(commit=not cancelled.is_set())
                 except Exception:  # noqa: BLE001 — cleanup must not mask results
                     pass
         if cancelled.is_set():
