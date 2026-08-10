@@ -348,6 +348,64 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["token_status"], "revoked")
 
+    def test_hmac_fallback_closed_after_token_onboarding_and_revocation(self) -> None:
+        """审查 P2-1：HMAC 派生 fallback 不得复活已吊销/已轮换的商户凭证。
+
+        历史 bug：require_merchant_token 在随机 token 未命中或行状态 revoked
+        时无条件落入 HMAC 派生路径——admin 吊销后，存量 HMAC 调用方仍可用
+        派生 token 认证全部写接口（revoke 契约失效）。修复：商户一旦进入
+        token 体系（存在 token 行），凭证以 active 行为唯一权威；仅无任何
+        token 记录的存量商户保留 HMAC fallback。
+        """
+        def _register_with_domain(mid: str, token: str, domain: str) -> str:
+            body = {
+                **REGISTER_BODY,
+                "domain": domain,
+                "merchant_id": mid,
+                "owner_token": token,
+            }
+            status, payload = _call_http(
+                self.app, "POST", "/v1/agents/register", json.dumps(body).encode()
+            )[:2]
+            self.assertEqual(status, 200, payload)
+            return payload["agent"]["catalog_agent_id"]
+
+        def _publish_with(mid: str, token: str, agent_id: str) -> int:
+            body = {
+                **PRODUCT_PAYLOAD,
+                "merchant_id": mid,
+                "owner_agent_id": agent_id,
+                "owner_token": token,
+            }
+            return _call_http(
+                self.app, "POST", "/v1/listings/publish", json.dumps(body).encode()
+            )[:2][0]
+
+        # 1) 无 token 记录的存量商户：HMAC 派生 token 仍可用（fallback 保留）
+        legacy = "legacy-merchant"
+        legacy_agent = _register_with_domain(legacy, owner_token(legacy), "legacy.example")
+        self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 200)
+
+        # 2) 进入 token 体系（apply+approve 签发随机 token）后：HMAC 派生
+        #    token 立即失效——凭证以 active 随机 token 为唯一权威
+        _, applied = self._apply()
+        _, issued = self._approve(applied["application"]["application_id"])
+        mid, random_token = issued["merchant_id"], issued["token"]
+        mid_agent = _register_with_domain(mid, random_token, "onboarded.example")
+        self.assertEqual(_publish_with(mid, random_token, mid_agent), 200)
+        self.assertEqual(_publish_with(mid, owner_token(mid), mid_agent), 403)
+
+        # 3) admin 吊销后：随机 token 与 HMAC 派生 token 双双失效
+        status, payload = _call_http(
+            self.app,
+            "POST",
+            f"/v1/merchants/{mid}/revoke",
+            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
+        )[:2]
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(_publish_with(mid, random_token, mid_agent), 403)
+        self.assertEqual(_publish_with(mid, owner_token(mid), mid_agent), 403)
+
     # ── self ───────────────────────────────────────────────────────────────
 
     def test_self_resolves_token_to_merchant(self) -> None:

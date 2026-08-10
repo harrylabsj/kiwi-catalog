@@ -127,13 +127,21 @@ def require_merchant_token(
     """
     presented = str((payload or {}).get("owner_token") or "")
     if presented and conn is not None:
-        row = conn.execute(
+        rows = conn.execute(
             "select token_hash, status from merchant_tokens where merchant_id = ?",
             (merchant_id,),
-        ).fetchone()
-        if row is not None and str(row["status"]) == "active":
-            digest = token_digest(presented)
-            if token_matches(digest, str(row["token_hash"])):
-                return
-    # 无 active 随机 token（或未命中）→ HMAC 派生路径（含未配置 fail-closed）
+        ).fetchall()
+        if rows:
+            # 商户已进入 token 体系（签发过随机 token）：凭证以 active 行为
+            # 唯一权威。revoked/rotated 后不得经 HMAC 派生路径复活——否则
+            # admin 吊销对存量 HMAC 调用方完全无效（审查 P2-1：fallback
+            # 不查 status，吊销后旧派生 token 仍可认证全部写接口）。
+            for row in rows:
+                if str(row["status"]) == "active":
+                    digest = token_digest(presented)
+                    if token_matches(digest, str(row["token_hash"])):
+                        return
+            raise AuthError("invalid owner token")
+    # 无任何 token 记录（存量商户未上 token 体系）→ HMAC 派生路径
+    # （含未配置 fail-closed；conn 缺省的无 DB 调用点行为不变）
     require_owner_token(payload, merchant_id)
