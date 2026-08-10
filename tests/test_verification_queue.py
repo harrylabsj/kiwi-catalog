@@ -42,6 +42,7 @@ class _StubService:
     def __init__(self, delay: float = 0.0) -> None:
         self.delay = delay
         self.closed = False
+        self.close_commits: list[bool] = []
 
     def verify(self, catalog_agent_id: str, actor: str = "verification_worker"):
         if self.delay > 0:
@@ -58,7 +59,9 @@ class _StubService:
     def commit(self) -> None:
         return None
 
-    def close(self) -> None:
+    def close(self, commit: bool = True) -> None:
+        # 审查 P2-N：cancelled 路径必须 commit=False（runaway 写随关闭回滚）
+        self.close_commits.append(commit)
         self.closed = True
 
 
@@ -133,7 +136,40 @@ class VerificationQueueRunawayTest(unittest.TestCase):
         row = self._ledger_row(result.task_id)
         self.assertEqual(row["status"], "timeout", "runaway 不得改写 ledger")
         self.assertNotEqual(row["status"], "completed")
+        # 审查 P2-N：cancelled（timeout）路径 close 必须 commit=False——
+        # 此前 finally 无条件 close()（内部先 commit），runaway 写会落库。
+        self.assertEqual(slow_service.close_commits, [False])
         q.shutdown(wait=False)
+
+    def test_closed_service_commits_only_on_non_cancelled_path(self) -> None:
+        """正常完成路径 close(commit=True)；timeout 路径 close(commit=False)。
+
+        审查 P2-N：VerificationService.close 的 commit 参数——timeout 已返回
+        后 runaway 线程的写必须随连接关闭回滚（此前 close 内部先 commit，
+        实验复现 timeout 响应后 catalog 状态仍被推进）。
+        """
+        from kiwi_catalog.services.agent_verification import VerificationService
+
+        class _RecordingConn:
+            def __init__(self) -> None:
+                self.commits = 0
+                self.closed = False
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def close(self) -> None:
+                self.closed = True
+
+        cancelled_conn = _RecordingConn()
+        VerificationService(cancelled_conn).close(commit=False)
+        self.assertEqual(cancelled_conn.commits, 0)
+        self.assertTrue(cancelled_conn.closed)
+
+        normal_conn = _RecordingConn()
+        VerificationService(normal_conn).close(commit=True)
+        self.assertEqual(normal_conn.commits, 1)
+        self.assertTrue(normal_conn.closed)
 
     def test_worker_survives_persistence_error_and_still_serves_next_task(self) -> None:
         """ledger 写失败不得杀 worker（并发预算永久减一）：后续任务仍可执行。"""
