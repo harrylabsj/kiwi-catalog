@@ -32,6 +32,7 @@ network dependency is the SSRF-safe ``ProfileFetcher`` (W1), injected here.
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -79,6 +80,27 @@ TERMINAL_STATES: frozenset[str] = frozenset({REJECTED, SUSPENDED})
 def ladder_index(state: str) -> int:
     """Return the position of *state* on the promotion ladder, or -1."""
     return _LADDER_INDEX.get(state, -1)
+
+
+# ── Kiwi Negotiation Protocol (KNP) markers ─────────────────────────────────
+# Single source for what counts as a KNP claim (审查 P1-04)：endpoint protocol
+# 或 capability namespace 命中即 KNP claim——endpoint protocol 写成 ``a2a``
+# 不能用来绕过 KNP 治理。
+_KNP_PROTOCOLS = frozenset({"knp", "kiwi-negotiation", "kiwi_negotiation"})
+_KNP_IDENTIFIER_SEP_RE = re.compile(r"[:./_-]+")
+
+
+def _capability_declares_kiwi_negotiation(capability: str) -> bool:
+    """True when a capability identifier denotes Kiwi negotiation (KNP).
+
+    Matches normalized tokens of the fully-qualified id: ``knp`` alone, or
+    the pair ``kiwi`` + ``negotiation`` (e.g. ``kiwi.negotiation``,
+    ``com.kiwi:negotiation``, ``urn:kiwi:negotiation``).  A capability
+    namespace declaration counts as a KNP claim regardless of the service
+    endpoint protocol written in the profile (§P1-04).
+    """
+    tokens = set(_KNP_IDENTIFIER_SEP_RE.split(str(capability or "").lower()))
+    return "knp" in tokens or ({"kiwi", "negotiation"} <= tokens)
 
 
 # ── Explicit transition table (§6) ──────────────────────────────────────────
@@ -370,48 +392,132 @@ class TrustEvaluator:
         details["commerce_capability_count"] = len(commerce)
 
         # Kiwi/KNP compatibility when claimed (§6 COMMERCE_VERIFIED bullet).
-        claimed = self._claimed_knp_versions(ucp)
-        if claimed:
+        # 审查 P1-04：capability namespace 声明的 Kiwi negotiation 也是 KNP
+        # claim（endpoint protocol 写 a2a 不能绕过）；KNP claim 的
+        # version / allowlist / spec / schema 缺任一项不得 COMMERCE_VERIFIED。
+        knp_claims = self._knp_claims(ucp)
+        if knp_claims:
             allowed = set(self._policy.allowed_knp_versions)
-            if not allowed:
-                return _failed_evidence(
-                    "commerce_capability",
-                    "KNP is claimed but the TrustPolicy allows no KNP versions",
-                    details,
-                )
-            if not claimed.keys() <= allowed:
-                return _failed_evidence(
-                    "commerce_capability",
-                    f"claimed KNP versions {sorted(claimed)} exceed allowed {sorted(allowed)}",
-                    details,
-                )
-            details["knp_versions"] = sorted(claimed)
+            for claim in knp_claims:
+                source = str(claim.get("source") or "")
+                if not claim.get("version"):
+                    return _failed_evidence(
+                        "commerce_capability",
+                        "KNP claim is missing a declared version",
+                        {**details, "knp_claim_source": source},
+                    )
+                if not allowed:
+                    return _failed_evidence(
+                        "commerce_capability",
+                        "KNP is claimed but the TrustPolicy allows no KNP versions",
+                        {**details, "knp_claim_source": source},
+                    )
+                if claim["version"] not in allowed:
+                    return _failed_evidence(
+                        "commerce_capability",
+                        f"claimed KNP version {claim['version']} is not allowed "
+                        f"(allowed: {sorted(allowed)})",
+                        {**details, "knp_claim_source": source},
+                    )
+                if not claim.get("has_spec") or not claim.get("has_schema"):
+                    return _failed_evidence(
+                        "commerce_capability",
+                        "KNP claim is missing a specification/schema reference",
+                        {**details, "knp_claim_source": source},
+                    )
+            details["knp_versions"] = sorted({c["version"] for c in knp_claims})
 
         return VerificationEvidence(
             verification_type="commerce_capability", result="passed", details=details
         )
 
-    @staticmethod
-    def _claimed_knp_versions(ucp: UcpProfileResult) -> dict[str, str]:
-        """Return {knp_version: endpoint_uri} for KNP-protocol endpoints."""
-        claimed: dict[str, str] = {}
+    def _knp_claims(self, ucp: UcpProfileResult) -> list[dict[str, Any]]:
+        """KNP claims declared by the UCP profile (§P1-04).
+
+        每个声明携带：claimed ``version``、是否带 spec（KNP spec 条目带非空
+        ``specUrl``）、是否带 schema（service.documentationUri、顶层
+        openAPIDocument 或 KNP spec 条目的 ``schemaUrl``）、以及
+        ``source``（endpoint_protocol / capability_namespace）。capability
+        namespace 的 Kiwi negotiation 声明即使 service endpoint protocol 写成
+        ``a2a`` 也计入——协议写法不能用来绕过 KNP 治理。
+        """
         services = ucp.public.get("services")
         if not isinstance(services, list):
-            return claimed
+            return []
+        top_level_specs = ucp.public.get("specifications")
+        has_top_schema = any(
+            isinstance(sp, dict) and str(sp.get("openAPIDocument") or "").strip()
+            for sp in (top_level_specs if isinstance(top_level_specs, list) else [])
+        )
+        claims: list[dict[str, Any]] = []
         for service in services:
             if not isinstance(service, dict):
                 continue
             endpoints = service.get("endpoints")
-            if not isinstance(endpoints, list):
+            capabilities = service.get("capabilities")
+            endpoints = endpoints if isinstance(endpoints, list) else []
+            capabilities = capabilities if isinstance(capabilities, list) else []
+            knp_endpoints = [
+                e
+                for e in endpoints
+                if isinstance(e, dict) and str(e.get("protocol", "")).lower() in _KNP_PROTOCOLS
+            ]
+            kiwi_caps = [
+                c
+                for c in capabilities
+                if isinstance(c, str) and _capability_declares_kiwi_negotiation(c)
+            ]
+            if not knp_endpoints and not kiwi_caps:
                 continue
-            for endpoint in endpoints:
-                if not isinstance(endpoint, dict):
-                    continue
-                protocol = str(endpoint.get("protocol", "")).lower()
-                if protocol in ("knp", "kiwi-negotiation", "kiwi_negotiation"):
-                    version = str(endpoint.get("version", "")).strip() or "unspecified"
-                    claimed.setdefault(version, str(endpoint.get("uri", "")))
-        return claimed
+            versions: set[str] = set()
+            for e in knp_endpoints:
+                v = str(e.get("version", "")).strip()
+                if v:
+                    versions.add(v)
+            specs = service.get("specifications")
+            specs = specs if isinstance(specs, list) else []
+            # KNP 相关的 spec 条目：id 本身声明 Kiwi negotiation（canonical 适配
+            # 器把每 capability 的 version/spec/schema 注入其 id 为 capability id
+            # 的 specifications 条目）——非 KNP capability 的 spec 版本不得计入
+            # KNP 版本集合（否则 checkout 等能力的版本会污染 allowlist 校验）。
+            knp_specs = [
+                sp
+                for sp in specs
+                if isinstance(sp, dict)
+                and _capability_declares_kiwi_negotiation(str(sp.get("id") or ""))
+            ]
+            for sp in knp_specs:
+                v = str(sp.get("version", "")).strip()
+                if v:
+                    versions.add(v)
+            # spec 引用必须是真实的 specification 指针（KNP spec 条目带非空
+            # specUrl）——仅有 KNP 声明（endpoint/capability/id-only spec 条目）
+            # 不算 spec 引用，否则无 specUrl 的声明可绕过治理（审查 P1-04）。
+            has_spec = any(str(sp.get("specUrl") or "").strip() for sp in knp_specs)
+            has_schema = (
+                has_top_schema
+                or bool(str(service.get("documentationUri") or "").strip())
+                or any(str(sp.get("schemaUrl") or "").strip() for sp in knp_specs)
+            )
+            source = "+".join(
+                filter(
+                    None,
+                    [
+                        "endpoint_protocol" if knp_endpoints else "",
+                        "capability_namespace" if kiwi_caps else "",
+                    ],
+                )
+            )
+            for version in versions or {""}:
+                claims.append(
+                    {
+                        "version": version,
+                        "has_spec": has_spec,
+                        "has_schema": has_schema,
+                        "source": source,
+                    }
+                )
+        return claims
 
 
 # ── Internal helper ─────────────────────────────────────────────────────────

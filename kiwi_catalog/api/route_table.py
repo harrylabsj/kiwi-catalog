@@ -318,6 +318,11 @@ RouteEntry(
             db_path, merchant_id, payload, query
         ),
     ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/searches",
+        lambda db_path, payload, query, **kw: _v1_admin_searches(db_path, payload, query),
+    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -333,6 +338,11 @@ RouteEntry(
         {"GET"},
         "/portal/admin",
         lambda db_path, payload, query, **kw: _portal_admin(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/admin/searches",
+        lambda db_path, payload, query, **kw: _portal_admin_searches(),
     ),
 RouteEntry(
         {"GET"},
@@ -523,6 +533,10 @@ def _v1_admin_merchant_report(db_path, merchant_id, payload, query):
     return admin_handlers.merchant_report(db_path, merchant_id, payload, query or {})
 
 
+def _v1_admin_searches(db_path, payload, query):
+    return admin_handlers.search_events(db_path, payload, query or {})
+
+
 # ── /portal wrapper（门户页面）────────────────────────────────────────────
 
 
@@ -536,6 +550,10 @@ def _portal_apply():
 
 def _portal_admin():
     return portal_handlers.portal_admin()
+
+
+def _portal_admin_searches():
+    return portal_handlers.portal_admin_searches()
 
 
 def _portal_dashboard():

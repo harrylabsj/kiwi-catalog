@@ -27,7 +27,7 @@ from typing import Any
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.db.session import db_session
-from kiwi_catalog.services import admin_reports
+from kiwi_catalog.services import admin_reports, buyer_search_events
 
 
 def _parse_int_query(raw: Any, default: int, name: str) -> int:
@@ -75,3 +75,20 @@ def merchant_report(
     api_auth.require_admin_token(payload)
     with db_session(db_path) as conn:
         return {"ok": True, **admin_reports.merchant_report(conn, merchant_id)}
+
+
+def search_events(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/admin/searches?limit=100（admin）——最近买家搜索事件（运营数据源）。
+
+    每条含 search_type / query / filters / result_count / result_summary /
+    created_at；result_count==0 即未命中（供需缺口信号）。
+    """
+    api_auth.require_admin_token(payload)
+    limit = _parse_int_query(query.get("limit"), 100, "limit")
+    with db_session(db_path) as conn:
+        return {
+            "ok": True,
+            "results": buyer_search_events.list_recent_search_events(conn, limit=limit),
+        }

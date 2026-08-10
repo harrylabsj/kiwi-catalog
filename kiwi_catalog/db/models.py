@@ -334,6 +334,9 @@ create table if not exists commerce_listings (
         tags_json text not null default '[]',
         commercial_hints_json text not null default '{}',
         handoff_destination_types_json text not null default '[]',
+        -- v19 — 每商品成交入口（KTH destination_ref）：商家声明并维护的实际
+        -- 交易入口（URL 类为 https URL；联系/会话类为 opaque ref）。
+        handoff_destination_ref text not null default '',
         listing_digest text not null,
         publication_state text not null default 'ACTIVE'
             check(publication_state in ('ACTIVE','WITHDRAWN','SUSPENDED')),
@@ -381,6 +384,25 @@ create unique index if not exists idx_commerce_listings_product_ref_unique
 create unique index if not exists idx_commerce_listings_publisher_key_unique
         on commerce_listings(owner_agent_id, listing_type, publisher_listing_key)
         where publisher_listing_key is not null
+
+    """,
+    # v18 — 买家搜索事件（运营数据源）。每次 buyer 搜索记一条：search_type
+    # agent/listing、query、filters、result_count、result_summary（前 N 条摘要）、
+    # created_at。有界保留由 services/buyer_search_events.py 裁剪。
+    """
+create table if not exists buyer_search_events (
+        event_id integer primary key autoincrement,
+        search_type text not null,
+        query text not null default '',
+        filters_json text not null default '{}',
+        result_count integer not null default 0,
+        result_summary_json text not null default '[]',
+        created_at text not null
+    )
+    """,
+    """
+create index if not exists idx_buyer_search_events_created
+        on buyer_search_events(created_at desc, event_id desc)
 
     """,
 ]

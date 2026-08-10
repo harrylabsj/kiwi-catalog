@@ -60,6 +60,157 @@ _DEFAULT_MAX_DEPTH = 100
 _DEFAULT_MAX_NODES = 50_000
 
 
+# ── Canonical Kiwi UCP model adapter ─────────────────────────────────────────
+# Kiwi build 输出使用 canonical 模型：顶层 ``ucp`` 键 + ``version`` + **services
+# map**（id → service）+ **capabilities map**（id → {version, spec, schema}）。
+# Kiwi 的 canonical 类型是 ``Record<string, Declaration[]>``——map 值是**声明
+# 数组**（validate.ts requireArray fail-closed）；其他发布者可能直接给 object。
+# 两种形式都接受：数组形式取首个 object 声明。
+# 标准解析器消费 ``specificationVersion`` + service 列表 + 每 capability 的
+# version/spec/schema——适配器把 canonical 模型归一化为标准形状，使下游
+# ``_knp_claims`` 对 Kiwi build 输出执行同样的 KNP 治理（缺 metadata → 拒）。
+
+
+def _first_declaration(value: Any) -> Any:
+    """Unwrap a canonical declaration map value.
+
+    Object form（其他发布者）原样返回；Kiwi canonical 的数组形式取首个元素；
+    空数组返回 ``None``。非 object 结果由调用方 fail-closed 处理（service →
+    ProfileValidationError；capability metadata → 仅 id/label 条目，KNP 拒）。
+    """
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _normalize_canonical_ucp(parsed: Any, *, canonical_domain: str = "") -> Any:
+    """Detect and normalize the canonical Kiwi UCP model to the standard shape.
+
+    Non-``ucp`` top-level input passes through unchanged.  The canonical model
+    (exact Kiwi ``buildKiwiVendorProfile`` shape):
+      - ``ucp.version`` → ``specificationVersion`` (pinned-version validation
+        is done by the caller against ``allowed_ucp_versions``);
+      - ``ucp.services`` **map** → the standard service **list**.  Each service
+        declaration is ``{version, spec, transport, endpoint}`` (no
+        capabilities/endpoints lists), so the adapter builds
+        ``endpoints=[{uri: endpoint, protocol: transport, version: version}]``
+        and defaults ``type`` to ``commerce``;
+      - capability ids are derived from ``ucp.capabilities`` **map** keys whose
+        prefix is ``service_id + "."`` (e.g. service
+        ``com.harrylabsj.kiwi.shopping`` → capability
+        ``com.harrylabsj.kiwi.shopping.negotiation``), or from an explicit
+        service ``capabilities`` list;
+      - per-capability ``{version, spec, schema}`` is injected into the owning
+        service's ``specifications`` as ``{id, label, version, specUrl,
+        schemaUrl}`` so ``_knp_claims`` sees per-capability metadata.  A
+        capability with missing metadata still emits an id/label-only entry so
+        KNP trust fails (never silently disappears).  ``spec``/``schema`` may be
+        external spec-registry URLs — they are carried on ``specifications`` and
+        are not domain-enforced (unlike ``documentationUri``/``openAPIDocument``);
+      - a missing ``serviceIdentity`` is derived from *canonical_domain* (the
+        standard parser requires a non-empty id/name).
+    """
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("ucp"), dict):
+        return parsed
+    ucp = parsed["ucp"]
+    version = ucp.get("version")
+    if not isinstance(version, str) or not version.strip():
+        raise ProfileValidationError("ucp.version is required (canonical Kiwi UCP model)")
+    services_map = ucp.get("services")
+    if not isinstance(services_map, dict) or not services_map:
+        raise ProfileValidationError("ucp.services must be a non-empty map (canonical Kiwi UCP model)")
+    capabilities_map = ucp.get("capabilities")
+    capabilities_map = capabilities_map if isinstance(capabilities_map, dict) else {}
+
+    standard_services: list[dict[str, Any]] = []
+    for svc_id, svc in services_map.items():
+        svc = _first_declaration(svc)
+        if not isinstance(svc, dict):
+            raise ProfileValidationError(
+                f"ucp.services.{svc_id}: expected a JSON object or declaration array"
+            )
+        converted: dict[str, Any] = {
+            "id": str(svc_id),
+            "type": str(svc.get("type") or "commerce"),
+        }
+        # capabilities：显式声明（list / inline dict）+ 从 root capabilities map
+        # 按 ``service_id + "."`` 前缀派生。Kiwi ``buildKiwiVendorProfile`` 的
+        # 服务声明不含 capabilities 列表——capability 是 root map 里以 service
+        # id 为前缀的完整 capability id（如 ``com.harrylabsj.kiwi.shopping`` →
+        # ``com.harrylabsj.kiwi.shopping.negotiation``）。
+        inline_caps: dict[str, Any] = {}
+        caps = svc.get("capabilities")
+        if isinstance(caps, dict):
+            for k, v in caps.items():
+                declaration = _first_declaration(v)
+                if isinstance(declaration, dict):
+                    inline_caps[str(k)] = declaration
+            cap_ids = list(inline_caps)
+        elif isinstance(caps, list):
+            cap_ids = [str(c) for c in caps]
+        else:
+            cap_ids = []
+        prefix = f"{svc_id}."
+        for cap_key in capabilities_map:
+            cap_key = str(cap_key)
+            if cap_key.startswith(prefix) and cap_key not in cap_ids:
+                cap_ids.append(cap_key)
+        converted["capabilities"] = cap_ids
+        # endpoints：显式 ``endpoints`` 列表，或 Kiwi 服务声明的
+        # ``endpoint`` + ``transport`` + ``version`` → 单个 endpoint。
+        if isinstance(svc.get("endpoints"), list):
+            converted["endpoints"] = svc["endpoints"]
+        else:
+            endpoint_uri = svc.get("endpoint")
+            if isinstance(endpoint_uri, str) and endpoint_uri.strip():
+                ep: dict[str, Any] = {
+                    "uri": endpoint_uri.strip(),
+                    "protocol": str(svc.get("transport") or "a2a").strip() or "a2a",
+                }
+                if isinstance(svc.get("version"), str) and svc["version"].strip():
+                    ep["version"] = svc["version"].strip()
+                converted["endpoints"] = [ep]
+            else:
+                converted["endpoints"] = []  # 无 endpoint → _validate_services 拒
+        for key in ("description", "documentationUri"):
+            if isinstance(svc.get(key), str):
+                converted[key] = svc[key]
+
+        # Per-capability metadata → service specifications (version/spec/schema)。
+        # 每个派生 capability 都生成条目（metadata 缺失时仅 id/label）——让
+        # _knp_claims 以「缺声明版本」拒绝，而不是静默消失。
+        specs: list[dict[str, Any]] = []
+        for cap_id in cap_ids:
+            meta = inline_caps.get(cap_id)
+            if not isinstance(meta, dict):
+                meta = _first_declaration(capabilities_map.get(cap_id))
+            entry: dict[str, Any] = {"id": cap_id, "label": cap_id}
+            if isinstance(meta, dict):
+                if isinstance(meta.get("version"), str) and meta["version"].strip():
+                    entry["version"] = meta["version"].strip()
+                for src_key, spec_key in (("spec", "specUrl"), ("schema", "schemaUrl")):
+                    if isinstance(meta.get(src_key), str) and meta[src_key].strip():
+                        entry[spec_key] = meta[src_key].strip()
+            specs.append(entry)
+        if specs:
+            converted["specifications"] = specs
+        standard_services.append(converted)
+
+    identity = ucp.get("serviceIdentity")
+    identity = identity if isinstance(identity, dict) else {}
+    if not str(identity.get("id") or "").strip():
+        identity = {"id": canonical_domain or "kiwi-agent", "name": canonical_domain or "kiwi-agent"}
+
+    standard: dict[str, Any] = {
+        "specificationVersion": version.strip(),
+        "serviceIdentity": identity,
+        "services": standard_services,
+    }
+    if isinstance(ucp.get("specifications"), list):
+        standard["specifications"] = ucp["specifications"]
+    return standard
+
+
 @dataclass(frozen=True)
 class UcpProfileResult:
     """Validated UCP Profile with public projection and derived rows."""
@@ -110,6 +261,10 @@ class UcpProfileParser:
         # 0. Bounds backstop (independent of the fetcher's limits)
         validate_json_bounds(parsed, max_depth=self._max_depth, max_nodes=self._max_nodes)
         canonical = canonical_domain_of(source_url)
+        # 审查 P2：Kiwi build 输出的 canonical 模型（顶层 ``ucp`` 键）先归一化
+        # 为标准形状（services/capabilities map → 内部 service 列表，每 capability
+        # 的 version/spec/schema 注入 specifications）。
+        parsed = _normalize_canonical_ucp(parsed, canonical_domain=canonical)
 
         # 1. Schema validate
         profile = require_mapping(parsed, "ucp_profile")
@@ -365,7 +520,10 @@ def _project_public(profile: dict[str, Any], secret_paths: frozenset[str]) -> di
                         continue
                     spbase = f"{base}.specifications.{j}"
                     projected_spec: dict[str, Any] = {}
-                    for key in ("id", "label", "version"):
+                    # specUrl/schemaUrl：canonical Kiwi 模型每 capability 的
+                    # spec/schema 引用（可指向外部 spec registry），供 _knp_claims
+                    # 校验 KNP metadata；非 URL 也按原样投影。
+                    for key in ("id", "label", "version", "specUrl", "schemaUrl"):
                         if key in sp and sp[key] is not None and not _skip(f"{spbase}.{key}"):
                             projected_spec[key] = sp[key]
                     if projected_spec:
@@ -386,7 +544,7 @@ def _project_public(profile: dict[str, Any], secret_paths: frozenset[str]) -> di
                 continue
             base = f"specifications.{j}"
             projected_top_spec: dict[str, Any] = {}
-            for key in ("id", "label", "version"):
+            for key in ("id", "label", "version", "specUrl", "schemaUrl"):
                 if key in sp and sp[key] is not None and not _skip(f"{base}.{key}"):
                     projected_top_spec[key] = sp[key]
             openapi = sp.get("openAPIDocument")

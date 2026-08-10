@@ -39,7 +39,6 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     append_catalog_audit,
-    get_catalog_agent_by_domain,
     list_catalog_agents_by_merchant,
     list_endpoints,
     new_catalog_agent_id,
@@ -53,6 +52,7 @@ from kiwi_catalog.agent_catalog.sqlite_repository import (
 )
 from kiwi_catalog.agent_catalog.state_domains import HANDOFF_DESTINATION_TYPES
 from kiwi_catalog.core.errors import ConflictError, PermissionDenied, ValidationError
+from kiwi_catalog.discovery._validation import canonical_domain_of, is_http_url, is_same_authority
 from kiwi_catalog.services.agent_catalog import get_catalog_agent_write_detail
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 
@@ -128,6 +128,53 @@ def _declared_profile_urls(conn: Any, catalog_agent_id: str) -> dict[str, str]:
     return declared
 
 
+def _purge_domain_bound_claims(conn: Any, catalog_agent_id: str) -> None:
+    """审查 P1-01：换域名时清除旧域名绑定的派生声明与证据。
+
+    商家重注册换新域名后，capabilities/skills（源自旧域名 profile 或旧注册
+    声明）、``agent_profile_snapshots``（旧域名 source_url）与
+    ``agent_verifications``（旧域名验证证据）不得继续绑定新域名——全部清除，
+    在新域名上重新验证。证据删除后 v0.3 §7.1 证据重算找不到旧 passed 行，
+    级别停在 DISCOVERED，旧域名证据无法把已验证级别复活到新域名下。
+    """
+    conn.execute(
+        "delete from agent_capabilities where catalog_agent_id = ?", (catalog_agent_id,)
+    )
+    conn.execute(
+        "delete from agent_skills where catalog_agent_id = ?", (catalog_agent_id,)
+    )
+    conn.execute(
+        "delete from agent_profile_snapshots where catalog_agent_id = ?", (catalog_agent_id,)
+    )
+    conn.execute(
+        "delete from agent_verifications where catalog_agent_id = ?", (catalog_agent_id,)
+    )
+
+
+def _purge_stale_profile_endpoints(conn: Any, catalog_agent_id: str, canonical: str) -> None:
+    """审查 P1-01：删除全部端点中不属于 canonical 域的旧行（任一 kind）。
+
+    与验证管线的 authority 语义一致（``is_same_authority`` 允许多级子域）：
+    换域名后旧端点在注册事务内立即清除，验证阶段不会再抓取旧域名 profile，
+    也不残留指向旧域名的路由端点。本次注册提供的、位于新域名（或其子域）
+    下的端点保留。
+    """
+    rows = conn.execute(
+        "select endpoint_id, url from agent_endpoints where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    ).fetchall()
+    stale: list[tuple[int]] = []
+    for r in rows:
+        url = str(r["url"] or "").strip()
+        if not url or not is_http_url(url):
+            stale.append((int(r["endpoint_id"]),))
+            continue
+        if not is_same_authority(canonical_domain_of(url), canonical):
+            stale.append((int(r["endpoint_id"]),))
+    if stale:
+        conn.executemany("delete from agent_endpoints where endpoint_id = ?", stale)
+
+
 def register_catalog_agent(
     conn: Any,
     *,
@@ -155,28 +202,57 @@ def register_catalog_agent(
     """
     canonical = normalize_canonical_domain(domain)
     merchant_id = str(merchant_id or "").strip()
+    # 审查 P1-01：换域名 = 信任边界重置——记录被更新 agent 的原 canonical_domain，
+    # 域名变更时清除旧域名绑定的派生数据（见下方 _purge_*）。
+    prior_domain: str | None = None
 
-    # 一商家一 agent（弱引用 schema 的业务约束）：merchant 已有一个 catalog
-    # agent 时拒绝新注册（数据层有部分唯一索引兜底，此处给明确错误）。
+    # 注册规则（2026-08-10 用户要求）：**一个域名可注册多个商家，一个商家
+    # 只能有一个 agent**。
+    # - 商家注册（merchant_id 非空）：以 merchant 为主键。商家名下已有 active
+    #   agent → **原地更新**（换域名 / card URL 都是合法 upsert，重注册不再 409）；
+    #   已有 suspended/rejected → 重新打开（审查 P3 语义）；无 → 新建。
+    #   域名不再全局唯一——不同商家可注册同一域名（schema v17 删域名唯一索引）。
+    # - 匿名注册（merchant_id 空）：无商家身份，保持一域一 agent（防匿名刷
+    #   同域名重复行）。
     if merchant_id:
         owned, _ = list_catalog_agents_by_merchant(conn, merchant_id)
-        # 审查 P3：治理处置（rejected/suspended）的旧绑定不挡重新注册——
-        # 该行的「重新打开」正是注册路径的语义，此前预检命中自身 → 永久
-        # ConflictError，merchant 无法带 merchant_id 恢复自己的 agent。
-        owned = [a for a in owned if a.get("administrative_state") not in RE_REGISTERABLE_ADMIN]
-        if owned:
-            raise ConflictError(
-                f"merchant {merchant_id} already has a catalog agent "
-                f"({owned[0]['catalog_agent_id']})"
-            )
-
-    # §17.4 cooldown: the same domain may only be registered once while the
-    # record is live.  行政终态（rejected / suspended）可重新注册（v0.3 §7.3）。
-    existing = get_catalog_agent_by_domain(conn, canonical)
-    if existing is not None and existing["administrative_state"] not in RE_REGISTERABLE_ADMIN:
-        raise ConflictError(f"domain {canonical} is already registered")
-
-    catalog_agent_id = str(existing["catalog_agent_id"]) if existing else new_catalog_agent_id()
+        target = next(
+            (a for a in owned if a.get("administrative_state") == "active"),
+            next(
+                (a for a in owned if a.get("administrative_state") in RE_REGISTERABLE_ADMIN),
+                None,
+            ),
+        )
+        if target is not None:
+            prior_domain = str(target.get("canonical_domain") or "").strip() or None
+        catalog_agent_id = (
+            str(target["catalog_agent_id"]) if target is not None else new_catalog_agent_id()
+        )
+    else:
+        # 审查 P2（v17 删域名唯一索引后）：匿名/域名级路径不能选中「最新任意
+        # merchant 行」（created_at 同秒时顺序不确定，且一域多商家后无法定义
+        # "该域名的 agent"）。显式冲突规则：
+        # - 域名下已有 merchant 绑定行 → ConflictError（商家域名，匿名不得
+        #   注册/复活，也不得经任意行抹除商家绑定）；
+        # - 仅匿名（未绑定）行：任一 active → Conflict（一域一 agent，防匿名
+        #   刷同域名重复行）；governed（suspended/rejected）唯一行 → 复用重开
+        #   （无 merchant 可抢绑；复活需 admin，handler 侧把关）。
+        rows = conn.execute(
+            "select * from catalog_agents where canonical_domain = ?", (canonical,)
+        ).fetchall()
+        if any(str(r["merchant_id"] or "").strip() for r in rows):
+            raise ConflictError(f"domain {canonical} is already registered by a merchant")
+        active_anon = [
+            r for r in rows if str(r["administrative_state"]) not in RE_REGISTERABLE_ADMIN
+        ]
+        if active_anon:
+            raise ConflictError(f"domain {canonical} is already registered")
+        existing = max(rows, key=lambda r: str(r["created_at"])) if rows else None
+        if existing is not None:
+            prior_domain = str(existing["canonical_domain"] or "").strip() or None
+        catalog_agent_id = (
+            str(existing["catalog_agent_id"]) if existing is not None else new_catalog_agent_id()
+        )
     try:
         upsert_catalog_agent(
             conn,
@@ -193,9 +269,25 @@ def register_catalog_agent(
             hosting_mode=normalize_hosting_mode(hosting_mode) or "direct",
         )
     except sqlite3.IntegrityError as exc:
-        # 审查 P2：check-then-act 竞态窗口（并发同域注册）由 migration v11
-        # 的部分唯一索引兜底——映射为 ConflictError 而非未类型化 500。
-        raise ConflictError(f"domain {canonical} is already registered (concurrent)") from exc
+        # 审查 P2：check-then-act 竞态窗口由数据层唯一索引兜底（v7 merchant
+        # 唯一索引；v11 域名唯一索引已于 v17 删除）——映射为 ConflictError
+        # 而非未类型化 500。
+        raise ConflictError("concurrent duplicate registration") from exc
+    # 重注册 = 重新打开：治理态（suspended/rejected）显式复位为 active——
+    # update 路径（_update_catalog_agent）不写 administrative_state，不复位
+    # 则商家重注册无法恢复自己的 agent（审查 P3「重新打开」语义）。
+    conn.execute(
+        "update catalog_agents set administrative_state = 'active'"
+        " where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    )
+    # 审查 P1-01：域名变更 → 清除旧域名绑定的声明/证据。先清 capabilities/
+    # skills/snapshots/verifications（下方 public 字段块会重新写入本次注册
+    # 提供的 fresh 值）；agent_card/ucp_profile 旧端点延迟到 endpoints 块
+    # 之后清除（只删不属于新域名的旧行，保留本次新端点）。
+    domain_changed = prior_domain is not None and prior_domain != canonical
+    if domain_changed:
+        _purge_domain_bound_claims(conn, catalog_agent_id)
     # merchants 影子行自维护（D4 修复）：搜索结果的 merchant 投影依赖它；
     # 无影子行时 projection 为空串、schema 校验失败（minLength 1）。
     if merchant_id:
@@ -261,6 +353,10 @@ def register_catalog_agent(
         })
     if endpoints:
         upsert_profile_endpoints(conn, catalog_agent_id, endpoints)
+    # 审查 P1-01：新端点已 upsert——现在清除全部端点中不属于新 canonical 域
+    # 的旧端点（保留本次提供的新域名端点）。
+    if domain_changed:
+        _purge_stale_profile_endpoints(conn, catalog_agent_id, canonical)
 
     append_catalog_audit(
         conn,
@@ -275,6 +371,27 @@ def register_catalog_agent(
             "ucp_profile_url_present": bool(endpoints and any(e["kind"] == "ucp_profile" for e in endpoints)),
         },
     )
+    if domain_changed:
+        # 审查 P1-01：换域名清除旧域名绑定数据 → 记录审计（旧域名、新域名、
+        # 清除的工件）。audit_events 保留清除事实，被删证据行仍可追溯。
+        append_catalog_audit(
+            conn,
+            catalog_agent_id,
+            actor,
+            "catalog_agent_domain_changed",
+            {
+                "previous_domain": prior_domain,
+                "canonical_domain": canonical,
+                "purged": [
+                    "agent_card_endpoints",
+                    "ucp_profile_endpoints",
+                    "capabilities",
+                    "skills",
+                    "profile_snapshots",
+                    "verifications",
+                ],
+            },
+        )
     # §24 funnel: a successful registration is the discovery event.
     record_funnel("discovery")
     return get_catalog_agent_write_detail(conn, catalog_agent_id)

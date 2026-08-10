@@ -75,7 +75,12 @@ from kiwi_catalog.agent_catalog.state_domains import (
 from kiwi_catalog.core.errors import ShoppingCliError, ValidationError
 from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
 from kiwi_catalog.db.session import SQLITE_BUSY_TIMEOUT_MS, encode_json, now_iso
-from kiwi_catalog.discovery._validation import ProfileValidationError
+from kiwi_catalog.discovery._validation import (
+    ProfileValidationError,
+    canonical_domain_of,
+    is_http_url,
+    is_same_authority,
+)
 from kiwi_catalog.discovery.agent_card import AgentCardParser, AgentCardResult
 from kiwi_catalog.discovery.cache import compute_content_hash
 from kiwi_catalog.discovery.fetcher import (
@@ -517,6 +522,25 @@ class VerificationService:
         urls = {ep["kind"]: ep["url"] for ep in endpoints if ep["kind"] in ("agent_card", "ucp_profile")}
         if set(urls) != {"agent_card", "ucp_profile"}:
             raise _ProfileFailure(REJECTED, "missing agent_card or ucp_profile endpoints")
+        # 审查 P1-01：verification 要求 canonical domain / authority 一致——
+        # 抓取与索引之前强制 agent_card/ucp_profile 端点落在 agent 存储的
+        # canonical_domain（或其子域）下。否则残留旧域名端点会让管线抓取并
+        # 索引旧域名 profile（capabilities/skills/endpoints 被旧域名数据重写，
+        # 正是换域名后禁止残留的数据）。
+        stored_domain = str(
+            require_catalog_agent(self._conn, catalog_agent_id).get("canonical_domain") or ""
+        ).strip()
+        if not stored_domain:
+            raise _ProfileFailure(
+                REJECTED,
+                "catalog agent has no canonical_domain; profile endpoints cannot be validated",
+            )
+        for kind, url in urls.items():
+            if not is_http_url(url) or not is_same_authority(canonical_domain_of(url), stored_domain):
+                raise _ProfileFailure(
+                    REJECTED,
+                    f"{kind} endpoint '{url}' is not under canonical domain '{stored_domain}'",
+                )
 
         fetched: dict[str, Any] = {}
         for kind in ("agent_card", "ucp_profile"):
@@ -636,14 +660,39 @@ class VerificationService:
         *,
         from_level: str | None = None,
     ) -> StageResult:
-        """HTTPS domain-control (§6 MVP identity mechanism；v0.3 级别语义）。"""
-        canonical_domain = profiles.card.canonical_domain
+        """HTTPS domain-control (§6 MVP identity mechanism；v0.3 级别语义）。
+
+        审查 P1-01：domain-control 必须对 agent **存储的** canonical_domain
+        验证，而不是 profile 自己声明的域名——``profiles.card.canonical_domain``
+        源自抓取 URL，换域名后残留旧端点会让验证对旧域名成功。declare URL
+        落在存储域名之外 → 验证失败（fail-closed）。无 canonical_domain 的
+        agent 无法证明域名控制（rejected）。
+        """
+        agent = require_catalog_agent(self._conn, catalog_agent_id)
+        stored_domain = str(agent.get("canonical_domain") or "").strip()
+        details: dict[str, Any] = {
+            "method": "https_domain_control",
+            "domain_control_method": self._policy.domain_control_method,
+            "canonical_domain": stored_domain,
+        }
+        if not stored_domain:
+            evidence = _failed_evidence(
+                "domain_control",
+                "catalog agent has no canonical_domain; domain control cannot be verified",
+                details,
+            )
+            target = self._degrade_level_to_supported(agent, from_level=from_level)
+            self._apply_level(agent, target)
+            vid = self._persist_verification(catalog_agent_id, evidence, target)
+            return StageResult(
+                "domain_control", "rejected", target, reason=evidence.reason,
+                verification_id=vid, evidence=_evidence_payload(evidence, self._policy),
+            )
         declared = {
             "agent_card": profiles.urls["agent_card"],
             "ucp_profile": profiles.urls["ucp_profile"],
         }
-        evidence = self._identity_verifier.verify_domain_control(canonical_domain, declared=declared)
-        agent = require_catalog_agent(self._conn, catalog_agent_id)
+        evidence = self._identity_verifier.verify_domain_control(stored_domain, declared=declared)
         if evidence.passed:
             target = self._level_machine.transition(current, DOMAIN_VERIFIED)
             self._apply_level(agent, target)
@@ -668,11 +717,18 @@ class VerificationService:
         *,
         from_level: str | None = None,
     ) -> StageResult:
-        """Agent identity threshold (§6 AGENT_VERIFIED；v0.3 级别语义）。"""
-        evidence = self._trust_evaluator.evaluate_agent_identity(
-            profiles.card, profiles.ucp, profiles.card.canonical_domain
-        )
+        """Agent identity threshold (§6 AGENT_VERIFIED；v0.3 级别语义）。
+
+        审查 P1-01：身份绑定以 agent **存储的** canonical_domain 为准——
+        否则卡片/ucp 的 identity URL 会绑定到 profile 自称的域名（换域名后
+        残留旧 profile 时绑定旧域名）。空存储域名回退到 profile 声明的域名
+        （granular 入口兼容），主链路在 domain 阶段已 fail-closed。
+        """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
+        stored_domain = str(agent.get("canonical_domain") or "").strip()
+        evidence = self._trust_evaluator.evaluate_agent_identity(
+            profiles.card, profiles.ucp, stored_domain or profiles.card.canonical_domain
+        )
         if evidence.passed:
             target = self._level_machine.transition(current, AGENT_VERIFIED)
             self._apply_level(agent, target)
@@ -697,10 +753,11 @@ class VerificationService:
         from_level: str | None = None,
     ) -> StageResult:
         """Commerce capability intersection + §5.1 publish-state invariant."""
-        evidence = self._trust_evaluator.evaluate_commerce_capabilities(
-            profiles.card, profiles.ucp, profiles.card.canonical_domain
-        )
         agent = require_catalog_agent(self._conn, catalog_agent_id)
+        stored_domain = str(agent.get("canonical_domain") or "").strip()
+        evidence = self._trust_evaluator.evaluate_commerce_capabilities(
+            profiles.card, profiles.ucp, stored_domain or profiles.card.canonical_domain
+        )
         if not evidence.passed:
             # 审查 P1-7：同 _stage_domain，降级基准 = run 原级别。
             target = self._degrade_level_to_supported(agent, from_level=from_level)

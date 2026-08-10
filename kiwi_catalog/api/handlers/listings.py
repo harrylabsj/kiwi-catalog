@@ -44,7 +44,7 @@ from kiwi_catalog.listings.serialization import (
     merchant_projection,
 )
 from kiwi_catalog.listings.service import owner_agent_merchant_id
-from kiwi_catalog.services import usage_metrics
+from kiwi_catalog.services import buyer_search_events, usage_metrics
 
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
@@ -98,6 +98,37 @@ def _listing_request_hash(values: dict[str, Any]) -> str:
 # ── Read handlers ───────────────────────────────────────────────────────────
 
 
+_LISTING_SEARCH_FILTER_KEYS = (
+    "category",
+    "region",
+    "tag",
+    "listing_type",
+    "handoff_destination_type",
+)
+
+
+def _record_listing_search_event(
+    conn: Any, query: dict[str, Any], results: list[dict[str, Any]]
+) -> None:
+    """买家搜 listing 埋点（运营数据源）：query/filters + 返回摘要（前 N 条）。"""
+    buyer_search_events.record_search_event(
+        conn,
+        search_type="listing",
+        query=str(query.get("q") or ""),
+        filters={
+            k: query[k] for k in _LISTING_SEARCH_FILTER_KEYS if str(query.get(k) or "").strip()
+        },
+        result_count=len(results),
+        result_summary=[
+            {
+                "listing_id": (r.get("listing") or {}).get("listing_id") or "",
+                "title": (r.get("listing") or {}).get("title") or "",
+            }
+            for r in (results or [])[:buyer_search_events.SUMMARY_CAP]
+        ],
+    )
+
+
 def v1_search_listings(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
     """GET /v1/listings/search —— 结构化过滤 + 确定性排序 + cursor。"""
     limit = result_limit(query.get("limit"), default=20)
@@ -125,6 +156,7 @@ def v1_search_listings(db_path: str | Path, query: dict[str, Any]) -> dict[str, 
                     agent_projection(dict(agent_row) if agent_row is not None else None),
                 )
             )
+        _record_listing_search_event(conn, normalized, results)
         return {
             "ok": True,
             "results": results,

@@ -571,21 +571,14 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         self.assertTrue(issued["merchant_id"].startswith("mkt_"))
         return issued["merchant_id"], issued["token"]
 
-    def _agent_by_domain(self, domain: str) -> dict:
-        from kiwi_catalog.agent_catalog.sqlite_repository import get_catalog_agent_by_domain
-
-        with db_session(self.db_path) as conn:
-            return get_catalog_agent_by_domain(conn, domain)
-
     def test_foreign_merchant_token_cannot_revive_or_steal_governed_agent(self) -> None:
-        """审查 P1-A（2026-08-10 复验复现）：商户带自己 token 不得解禁并
-        抢绑他人被治理 agent。
+        """审查 P2（v17 一域多商家后）：外来商户 token 不得复活/抢绑他人被治理
+        agent——它只会在共享域名上新建**自己的** agent，原 merchant 的治理行
+        保持不变。
 
-        历史 bug：守卫只挡匿名路径（actor=="cli"）；merchant 分支经
-        _register_actor 用自己 token 通过后直接放行——upsert 复位
-        administrative_state 并把 merchant_id 改绑为攻击者（HTTP 层实验
-        复现：suspended→active、merchant 改绑）。修复：治理 agent 重注册
-        时所有非 admin actor 必须证明【既有绑定商户】的控制权。
+        历史 bug（P1-A）：旧 merchant 分支经域名级查询复用被治理行并改绑
+        merchant_id；修复后 merchant 路径按商户主键只选自己的 agent，治理行的
+        处置/绑定不可被他人 token 触碰。
         """
         from kiwi_catalog.agent_catalog.sqlite_repository import set_state_domains
         from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
@@ -612,34 +605,49 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                 ).encode(),
             )
         self.assertEqual(status, 200, payload)
+        a_agent_id = payload["agent"]["catalog_agent_id"]
         with db_session(self.db_path) as conn:
-            set_state_domains(
-                conn,
-                payload["agent"]["catalog_agent_id"],
-                administrative_state="suspended",
-            )
+            set_state_domains(conn, a_agent_id, administrative_state="suspended")
 
-        # 外来商户 B 带自己 token 重注册同一 domain → 403，处置与绑定不变
+        # 外来商户 B 带自己 token 重注册同一 domain → 200（共享域名多商家规则）；
+        # 但 B 得到的是自己的新 agent——A 的治理行不被复活、不被改绑。
         merchant_b, token_b = self._issue_merchant_token("b@example.com", "b-merchant.example")
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            "/v1/agents/register",
-            json.dumps(
-                {
-                    **REGISTER_BODY,
-                    "domain": "a-merchant.example",
-                    "merchant_id": merchant_b,
-                    "owner_token": token_b,
-                }
-            ).encode(),
-        )
-        self.assertEqual(status, 403, payload)
-        row = self._agent_by_domain("a-merchant.example")
-        self.assertEqual(row["administrative_state"], "suspended")
-        self.assertEqual(row["merchant_id"], merchant_a)
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            status, payload = _call_http(
+                self.app,
+                "POST",
+                "/v1/agents/register",
+                json.dumps(
+                    {
+                        **REGISTER_BODY,
+                        "domain": "a-merchant.example",
+                        "merchant_id": merchant_b,
+                        "owner_token": token_b,
+                    }
+                ).encode(),
+            )
+        self.assertEqual(status, 200, payload)
+        b_agent_id = payload["agent"]["catalog_agent_id"]
+        self.assertNotEqual(b_agent_id, a_agent_id)
+        with db_session(self.db_path) as conn:
+            a_row = conn.execute(
+                "select administrative_state, merchant_id from catalog_agents"
+                " where catalog_agent_id = ?",
+                (a_agent_id,),
+            ).fetchone()
+            b_row = conn.execute(
+                "select administrative_state, merchant_id from catalog_agents"
+                " where catalog_agent_id = ?",
+                (b_agent_id,),
+            ).fetchone()
+        self.assertEqual(a_row["administrative_state"], "suspended")
+        self.assertEqual(a_row["merchant_id"], merchant_a)
+        self.assertEqual(b_row["administrative_state"], "active")
+        self.assertEqual(b_row["merchant_id"], merchant_b)
 
-        # 绑定商户 A 带自己 token 重注册 → 复活成功，绑定保持 A
+        # 绑定商户 A 带自己 token 重注册 → 复活自己的 agent（同 id），绑定保持 A
         with mock.patch.object(
             handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
         ):
@@ -657,9 +665,15 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                 ).encode(),
             )
         self.assertEqual(status, 200, payload)
-        row = self._agent_by_domain("a-merchant.example")
-        self.assertEqual(row["administrative_state"], "active")
-        self.assertEqual(row["merchant_id"], merchant_a)
+        self.assertEqual(payload["agent"]["catalog_agent_id"], a_agent_id)
+        with db_session(self.db_path) as conn:
+            a_row = conn.execute(
+                "select administrative_state, merchant_id from catalog_agents"
+                " where catalog_agent_id = ?",
+                (a_agent_id,),
+            ).fetchone()
+        self.assertEqual(a_row["administrative_state"], "active")
+        self.assertEqual(a_row["merchant_id"], merchant_a)
 
     def test_reopen_after_suspend_syncs_three_domains(self) -> None:
         """suspended → admin 重注册（可恢复终态 §7.3）→ 三域与折叠一致（P1 回归）。

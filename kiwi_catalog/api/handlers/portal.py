@@ -421,6 +421,90 @@ document.getElementById('list').addEventListener('click', e => {
 
 
 
+def portal_admin_searches() -> dict[str, Any]:
+    """买家搜索事件页——默认不对外公布（env 开关，与审核后台一致）。
+
+    表格展示最近买家搜索：时间/类型/搜索词/过滤/结果数（命中 vs 未命中
+    徽标）/返回摘要。未命中（result_count==0）= 需求缺口信号。
+    """
+    if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {"__html__": _not_found_html(), "__status__": 404}
+    body = (
+        _ADMIN_NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Admin</div>
+  <h2>买家搜索事件</h2>
+  <p class="lead">买家通过 catalog 搜索 agent / listing 的记录。未命中（结果数 0）= 需求缺口信号。</p>
+  <div class="card form-card">
+    <label for="admin_token">Admin Token</label>
+    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
+    <label for="search_limit" style="margin-top:10px">条数</label>
+    <input id="search_limit" type="number" value="100" min="1" max="500">
+    <button class="btn-form" id="load">加载搜索记录</button>
+    <div id="out"></div>
+    <div id="list"></div>
+  </div>
+</div></section>
+<style>
+.search-table{width:100%;border-collapse:collapse;margin-top:16px;font-size:0.86rem}
+.search-table th,.search-table td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+.search-table th{background:var(--kiwi-100);color:var(--kiwi-800)}
+.badge-hit{color:#0a7d3c;font-weight:700}
+.badge-miss{color:#b02a37;font-weight:700}
+</style>
+<script>
+function renderEvents(events) {
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  if (!events.length) { list.innerHTML = '<p class="small">暂无搜索记录</p>'; return; }
+  const table = document.createElement('table');
+  table.className = 'search-table';
+  table.innerHTML = '<thead><tr><th>时间(UTC)</th><th>类型</th><th>搜索词</th><th>过滤</th><th>结果</th><th>返回摘要</th></tr></thead>';
+  events.forEach(e => {
+    const hit = (e.result_count || 0) > 0;
+    const filters = Object.entries(e.filters || {})
+      .map(([k, v]) => k + '=' + v).join(', ');
+    const summary = (e.result_summary || []).slice(0, 5)
+      .map(s => (s.title || s.display_name || s.catalog_agent_id || s.listing_id || ''))
+      .filter(Boolean).join(' · ');
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="small mono">' + escHtml(e.created_at || '') + '</td>'
+      + '<td>' + escHtml(e.search_type || '') + '</td>'
+      + '<td><strong>' + escHtml(e.query || '') + '</strong></td>'
+      + '<td class="small">' + escHtml(filters) + '</td>'
+      + '<td>' + (hit
+          ? '<span class="badge-hit">命中 ' + escHtml(e.result_count) + '</span>'
+          : '<span class="badge-miss">未命中</span>') + '</td>'
+      + '<td class="small">' + escHtml(summary) + '</td>';
+    table.appendChild(tr);
+  });
+  list.appendChild(table);
+}
+function loadSearches() {
+  const token = document.getElementById('admin_token').value.trim();
+  const limit = document.getElementById('search_limit').value || 100;
+  const out = document.getElementById('out');
+  out.className = ''; out.textContent = '';
+  getJson('/v1/admin/searches?limit=' + encodeURIComponent(limit), token).then(r => {
+    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
+    renderEvents(r.results || []);
+  });
+}
+document.getElementById('load').addEventListener('click', loadSearches);
+</script>
+"""
+        + _FOOTER
+    )
+    return _page("买家搜索事件", body)
+
+
+
 def portal_dashboard() -> dict[str, Any]:
     """运营 Dashboard——默认不对外公布（env 开关，与审核后台一致）。"""
     if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
