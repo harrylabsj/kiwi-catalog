@@ -239,6 +239,21 @@ def token_request(
     """
     _ctx, conn, account = _require_session(db_path, payload)
     try:
+        # 审查 P3：token-request 此前无限流——被拒/被吊销商户可循环重申请
+        # 无限刷 admin 工单（每张需人工 reject）。复用登录限流的 env 值
+        # （0 = 禁用），按账号维度限流。
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"token-request:{str(account.get('id') or account.get('email') or 'unknown')}",
+                limit=limit,
+                window_seconds=900,
+                description=f"token request ({limit}/15min per account)",
+            )
         result = accounts_service.request_token(
             conn,
             account,
