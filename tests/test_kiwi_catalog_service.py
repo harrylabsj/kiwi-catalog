@@ -36,6 +36,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.api.route_registry import catalog_route_info
@@ -83,6 +84,16 @@ class KiwiCatalogServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.db_file = Path(self.tmp.name) / "catalog.sqlite"
+        # These tests cover routing/schema behavior only.  Do not start the
+        # real verification worker: its background SQLite connection can race
+        # TemporaryDirectory cleanup on CI after a successful registration.
+        stub_task = type("_StubTask", (), {"task_id": ""})()
+        self._enqueue_patch = mock.patch(
+            "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
+            return_value=stub_task,
+        )
+        self._enqueue_patch.start()
+        self.addCleanup(self._enqueue_patch.stop)
         self.app = create_catalog_app(self.db_file)
 
     def tearDown(self) -> None:
