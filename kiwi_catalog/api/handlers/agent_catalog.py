@@ -435,22 +435,26 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
         try:
             merchant_id = str(payload.get("merchant_id") or "").strip()
             actor = _register_actor(conn, payload, merchant_id)
-            # 审查 P1-4b：重注册已治理 agent（suspended / rejected）= 复活，
-            # 必须证明控制权——admin token，或既有绑定商户的 owner token。
-            # 匿名重注册不得静默撤销 admin 处置（suspend 端点「唯一出向
-            # admin reinstate」语义）；新域注册不受影响。
+            # 审查 P1-4b + P1-A（2026-08-10 复验复现）：重注册已治理 agent
+            # （suspended / rejected）= 复活，任何非 admin actor 都必须证明
+            # 控制权——admin token，或【既有绑定商户】的 owner token。
+            # 原守卫只挡匿名（actor=="cli"）路径：商户带自己 token（走
+            # _register_actor 的 merchant 分支）即可解禁并抢绑任意被治理
+            # agent。控制权证明对象必须是既有绑定商户而非请求声称的
+            # merchant_id；证明通过后强制保持原绑定，禁止借 token 抹除/改绑。
             existing_row = get_catalog_agent_by_domain(conn, canonical)
             if (
                 existing_row is not None
                 and str(existing_row.get("administrative_state") or "")
                 in agent_catalog_writes.RE_REGISTERABLE_ADMIN
-                and actor == "cli"
             ):
-                bound = str(existing_row.get("merchant_id") or "").strip()
-                if bound:
-                    api_auth.require_merchant_token(payload, bound, conn)
-                else:
-                    api_auth.require_admin_token(payload)
+                if actor != "admin":
+                    bound = str(existing_row.get("merchant_id") or "").strip()
+                    if bound:
+                        api_auth.require_merchant_token(payload, bound, conn)
+                        merchant_id = bound
+                    else:
+                        api_auth.require_admin_token(payload)
             result = agent_catalog_writes.register_catalog_agent(
                 conn,
                 domain=canonical,
