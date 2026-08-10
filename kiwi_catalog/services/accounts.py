@@ -394,15 +394,14 @@ def request_token(
     purpose: str = "",
 ) -> dict[str, Any]:
     """"我的"里申请 token：已有 active → 返回现状；已有 pending 工单 →
-    提示等待；否则用本次填写的商家基本信息建工单（注册极简，基本信息
+    提示等待；被拒后可重新申请（新建 pending 工单，原被拒工单保留为
+    审计记录）；否则用本次填写的商家基本信息建工单（注册极简，基本信息
     在此一步补齐），并回填账户基本信息（商家名称/电话）。"""
     view = account_view(conn, account)
     if view["token"] and view["token"]["status"] == "active":
         return {"status": "active", "message": "token already issued", **view}
     if view["application"] and view["application"]["status"] == "pending":
         return {"status": "pending", "message": "application pending review", **view}
-    if view["application"] and view["application"]["status"] == "rejected":
-        raise ConflictError("previous application was rejected; contact operations")
     from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
 
     domain = normalize_canonical_domain(domain)
