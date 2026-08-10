@@ -591,6 +591,12 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
         try:
             agent = require_catalog_agent(conn, catalog_agent_id)
             actor = _require_catalog_write_auth(conn, agent, payload)
+            # 审查 P2-O：限流计数 + 幂等 claim 的写事务先落盘——此前这两笔写
+            # 之后才做 2×30s 网络抓取，抓取窗口内 SQLite 写锁被持有（WAL 单
+            # 写者 + busy_timeout 5s），并发 register/publish/withdraw 全部
+            # database is locked → 500（攻击者可匿名放大）。先 commit 释放，
+            # 抓取窗口处于无写事务状态，不阻塞并发写者。
+            conn.commit()
             service = _verification_service(db_path, conn)
             result = service.verify(catalog_agent_id, actor=actor)
             # 复用外层事务连接读三域（验证写入未 commit，跨连接读不到）。
