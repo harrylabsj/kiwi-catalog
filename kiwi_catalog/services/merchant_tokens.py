@@ -108,7 +108,6 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
     if str(row["status"]) != "pending":
         raise ConflictError(f"application {application_id} already {row['status']}")
     agent_name = str(row["agent_name"])
-    merchant_id = new_platform_merchant_id(agent_name)
     now = now_iso()
     # 账户基本信息（v16）：商家名称优先用账户已填值。
     # 公开路径提交的工单 account_id=0——按 contact_email 兜底关联账号
@@ -121,6 +120,21 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         ).fetchone()
         if linked is not None:
             account_id = int(linked["account_id"])
+    # 审查 BUG-09：merchant_id 是稳定身份，token 是可轮换/撤销凭据——已有
+    # merchant_id 的账户重新获批（revoked→reapply→approve）必须复用原 ID
+    # 并重新签发 active token；否则旧 ID 下的 catalog_agents /
+    # commerce_listings / 影子 merchants / 审计身份全部脱离商家控制（此前
+    # 无条件 new_platform_merchant_id 并覆盖账户绑定）。只有无既有 ID 的
+    # 首次批准才新建。revoke 不清账户绑定，此处来源可靠。
+    existing_merchant_id = ""
+    if account_id:
+        account_merchant_row = conn.execute(
+            "select merchant_id from merchant_accounts where account_id = ?",
+            (account_id,),
+        ).fetchone()
+        if account_merchant_row is not None:
+            existing_merchant_id = str(account_merchant_row["merchant_id"] or "").strip()
+    merchant_id = existing_merchant_id or new_platform_merchant_id(agent_name)
     display_name = agent_name
     if account_id:
         account_row = conn.execute(

@@ -426,6 +426,65 @@ class AccountsApiTest(unittest.TestCase):
             ).fetchall()
         self.assertEqual([r["status"] for r in rows], ["rejected", "pending"])
 
+    def test_reapproval_reuses_merchant_id(self) -> None:
+        """审查 BUG-09：revoked→reapply→approve 必须复用原 merchant_id。
+
+        此前无条件 new_platform_merchant_id 并覆盖账户绑定——旧 ID 下的
+        catalog_agents / commerce_listings / 影子 merchants / 审计身份全部
+        脱离商家控制（商户无法用新 token 管理旧资源）。merchant_id 是稳定
+        身份，token 是可轮换/撤销凭据。
+        """
+        from kiwi_catalog.db.session import db_session
+
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        # 首次申请 → 批准
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        first = self._approve_first_application()
+        merchant_id = first["merchant_id"]
+        self.assertTrue(merchant_id.startswith("mkt_"))
+
+        # 吊销（token 失效，merchant_id 保留）
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            f"/v1/merchants/{merchant_id}/revoke",
+            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+
+        # 重新申请 → 批准 → 同一 merchant_id（复用而非新建）
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        with db_session(self.db_path) as conn:
+            app_id = conn.execute(
+                "select application_id from merchant_applications"
+                " order by application_id desc limit 1"
+            ).fetchone()["application_id"]
+        second = self._approve_application_by_id(app_id)
+        self.assertEqual(second["merchant_id"], merchant_id, "重批准必须复用原 merchant_id")
+        self.assertNotEqual(second["token"], first["token"], "token 是重新签发的凭据")
+
+        # 新 token active；旧资源（同 merchant_id）仍在控制面下
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select status from merchant_tokens where merchant_id = ?", (merchant_id,)
+            ).fetchone()
+        self.assertEqual(row["status"], "active")
+
     # ── 账户基本信息 ───────────────────────────────────────────────────────
 
     def test_profile_update_and_view(self) -> None:
