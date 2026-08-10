@@ -15,7 +15,24 @@ permissions:
   id-token: write   # PyPI Trusted Publisher
 
 jobs:
+  quality:
+    # 审查 P3：发布前必须过完整质量门禁（此前 tag push 直接 publish——
+    # GitHub Actions 无跨 workflow 依赖，CI 未绿也能发布任意 commit 构建）。
+    # 与 ci.yml 同一套命令（ruff + mypy + pytest），防止"测试红照发"。
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.10.6"
+          enable-cache: true
+      - run: uv run --locked python -m ruff check kiwi_catalog tests scripts
+      - run: uv run --locked python -m mypy kiwi_catalog
+      - run: uv run --locked python -m pytest tests/ -q
+
   publish:
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

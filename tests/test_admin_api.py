@@ -201,6 +201,29 @@ class AdminApiTest(unittest.TestCase):
         self.assertEqual(today["buyer_listing_search"], 1)
         self.assertEqual(today["listing_publish"], 1)
 
+    def test_dashboard_non_numeric_query_is_400_not_500(self) -> None:
+        """审查 P3：非数字 days/limit 此前 int() 抛 ValueError → 未类型化 500。"""
+        status, payload = _call_http(
+            self.app, "GET", "/v1/admin/dashboard?days=abc",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("days", payload.get("error", ""))
+
+        status, payload = _call_http(
+            self.app, "GET", "/v1/admin/merchants?limit=abc",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("limit", payload.get("error", ""))
+
+        # 负数同样拒绝（非负整数语义）
+        status, payload = _call_http(
+            self.app, "GET", "/v1/admin/dashboard?days=-1",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 400, payload)
+
     def test_dashboard_self_check_metric(self) -> None:
         seeded = self._seed_merchant()
         _call_http(self.app, "GET", f"/v1/merchants/self?owner_token={seeded['token']}")
