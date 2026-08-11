@@ -172,7 +172,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── 注册 ───────────────────────────────────────────────────────────────
 
     def test_register_creates_account_no_application_yet(self) -> None:
-        """极简注册：建账号，商家工单在申请令牌时才创建。"""
+        """极简注册：建账号即分配 merchant_id，商家工单在申请令牌时才创建。"""
         session, _ = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
@@ -181,7 +181,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(payload["email"], "ops@acme.example")
         self.assertIsNone(payload["application"])  # 未申请令牌，无工单
         self.assertIsNone(payload["token"])
-        self.assertEqual(payload["merchant_id"], "")
+        # 注册完成即分配平台 merchant_id（与审批签发同一格式 mkt_<slug>_<rand>）
+        self.assertRegex(payload["merchant_id"], r"^mkt_[a-z0-9-]+_.+")
 
     def test_register_duplicate_email_conflicts(self) -> None:
         self._register()

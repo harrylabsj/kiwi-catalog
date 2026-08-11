@@ -115,11 +115,12 @@ class MerchantShoppingHandlersTest(unittest.TestCase):
         self.assertIn("上传商品", page["__html__"])
         # 免费通道文案：免费 10 件 + 超限申请令牌
         self.assertIn("免费", page["__html__"])
-        self.assertIn("mkt_free_", page["__html__"])
+        # 临时商家 id 方案已移除：商品一律挂在注册即分配的真实 merchant_id 下
+        self.assertNotIn("mkt_free_", page["__html__"])
 
 
 class FreeTierShoppingTest(unittest.TestCase):
-    """免费通道：无 owner token 的账号会话 + mkt_free_<account_id> 临时商家 id。"""
+    """免费通道：无 owner token 的账号会话 + 注册即分配的 merchant_id。"""
 
     def setUp(self) -> None:
         env_patch = mock.patch.dict(
@@ -135,10 +136,12 @@ class FreeTierShoppingTest(unittest.TestCase):
         env_patch.start()
         self.addCleanup(env_patch.stop)
         self.db = _make_db()
-        self.account_id, self.session = self._make_account("free@acme.example")
+        self.account_id, self.merchant_id, self.session = self._make_account(
+            "free@acme.example"
+        )
 
-    def _make_account(self, email: str) -> tuple[int, str]:
-        """注册账号并签发会话，返回 (account_id, session_token)。"""
+    def _make_account(self, email: str) -> tuple[int, str, str]:
+        """注册账号并签发会话，返回 (account_id, merchant_id, session_token)。"""
         conn = open_connection(self.db)
         try:
             account = accounts_service.register_account(
@@ -146,43 +149,86 @@ class FreeTierShoppingTest(unittest.TestCase):
             )
             session = accounts_service.create_session(conn, int(account["account_id"]))
             conn.commit()
-            return int(account["account_id"]), session
+            return int(account["account_id"]), str(account["merchant_id"]), session
         finally:
             conn.close()
 
-    def test_free_merchant_id_helper(self) -> None:
-        self.assertEqual(merchant_shopping.free_merchant_id(42), "mkt_free_42")
+    def test_registration_assigns_merchant_id(self) -> None:
+        """注册完成即分配 merchant_id，格式与审批签发一致（mkt_<slug>_<rand>），且幂等。"""
+        self.assertRegex(self.merchant_id, r"^mkt_[a-z0-9-]+_.+")
+        conn = open_connection(self.db)
+        try:
+            # 幂等：重复调用不重新分配
+            self.assertEqual(
+                accounts_service.ensure_merchant_id(conn, self.account_id),
+                self.merchant_id,
+            )
+        finally:
+            conn.close()
+
+    def test_existing_account_backfilled_on_session_resolve(self) -> None:
+        """存量无 merchant_id 的账号：会话解析时懒回填，回填后保持稳定。"""
+        conn = open_connection(self.db)
+        try:
+            conn.execute(
+                "update merchant_accounts set merchant_id = '' where account_id = ?",
+                (self.account_id,),
+            )
+            conn.commit()
+            account = accounts_service.resolve_session(conn, self.session)
+            self.assertIsNotNone(account)
+            backfilled = str(account["merchant_id"])
+            self.assertRegex(backfilled, r"^mkt_[a-z0-9-]+_.+")
+            # 落库 + 再次解析保持同一 id（不重复分配）
+            row = conn.execute(
+                "select merchant_id from merchant_accounts where account_id = ?",
+                (self.account_id,),
+            ).fetchone()
+            self.assertEqual(str(row["merchant_id"]), backfilled)
+            again = accounts_service.resolve_session(conn, self.session)
+            self.assertEqual(str(again["merchant_id"]), backfilled)
+        finally:
+            conn.close()
 
     def test_session_auth_free_tier_crud(self) -> None:
-        """账号会话 + 临时商家 id：list/create/update 走代理凭据调 shopping-cli。"""
-        free_id = merchant_shopping.free_merchant_id(self.account_id)
+        """账号会话 + 自己的 merchant_id：list/create/update 走代理凭据调 shopping-cli。"""
         payload = {"kiwi_session": self.session}
         calls: list[tuple[str, str, str]] = []
+        bodies: list[dict] = []
 
         def fake_request(method: str, path: str, token: str, body: dict | None = None) -> dict:
             calls.append((method, path, token))
+            if body is not None:
+                bodies.append(body)
             if method == "GET":
                 return {"results": [{"sku": "VQ-001"}]}
             return {"ok": True}
 
         with mock.patch.object(merchant_shopping, "_shopping_request", fake_request):
-            res = handlers.list_products(self.db, free_id, payload)
+            res = handlers.list_products(self.db, self.merchant_id, payload)
             self.assertTrue(res["ok"])
             self.assertEqual(res["results"], [{"sku": "VQ-001"}])
             res = handlers.create_product(
-                self.db, free_id, {**payload, "sku": "VQ-001", "title": "t", "price": 1, "stock": 1}
+                self.db,
+                self.merchant_id,
+                {**payload, "sku": "VQ-001", "title": "t", "price": 1, "stock": 1},
             )
             self.assertTrue(res["ok"])
-            res = handlers.update_product(self.db, free_id, "VQ-001", {**payload, "title": "t2"})
+            res = handlers.update_product(
+                self.db, self.merchant_id, "VQ-001", {**payload, "title": "t2"}
+            )
             self.assertTrue(res["ok"])
         # 三次调用都以共享代理凭据为 Bearer token
         self.assertEqual([c[2] for c in calls], ["proxy-secret"] * 3)
-        # create/update 的 body 带临时商家 id（GET 经 query string）
-        self.assertIn(f"merchant_id={free_id}", calls[0][1])
+        # 商品挂在账号真实 merchant_id 下（GET 经 query string，POST/PATCH 经 body）
+        self.assertIn(f"merchant_id={self.merchant_id}", calls[0][1])
+        self.assertEqual([b["merchant_id"] for b in bodies], [self.merchant_id] * 2)
+        # 会话凭据不转发给 shopping-cli
+        for body in bodies:
+            self.assertNotIn("kiwi_session", body)
 
     def test_quota_403_guidance_propagates(self) -> None:
         """shopping-cli 配额 403 的引导文案原样透传到 handler 响应错误。"""
-        free_id = merchant_shopping.free_merchant_id(self.account_id)
         guidance = "免费额度（10 件商品）已用完——请到 Kiwi Catalog 门户「我的账户」申请商家令牌"
         body = ('{"ok": false, "error": "' + guidance + '"}').encode("utf-8")
 
@@ -195,18 +241,21 @@ class FreeTierShoppingTest(unittest.TestCase):
             with self.assertRaises(ValidationError) as ctx:
                 handlers.create_product(
                     self.db,
-                    free_id,
+                    self.merchant_id,
                     {"kiwi_session": self.session, "sku": "VQ-011", "title": "t", "price": 1, "stock": 1},
                 )
         self.assertIn(guidance, str(ctx.exception))
 
-    def test_session_cannot_use_other_accounts_free_id(self) -> None:
-        """账号会话不能操作他人临时商家 id（403 PermissionDenied）。"""
-        other_id, _other_session = self._make_account("other@acme.example")
-        other_free_id = merchant_shopping.free_merchant_id(other_id)
+    def test_session_cannot_use_other_accounts_merchant_id(self) -> None:
+        """账号会话不能操作他人 merchant_id（403 PermissionDenied）。"""
+        _other_id, other_merchant_id, _other_session = self._make_account(
+            "other@acme.example"
+        )
         with mock.patch.object(merchant_shopping, "_shopping_request", return_value={"results": []}):
             with self.assertRaises(PermissionDenied):
-                handlers.list_products(self.db, other_free_id, {"kiwi_session": self.session})
+                handlers.list_products(
+                    self.db, other_merchant_id, {"kiwi_session": self.session}
+                )
 
     def test_owner_token_still_wins_over_proxy(self) -> None:
         """回归：已签发 owner token 的商家仍用 owner token（代理凭据不抢占）。"""
