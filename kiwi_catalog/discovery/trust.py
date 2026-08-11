@@ -29,6 +29,10 @@ from dataclasses import dataclass, field
 # ── Pinned external spec versions (§0.3) ──────────────────────────────────────
 _PINNED_A2A_VERSIONS = ("1.0.0",)
 _PINNED_UCP_VERSIONS = ("2026-04-08",)
+# KNP/1.0（shopping.negotiation/1.0）：商家 UCP capability 声明的协商协议版本。
+# 此前 allowed_knp_versions 恒空 → 任何 KNP claim 都被拒（commerce_capability
+# 卡 discovered）；pin 到已发布的 KNP/1.0（与 kiwi 协议身份一致）。
+_PINNED_KNP_VERSIONS = ("1.0",)
 
 # ── Sensible defaults ─────────────────────────────────────────────────────────
 _DEFAULT_MAX_PROFILE_BYTES = 1_048_576  # 1 MiB
@@ -95,8 +99,8 @@ class TrustPolicy:
     allowed_ucp_versions: tuple[str, ...] = field(default_factory=lambda: _PINNED_UCP_VERSIONS)
     """Accepted UCP profile versions.  Default pinned to ``["2026-04-08"]`` (§0.3)."""
 
-    allowed_knp_versions: tuple[str, ...] = ()
-    """Accepted KNP (Kiwi Negotiation Protocol) versions.  Empty = none yet."""
+    allowed_knp_versions: tuple[str, ...] = field(default_factory=lambda: _PINNED_KNP_VERSIONS)
+    """Accepted KNP (Kiwi Negotiation Protocol) versions.  Pinned to KNP/1.0."""
 
     # ── Fetch limits ──────────────────────────────────────────────────────
     redirect_limit: int = _DEFAULT_REDIRECT_LIMIT
@@ -179,7 +183,7 @@ class TrustPolicy:
             require_agent_card_jws=require_agent_card_jws,
             allowed_a2a_versions=_frozen_tuple(allowed_a2a_versions) if allowed_a2a_versions else _PINNED_A2A_VERSIONS,
             allowed_ucp_versions=_frozen_tuple(allowed_ucp_versions) if allowed_ucp_versions else _PINNED_UCP_VERSIONS,
-            allowed_knp_versions=_frozen_tuple(allowed_knp_versions),
+            allowed_knp_versions=_frozen_tuple(allowed_knp_versions) if allowed_knp_versions else _PINNED_KNP_VERSIONS,
             redirect_limit=redirect_limit,
             max_profile_bytes=max_profile_bytes,
         )

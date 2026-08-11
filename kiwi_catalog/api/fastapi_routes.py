@@ -56,7 +56,12 @@ from kiwi_catalog.api.route_table import (
     _v1_list_agent_listings,
     _v1_list_agents,
     _v1_list_applications,
+    _v1_merchant_products_create,
+    _v1_merchant_products_list,
+    _v1_merchant_products_update,
     _v1_merchant_self,
+    _v1_merchant_shopping_bind,
+    _v1_merchant_shopping_status,
     _v1_publish_listing,
     _v1_refresh_agent,
     _v1_register_agent,
@@ -502,6 +507,64 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
         )
 
+    @app.put("/v1/merchants/{merchant_id}/shopping-token")
+    def v1_merchant_shopping_bind(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_merchant_shopping_bind(
+            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.get("/v1/merchants/{merchant_id}/shopping-token/status")
+    def v1_merchant_shopping_status(
+        merchant_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _v1_merchant_shopping_status(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+        )
+
+    @app.get("/v1/merchants/{merchant_id}/products")
+    def v1_merchant_products_list(
+        merchant_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _v1_merchant_products_list(
+            db_path,
+            merchant_id,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
+    @app.post("/v1/merchants/{merchant_id}/products")
+    def v1_merchant_products_create(
+        merchant_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_merchant_products_create(
+            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.patch("/v1/merchants/{merchant_id}/products/{sku}")
+    def v1_merchant_products_update(
+        merchant_id: str,
+        sku: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_merchant_products_update(
+            db_path,
+            merchant_id,
+            sku,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
     @app.get("/v1/merchants/self")
     def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_merchant_self(
@@ -643,3 +706,11 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/account")
     def portal_account_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_account())
+
+    @app.get("/portal/account/profile")
+    def portal_account_profile_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_account_profile())
+
+    @app.get("/portal/products")
+    def portal_products_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_products())

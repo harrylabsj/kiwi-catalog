@@ -125,6 +125,7 @@ class AdminApiTest(unittest.TestCase):
                 {
                     "domain": "acme.example",
                     "agent_name": "Acme Merchant",
+                    "agent_id": "merchant-001",
                     "contact_email": "ops@acme.example",
                 }
             ).encode(),

@@ -554,6 +554,7 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                 {
                     "domain": domain,
                     "agent_name": "Merchant Agent",
+                    "agent_id": "merchant-001",
                     "contact_email": email,
                     "purpose": "sell industrial displays",
                 }

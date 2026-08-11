@@ -147,11 +147,30 @@ def merchant_report(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any
         (f"%{merchant_id}%",),
     ).fetchall()
 
+    # 邮箱：优先 merchant_applications.contact_email（申请工单），回退 account email。
+    contact_email = ""
+    application = conn.execute(
+        "select contact_email from merchant_applications where merchant_id = ?"
+        " order by application_id desc limit 1",
+        (merchant_id,),
+    ).fetchone()
+    if application is not None:
+        contact_email = str(application["contact_email"] or "")
+    account_email = ""
+    account = conn.execute(
+        "select email from merchant_accounts where merchant_id = ? order by account_id desc limit 1",
+        (merchant_id,),
+    ).fetchone()
+    if account is not None:
+        account_email = str(account["email"] or "")
+
     return {
         "merchant": {
             "merchant_id": merchant["id"],
             "name": merchant["name"],
             "created_at": merchant["created_at"],
+            "contact_email": contact_email,
+            "account_email": account_email,
             "updated_at": merchant["updated_at"],
             "city": merchant["city"],
             "service_area": merchant["service_area"],

@@ -259,6 +259,7 @@ def token_request(
             account,
             domain=str(payload.get("domain") or ""),
             agent_name=str(payload.get("agent_name") or ""),
+            agent_id=str(payload.get("agent_id") or ""),
             phone=str(payload.get("phone") or ""),
             purpose=str(payload.get("purpose") or ""),
         )
@@ -276,6 +277,7 @@ def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             account,
             merchant_name=str(payload.get("merchant_name") or ""),
             phone=str(payload.get("phone") or ""),
+            agent_id=str(payload.get("agent_id") or ""),
         )
         return {"ok": True, **view}
     finally:

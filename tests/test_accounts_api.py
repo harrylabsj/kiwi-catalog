@@ -145,7 +145,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
             cookie=f"kiwi_session={session}",
         )
         self.assertEqual(status, 200, payload)
@@ -354,7 +354,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -364,7 +364,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -375,7 +375,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -390,7 +390,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -414,7 +414,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -443,7 +443,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -465,7 +465,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "agent_id": "merchant-001"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -517,7 +517,7 @@ class AccountsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme", "phone": "+86 139"}).encode(),
+            json.dumps({"domain": "acme.example", "agent_name": "Acme", "agent_id": "merchant-001", "phone": "+86 139"}).encode(),
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
@@ -543,6 +543,7 @@ class AccountsApiTest(unittest.TestCase):
             "/v1/merchants/applications",
             json.dumps(
                 {"domain": "public.example", "agent_name": "Public Shop",
+                 "agent_id": "merchant-001",
                  "contact_email": "ops@acme.example"}
             ).encode(),
         )
