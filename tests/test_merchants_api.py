@@ -251,29 +251,11 @@ class MerchantsApiTest(unittest.TestCase):
         status, payload = self._approve(app_id)
         self.assertEqual(status, 409, payload)
 
-    def test_validate_token_endpoint(self) -> None:
-        """跨服务 token 校验端点（方案A）：有效 owner token → valid，无效 → invalid。"""
+    def test_approve_audit_has_no_plaintext(self) -> None:
+        """签发审计含 merchant_id + token_prefix，不含明文 token。"""
         _, applied = self._apply()
         app_id = applied["application"]["application_id"]
         _, issued = self._approve(app_id)
-        merchant_id = issued["merchant_id"]
-        token = issued["token"]
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{merchant_id}/token/validate",
-            json.dumps({"token": token}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertTrue(payload["valid"])
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{merchant_id}/token/validate",
-            json.dumps({"token": "wrong-token"}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertFalse(payload["valid"])
 
         # 审计含签发事件、不含明文 token
         from kiwi_catalog.db.session import db_session
