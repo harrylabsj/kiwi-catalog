@@ -390,6 +390,7 @@ def request_token(
     *,
     domain: str = "",
     agent_name: str = "",
+    agent_id: str = "",
     phone: str = "",
     purpose: str = "",
 ) -> dict[str, Any]:
@@ -406,17 +407,20 @@ def request_token(
 
     domain = normalize_canonical_domain(domain)
     agent_name = str(agent_name or "").strip()
+    agent_id = str(agent_id or "").strip()
     if not agent_name:
         raise ValidationError("agent_name is required to apply for a token")
+    if not agent_id:
+        raise ValidationError("agent_id is required to apply for a token")
     phone = str(phone or "").strip()
     now = now_iso()
     cursor = conn.execute(
         """
         insert into merchant_applications
-            (status, domain, agent_name, contact_email, purpose, phone, account_id, created_at)
-        values ('pending', ?, ?, ?, ?, ?, ?, ?)
+            (status, domain, agent_name, agent_id, contact_email, purpose, phone, account_id, created_at)
+        values ('pending', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (domain, agent_name, account["email"], str(purpose or "").strip(), phone, account["account_id"], now),
+        (domain, agent_name, agent_id, account["email"], str(purpose or "").strip(), phone, account["account_id"], now),
     )
     application_id = int(cursor.lastrowid or 0)
     conn.execute(
@@ -438,14 +442,18 @@ def update_profile(
     *,
     merchant_name: str = "",
     phone: str = "",
+    agent_id: str = "",
 ) -> dict[str, Any]:
-    """更新账户基本信息（商家名称/电话，均非空才覆盖）。"""
+    """更新账户基本信息（商家名称/电话/agent_id，均非空才覆盖）。"""
     merchant_name = str(merchant_name or "").strip()
     phone = str(phone or "").strip()
+    agent_id = str(agent_id or "").strip()
     if merchant_name and len(merchant_name) > 200:
         raise ValidationError("merchant_name too long")
     if phone and len(phone) > 40:
         raise ValidationError("phone too long")
+    if agent_id and len(agent_id) > 200:
+        raise ValidationError("agent_id too long")
     if merchant_name:
         conn.execute(
             "update merchant_accounts set merchant_name = ?, updated_at = ?"
@@ -457,6 +465,15 @@ def update_profile(
             "update merchant_accounts set phone = ?, updated_at = ?"
             " where account_id = ?",
             (phone, now_iso(), account["account_id"]),
+        )
+    if agent_id:
+        # agent_id 落在该账号名下的最新申请工单（商家可自行修改/增添自己的 agent ID）
+        conn.execute(
+            "update merchant_applications set agent_id = ?"
+            " where account_id = ? and application_id = ("
+            "   select application_id from merchant_applications"
+            "   where account_id = ? order by application_id desc limit 1)",
+            (agent_id, account["account_id"], account["account_id"]),
         )
     # 重查账号行（更新后的 merchant_name/phone 进视图）
     fresh = conn.execute(

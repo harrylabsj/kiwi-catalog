@@ -46,6 +46,7 @@ OWNER_SECRET = "test-owner-secret"
 APPLY_BODY = {
     "domain": "acme.example",
     "agent_name": "Acme Merchant Agent",
+    "agent_id": "merchant-001",
     "contact_email": "ops@acme.example",
     "purpose": "sell industrial displays",
 }

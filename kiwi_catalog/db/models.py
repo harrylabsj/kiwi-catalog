@@ -212,6 +212,8 @@ create table if not exists merchant_tokens (
         merchant_id text primary key,
         token_hash text not null,
         token_encrypted text not null default '',
+        -- v20 — 商家绑定的 shopping-cli token（Fernet 加密；"我的商品"写回用）
+        shopping_token_encrypted text not null default '',
         status text not null default 'active'
             check(status in ('active','revoked')),
         issued_at text not null,
@@ -226,6 +228,8 @@ create table if not exists merchant_applications (
             check(status in ('pending','approved','rejected')),
         domain text not null,
         agent_name text not null,
+        -- v21 — 申请必填 agent_id（商家指定自己的 agent 标识）
+        agent_id text not null default '',
         contact_email text not null,
         purpose text not null default '',
         phone text not null default '',

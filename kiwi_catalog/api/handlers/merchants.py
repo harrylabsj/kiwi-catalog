@@ -65,11 +65,15 @@ def submit_application(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     """
     domain = normalize_canonical_domain(require_field(payload, "domain"))
     agent_name = str(require_field(payload, "agent_name")).strip()
+    # v21 — 申请必填 agent_id（商家指定自己的 agent 标识，如 merchant-001）
+    agent_id = str(require_field(payload, "agent_id")).strip()
     contact_email = str(require_field(payload, "contact_email")).strip()
     purpose = str(payload.get("purpose") or "").strip()
     phone = str(payload.get("phone") or "").strip()
     if not agent_name:
         raise ValidationError("agent_name is required")
+    if not agent_id:
+        raise ValidationError("agent_id is required")
     if not _EMAIL_RE.match(contact_email):
         raise ValidationError("contact_email must be a valid email address")
     if len(agent_name) > 200 or len(contact_email) > 200 or len(purpose) > 2000 or len(phone) > 40:
@@ -91,10 +95,10 @@ def submit_application(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         cursor = conn.execute(
             """
             insert into merchant_applications
-                (status, domain, agent_name, contact_email, purpose, phone, created_at)
-            values ('pending', ?, ?, ?, ?, ?, ?)
+                (status, domain, agent_name, agent_id, contact_email, purpose, phone, created_at)
+            values ('pending', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (domain, agent_name, contact_email, purpose, phone, now_iso()),
+            (domain, agent_name, agent_id, contact_email, purpose, phone, now_iso()),
         )
         application_id = int(cursor.lastrowid or 0)
         application = tokens_service.get_application(conn, application_id)

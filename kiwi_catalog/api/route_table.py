@@ -31,6 +31,7 @@ from typing import Any
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
+from kiwi_catalog.api.handlers import merchant_shopping as merchant_shopping_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
@@ -255,6 +256,41 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"PUT"},
+        "/v1/merchants/{merchant_id}/shopping-token",
+        lambda db_path, payload, query, merchant_id: _v1_merchant_shopping_bind(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchants/{merchant_id}/shopping-token/status",
+        lambda db_path, payload, query, merchant_id: _v1_merchant_shopping_status(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchants/{merchant_id}/products",
+        lambda db_path, payload, query, merchant_id: _v1_merchant_products_list(
+            db_path, merchant_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchants/{merchant_id}/products",
+        lambda db_path, payload, query, merchant_id: _v1_merchant_products_create(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"PATCH"},
+        "/v1/merchants/{merchant_id}/products/{sku}",
+        lambda db_path, payload, query, merchant_id, sku: _v1_merchant_products_update(
+            db_path, merchant_id, sku, payload
+        ),
+    ),
+RouteEntry(
         {"GET"},
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
@@ -363,6 +399,16 @@ RouteEntry(
         {"GET"},
         "/portal/account",
         lambda db_path, payload, query, **kw: _portal_account(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/account/profile",
+        lambda db_path, payload, query, **kw: _portal_account_profile(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/products",
+        lambda db_path, payload, query, **kw: _portal_products(),
     ),
 )
 
@@ -479,6 +525,26 @@ def _v1_revoke_token(db_path, merchant_id, payload):
     return merchants_handlers.revoke_token(db_path, merchant_id, payload)
 
 
+def _v1_merchant_shopping_bind(db_path, merchant_id, payload):
+    return merchant_shopping_handlers.bind_shopping_token(db_path, merchant_id, payload)
+
+
+def _v1_merchant_shopping_status(db_path, merchant_id, payload):
+    return merchant_shopping_handlers.shopping_token_status(db_path, merchant_id, payload)
+
+
+def _v1_merchant_products_list(db_path, merchant_id, payload, query):
+    return merchant_shopping_handlers.list_products(db_path, merchant_id, payload, query or {})
+
+
+def _v1_merchant_products_create(db_path, merchant_id, payload):
+    return merchant_shopping_handlers.create_product(db_path, merchant_id, payload)
+
+
+def _v1_merchant_products_update(db_path, merchant_id, sku, payload):
+    return merchant_shopping_handlers.update_product(db_path, merchant_id, sku, payload)
+
+
 def _v1_merchant_self(db_path, payload, query):
     return merchants_handlers.self_status(db_path, payload, query or {})
 
@@ -570,6 +636,14 @@ def _portal_login():
 
 def _portal_account():
     return portal_handlers.portal_account()
+
+
+def _portal_account_profile():
+    return portal_handlers.portal_account_profile()
+
+
+def _portal_products():
+    return portal_handlers.portal_products()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):

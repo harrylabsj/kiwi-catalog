@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 21
 
 
 @dataclass(frozen=True)
@@ -740,6 +740,26 @@ def migration_019_listing_handoff_destination_ref(conn: sqlite3.Connection) -> N
         )
 
 
+def migration_020_merchant_shopping_token(conn: sqlite3.Connection) -> None:
+    """merchant_tokens.shopping_token_encrypted 列（"我的商品"写回 shopping-cli 用）。
+
+    商家在 portal 绑定自己的 SHOPPING_MERCHANT_TOKEN，Fernet 加密存储（与 owner
+    token 的 token_encrypted 同机制）。幂等 ALTER（参照 v16 模式）。
+    """
+    if not _column_exists(conn, "merchant_tokens", "shopping_token_encrypted"):
+        conn.execute(
+            "alter table merchant_tokens add column shopping_token_encrypted text not null default ''"
+        )
+
+
+def migration_021_merchant_application_agent_id(conn: sqlite3.Connection) -> None:
+    """merchant_applications.agent_id 列（申请令牌必填，商家指定 agent 标识）。"""
+    if not _column_exists(conn, "merchant_applications", "agent_id"):
+        conn.execute(
+            "alter table merchant_applications add column agent_id text not null default ''"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -760,6 +780,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(17, "drop_domain_unique_index", migration_017_drop_domain_unique_index),
     Migration(18, "buyer_search_events", migration_018_buyer_search_events),
     Migration(19, "listing_handoff_destination_ref", migration_019_listing_handoff_destination_ref),
+    Migration(20, "merchant_shopping_token", migration_020_merchant_shopping_token),
+    Migration(21, "merchant_application_agent_id", migration_021_merchant_application_agent_id),
 )
 
 
