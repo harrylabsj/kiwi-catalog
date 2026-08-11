@@ -19,6 +19,11 @@ merchant_tokens.shopping_token_encrypted）；本模块代理商品 CRUD 到
 shopping-cli API（Bearer 鉴权），商家自行维护商品与成交入口。
 
 shopping-cli base URL 由 KIWI_SHOPPING_BASE_URL 覆盖（默认 127.0.0.1:8765）。
+
+免费通道：未签发 owner token 的商家经 portal 账号会话，以共享代理凭据
+（KIWI_CATALOG_PROXY_TOKEN，与 shopping-cli 共享）操作临时商家 id
+mkt_free_<account_id> 的商品；shopping-cli 侧原子执行 10 件在售配额，
+超限返回 403 引导文案（原样透传给 portal）。
 """
 
 from __future__ import annotations
@@ -34,10 +39,21 @@ from kiwi_catalog.services.accounts import decrypt_merchant_token, encrypt_merch
 
 _SHOPPING_BASE_URL_ENV = "KIWI_SHOPPING_BASE_URL"
 _DEFAULT_SHOPPING_BASE_URL = "http://127.0.0.1:8765"
+_PROXY_TOKEN_ENV = "KIWI_CATALOG_PROXY_TOKEN"
 
 
 def shopping_base_url() -> str:
     return (os.environ.get(_SHOPPING_BASE_URL_ENV) or _DEFAULT_SHOPPING_BASE_URL).rstrip("/")
+
+
+def _proxy_token() -> str:
+    """免费通道代理凭据（与 shopping-cli 共享的 Bearer token）；未配置返回空串。"""
+    return str(os.environ.get(_PROXY_TOKEN_ENV) or "").strip()
+
+
+def free_merchant_id(account_id: int | str) -> str:
+    """免费通道临时商家 id：mkt_free_<account_id>（shopping-cli 仅对该前缀放行代理凭据）。"""
+    return f"mkt_free_{account_id}"
 
 
 def bind_shopping_token(conn, merchant_id: str, token: str) -> dict:
@@ -73,17 +89,26 @@ def _require_token(conn, merchant_id: str) -> str:
 
     shopping-cli 配置了 KIWI_CATALOG_AUTH_URL 后，商家 owner token 即通用
     凭据——无需单独绑定 SHOPPING_MERCHANT_TOKEN。
+
+    凭据解析顺序：owner token（有则用，行为不变）→ 免费通道代理凭据
+    （KIWI_CATALOG_PROXY_TOKEN 已配置时）→ 原有 ValidationError/NotFoundError。
     """
     row = conn.execute(
         "select token_encrypted from merchant_tokens where merchant_id = ?",
         (merchant_id,),
     ).fetchone()
+    if row is not None:
+        token = decrypt_merchant_token(str(row["token_encrypted"] or ""))
+        if token:
+            return token
+    proxy = _proxy_token()
+    if proxy:
+        # 免费通道：无 owner token（含 mkt_free_ 临时商家无 merchant_tokens 行）
+        # 时以共享代理凭据调 shopping-cli，配额由 shopping-cli 侧原子执行。
+        return proxy
     if row is None:
         raise NotFoundError(f"Unknown merchant: {merchant_id}")
-    token = decrypt_merchant_token(str(row["token_encrypted"] or ""))
-    if not token:
-        raise ValidationError("商家尚未签发 owner token——请先在 My Account 申请令牌")
-    return token
+    raise ValidationError("商家尚未签发 owner token——请先在 My Account 申请令牌")
 
 
 def _shopping_request(method: str, path: str, token: str, body: dict | None = None) -> dict:
@@ -124,6 +149,9 @@ def create_product(conn, merchant_id: str, payload: dict) -> dict:
     category/tags/description/delivery_attributes/handoff_destination。"""
     token = _require_token(conn, merchant_id)
     body = dict(payload)
+    # 会话凭据只用于 catalog 侧鉴权，不转发给 shopping-cli
+    body.pop("kiwi_session", None)
+    body.pop("_cookie", None)
     body["merchant_id"] = merchant_id
     return _shopping_request("POST", "/products", token, body)
 
@@ -132,5 +160,7 @@ def update_product(conn, merchant_id: str, sku: str, payload: dict) -> dict:
     """更新商品（写回 shopping-cli）。"""
     token = _require_token(conn, merchant_id)
     body = dict(payload)
+    body.pop("kiwi_session", None)
+    body.pop("_cookie", None)
     body["merchant_id"] = merchant_id
     return _shopping_request("PATCH", f"/products/{urllib.parse.quote(sku)}", token, body)

@@ -906,7 +906,8 @@ def portal_products() -> dict[str, Any]:
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <p class="lead">维护商品与每商品成交入口（写回 shopping-cli）。保存后需重新
-    <code>kiwi merchant publish</code> 同步进 catalog 的 listing。</p>
+    <code>kiwi merchant publish</code> 同步进 catalog 的 listing。
+    未签发令牌的账号走免费通道：可免费上架 10 件商品，超出后请到「我的账户」申请商家令牌。</p>
 
   <div style="margin:0 0 16px"><button class="btn-form" id="show_add">上传商品</button></div>
   <div id="out"></div>
@@ -931,13 +932,20 @@ def portal_products() -> dict[str, Any]:
 <script>
 let MERCHANT = '';
 let OWNER_TOKEN = '';
+let FREE_TIER = false;
 function esc(v) { return escHtml(v); }
 function bindProductData() {
   getJson('/v1/accounts/me').then(r => {
-    if (!r.ok || !r.merchant_id) { document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌。'; return; }
-    MERCHANT = r.merchant_id;
-    OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-    // 统一令牌（方案A）：owner token 即 shopping-cli 凭据，直接加载
+    if (!r.ok) { document.getElementById('out').textContent = '请先登录。'; return; }
+    if (r.merchant_id) {
+      MERCHANT = r.merchant_id;
+      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
+    } else {
+      // 免费通道：未签发令牌时用临时商家 id + 账号会话（cookie）调商品接口
+      MERCHANT = 'mkt_free_' + r.account_id;
+      FREE_TIER = true;
+    }
+    // 统一令牌（方案A）：owner token 即 shopping-cli 凭据；免费通道走账号会话，直接加载
     document.getElementById('product_card').style.display = 'block';
     loadProducts();
   });
@@ -990,9 +998,14 @@ function resolveMerchantThen(next) {
   // MERCHANT 可能因 bindProductData 的 fetch 尚未返回而暂空——点击时重新解析身份
   if (MERCHANT !== '') { next(); return; }
   getJson('/v1/accounts/me').then(r => {
-    if (r.ok && r.merchant_id) {
-      MERCHANT = r.merchant_id;
-      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
+    if (r.ok) {
+      if (r.merchant_id) {
+        MERCHANT = r.merchant_id;
+        OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
+      } else {
+        MERCHANT = 'mkt_free_' + r.account_id;
+        FREE_TIER = true;
+      }
     }
     next();
   });
@@ -1001,7 +1014,7 @@ document.getElementById('show_add').addEventListener('click', () => {
   const card = document.getElementById('add_card');
   resolveMerchantThen(() => {
     if (MERCHANT === '') {
-      document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌，审批通过后再上传商品。';
+      document.getElementById('out').textContent = '账号信息加载中，请稍候再试。免费通道可上架 10 件商品，超出后请到「我的账户」申请商家令牌。';
       return;
     }
     card.style.display = card.style.display === 'none' ? 'block' : 'none';
