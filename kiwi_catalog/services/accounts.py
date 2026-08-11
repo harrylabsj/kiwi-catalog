@@ -15,8 +15,10 @@
 """商家账号体系（注册/登录/会话 + token 加密存储）。
 
 设计（docs/accounts.md）：
-- **注册即 merchant 注册**：基本信息（域名/商家名/邮箱/密码）注册 →
-  自动创建待审工单（dashboard 审批流复用）；批准后 merchant_id 回填账号；
+- **注册即 merchant 注册**：注册完成即分配平台 merchant_id
+  （mkt_<slug>_<rand>，与审批签发同一 id 空间；存量账号会话解析时懒回填）；
+  申请 token 自动创建待审工单（dashboard 审批流复用），批准后沿用该
+  merchant_id 签发 owner token；
 - **会话**：登录签发随机 session token（SHA-256 落库 + 7 天过期），
   httpOnly cookie 传递（服务端渲染的页面用 cookie，API 端到端测试用 header）；
 - **token 找回**：merchant_tokens.token_encrypted 存 Fernet 加密明文——
@@ -215,6 +217,32 @@ def account_by_email(conn: sqlite3.Connection, email: str) -> dict[str, Any] | N
 # ── 账号 CRUD ─────────────────────────────────────────────────────────────
 
 
+def ensure_merchant_id(conn: sqlite3.Connection, account_id: int, name_hint: str = "") -> str:
+    """为账号分配平台 merchant_id（mkt_<slug>_<rand>，与审批签发同一 id 空间）。
+
+    注册完成即调用；存量无 merchant_id 的账号在会话解析时懒回填。幂等：
+    已有 id 直接返回，绝不重复分配（approve_application 亦复用此 id）。
+    """
+    row = conn.execute(
+        "select merchant_id from merchant_accounts where account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row is None:
+        return ""
+    existing = str(row["merchant_id"] or "").strip()
+    if existing:
+        return existing
+    merchant_id = tokens_service.new_platform_merchant_id(
+        name_hint or f"account-{account_id}"
+    )
+    conn.execute(
+        "update merchant_accounts set merchant_id = ?, updated_at = ?"
+        " where account_id = ? and merchant_id = ''",
+        (merchant_id, now_iso(), account_id),
+    )
+    return merchant_id
+
+
 def register_account(
     conn: sqlite3.Connection, *, email: str, password: str
 ) -> dict[str, Any]:
@@ -245,10 +273,13 @@ def register_account(
         (email, hash_password(password), now, now),
     )
     account_id = int(cursor.lastrowid or 0)
+    # 注册完成即分配平台 merchant_id（免费通道与审批商家同一身份空间）
+    merchant_id = ensure_merchant_id(conn, account_id, email.split("@", 1)[0])
     verification_code = issue_verification(conn, account_id, email)
     return {
         "account_id": account_id,
         "email": email,
+        "merchant_id": merchant_id,
         "status": "pending_review",
         "email_verified": False,
         "verification_code": verification_code,  # console 模式才有值
@@ -309,7 +340,17 @@ def resolve_session(
     account = conn.execute(
         "select * from merchant_accounts where account_id = ?", (row["account_id"],)
     ).fetchone()
-    return dict(account) if account is not None else None
+    if account is None:
+        return None
+    account = dict(account)
+    if not str(account.get("merchant_id") or "").strip():
+        # 存量账号懒回填：注册即分配 merchant_id 之前的历史行首次使用时补齐
+        account["merchant_id"] = ensure_merchant_id(
+            conn,
+            int(account["account_id"]),
+            str(account.get("email") or "").split("@", 1)[0],
+        )
+    return account
 
 
 def destroy_session(conn: sqlite3.Connection, session_token: str) -> None:

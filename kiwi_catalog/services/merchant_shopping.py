@@ -21,8 +21,8 @@ shopping-cli API（Bearer 鉴权），商家自行维护商品与成交入口。
 shopping-cli base URL 由 KIWI_SHOPPING_BASE_URL 覆盖（默认 127.0.0.1:8765）。
 
 免费通道：未签发 owner token 的商家经 portal 账号会话，以共享代理凭据
-（KIWI_CATALOG_PROXY_TOKEN，与 shopping-cli 共享）操作临时商家 id
-mkt_free_<account_id> 的商品；shopping-cli 侧原子执行 10 件在售配额，
+（KIWI_CATALOG_PROXY_TOKEN，与 shopping-cli 共享）操作自己 merchant_id
+（注册即分配）下的商品；shopping-cli 侧原子执行 10 件在售配额，
 超限返回 403 引导文案（原样透传给 portal）。
 """
 
@@ -49,11 +49,6 @@ def shopping_base_url() -> str:
 def _proxy_token() -> str:
     """免费通道代理凭据（与 shopping-cli 共享的 Bearer token）；未配置返回空串。"""
     return str(os.environ.get(_PROXY_TOKEN_ENV) or "").strip()
-
-
-def free_merchant_id(account_id: int | str) -> str:
-    """免费通道临时商家 id：mkt_free_<account_id>（shopping-cli 仅对该前缀放行代理凭据）。"""
-    return f"mkt_free_{account_id}"
 
 
 def bind_shopping_token(conn, merchant_id: str, token: str) -> dict:
@@ -103,8 +98,8 @@ def _require_token(conn, merchant_id: str) -> str:
             return token
     proxy = _proxy_token()
     if proxy:
-        # 免费通道：无 owner token（含 mkt_free_ 临时商家无 merchant_tokens 行）
-        # 时以共享代理凭据调 shopping-cli，配额由 shopping-cli 侧原子执行。
+        # 免费通道：无 owner token（含注册即分配、尚无 merchant_tokens 行的
+        # 商家）时以共享代理凭据调 shopping-cli，配额由 shopping-cli 侧原子执行。
         return proxy
     if row is None:
         raise NotFoundError(f"Unknown merchant: {merchant_id}")

@@ -17,8 +17,8 @@
 商家在 portal 绑定自己的 SHOPPING_MERCHANT_TOKEN，然后在本页列出/新增/编辑
 商品（含成交入口 handoff_destination），写回 shopping-cli（服务代理）。
 
-免费通道：portal 账号会话（无 owner token）可操作自己的临时商家 id
-mkt_free_<account_id>（或已回填的 merchant_id），凭据走共享代理 token。
+免费通道：portal 账号会话（无 owner token）只能操作自己注册时分配的
+merchant_id，凭据走共享代理 token。
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ def _require_merchant_control(conn, merchant_id: str, payload: dict[str, Any]) -
     必须传 conn：随机 owner token 的 SHA-256 落库路径需要 DB 查询（不传 conn
     只走 HMAC 派生，随机 token 会被误拒）。
 
-    免费通道：账号会话可操作自己回填的 merchant_id 或临时 id
-    mkt_free_<account_id>；其余商家 id 一律 403。
+    免费通道：账号会话仅能操作账号自己的 merchant_id（注册即分配，
+    resolve_session 对存量账号懒回填）；其余商家 id 一律 403。
     """
     try:
         api_auth.require_admin_token(payload)
@@ -67,11 +67,7 @@ def _require_merchant_control(conn, merchant_id: str, payload: dict[str, Any]) -
         account = _session_account(conn, payload)
         if account is None:
             raise owner_error from None
-    allowed = {
-        str(account.get("merchant_id") or ""),
-        merchant_shopping.free_merchant_id(account["account_id"]),
-    }
-    if merchant_id not in allowed:
+    if merchant_id != str(account.get("merchant_id") or ""):
         raise PermissionDenied("无权操作该商家的商品")
 
 

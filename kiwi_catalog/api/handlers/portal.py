@@ -932,19 +932,13 @@ def portal_products() -> dict[str, Any]:
 <script>
 let MERCHANT = '';
 let OWNER_TOKEN = '';
-let FREE_TIER = false;
 function esc(v) { return escHtml(v); }
 function bindProductData() {
   getJson('/v1/accounts/me').then(r => {
-    if (!r.ok) { document.getElementById('out').textContent = '请先登录。'; return; }
-    if (r.merchant_id) {
-      MERCHANT = r.merchant_id;
-      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-    } else {
-      // 免费通道：未签发令牌时用临时商家 id + 账号会话（cookie）调商品接口
-      MERCHANT = 'mkt_free_' + r.account_id;
-      FREE_TIER = true;
-    }
+    if (!r.ok || !r.merchant_id) { document.getElementById('out').textContent = '账号信息加载失败——请重新登录。'; return; }
+    // merchant_id 注册即分配；未签发令牌时 OWNER_TOKEN 为空，走账号会话（cookie）免费通道
+    MERCHANT = r.merchant_id;
+    OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
     // 统一令牌（方案A）：owner token 即 shopping-cli 凭据；免费通道走账号会话，直接加载
     document.getElementById('product_card').style.display = 'block';
     loadProducts();
@@ -998,14 +992,9 @@ function resolveMerchantThen(next) {
   // MERCHANT 可能因 bindProductData 的 fetch 尚未返回而暂空——点击时重新解析身份
   if (MERCHANT !== '') { next(); return; }
   getJson('/v1/accounts/me').then(r => {
-    if (r.ok) {
-      if (r.merchant_id) {
-        MERCHANT = r.merchant_id;
-        OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-      } else {
-        MERCHANT = 'mkt_free_' + r.account_id;
-        FREE_TIER = true;
-      }
+    if (r.ok && r.merchant_id) {
+      MERCHANT = r.merchant_id;
+      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
     }
     next();
   });
