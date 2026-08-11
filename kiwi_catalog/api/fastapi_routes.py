@@ -56,12 +56,10 @@ from kiwi_catalog.api.route_table import (
     _v1_list_agent_listings,
     _v1_list_agents,
     _v1_list_applications,
-    _v1_merchant_products_create,
-    _v1_merchant_products_list,
-    _v1_merchant_products_update,
+    _v1_merchant_discovery_entries_list,
+    _v1_merchant_discovery_entry_create,
+    _v1_merchant_discovery_entry_delete,
     _v1_merchant_self,
-    _v1_merchant_shopping_bind,
-    _v1_merchant_shopping_status,
     _v1_merchant_validate_token,
     _v1_publish_listing,
     _v1_refresh_agent,
@@ -71,6 +69,7 @@ from kiwi_catalog.api.route_table import (
     _v1_revoke_token,
     _v1_rotate_token,
     _v1_search_agents,
+    _v1_search_discovery,
     _v1_search_listings,
     _v1_submit_application,
     _v1_verify_agent,
@@ -393,6 +392,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_search_listings(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_search_listings(db_path, {}, _query_params_from_request(request))
 
+    @app.get("/v1/discovery/search")
+    def v1_search_discovery(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_search_discovery(db_path, _query_params_from_request(request))
+
     @app.get("/v1/listings/{listing_id}")
     def v1_get_listing(listing_id: str) -> dict[str, Any]:
         return _v1_get_listing(db_path, listing_id)
@@ -518,31 +521,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, merchant_id, api_auth.payload_with_auth(payload, "", idempotency_key)
         )
 
-    @app.put("/v1/merchants/{merchant_id}/shopping-token")
-    def v1_merchant_shopping_bind(
-        merchant_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_merchant_shopping_bind(
-            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.get("/v1/merchants/{merchant_id}/shopping-token/status")
-    def v1_merchant_shopping_status(
-        merchant_id: str, request: _FastAPIRequest
-    ) -> dict[str, Any]:
-        return _v1_merchant_shopping_status(
-            db_path,
-            merchant_id,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-        )
-
     def _merchant_payload_with_session(
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """商家商品路由的 payload：追加透传会话 cookie（免费通道账号会话鉴权）。
+        """商家发现条目路由的 payload：追加透传会话 cookie（门户账号会话鉴权）。
 
         与 fallback_asgi 的全量 cookie 透传对齐；payload 应先经
         api_auth.payload_with_auth 合并 Authorization/idempotency 头。
@@ -553,51 +535,46 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             payload["_cookie"] = cookie
         return payload
 
-    @app.get("/v1/merchants/{merchant_id}/products")
-    def v1_merchant_products_list(
+    @app.post("/v1/merchants/{merchant_id}/discovery-entries")
+    def v1_merchant_discovery_entry_create(
+        merchant_id: str,
+        request: _FastAPIRequest,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_merchant_discovery_entry_create(
+            db_path,
+            merchant_id,
+            _merchant_payload_with_session(
+                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            ),
+        )
+
+    @app.get("/v1/merchants/{merchant_id}/discovery-entries")
+    def v1_merchant_discovery_entries_list(
         merchant_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
-        return _v1_merchant_products_list(
+        return _v1_merchant_discovery_entries_list(
             db_path,
             merchant_id,
             _merchant_payload_with_session(
                 request,
                 api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
             ),
-            _query_params_from_request(request),
         )
 
-    @app.post("/v1/merchants/{merchant_id}/products")
-    def v1_merchant_products_create(
-        merchant_id: str,
-        request: _FastAPIRequest,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    @app.delete("/v1/merchants/{merchant_id}/discovery-entries/{entry_id}")
+    def v1_merchant_discovery_entry_delete(
+        merchant_id: str, entry_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
-        return _v1_merchant_products_create(
+        return _v1_merchant_discovery_entry_delete(
             db_path,
             merchant_id,
+            entry_id,
             _merchant_payload_with_session(
-                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-            ),
-        )
-
-    @app.patch("/v1/merchants/{merchant_id}/products/{sku}")
-    def v1_merchant_products_update(
-        merchant_id: str,
-        sku: str,
-        request: _FastAPIRequest,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_merchant_products_update(
-            db_path,
-            merchant_id,
-            sku,
-            _merchant_payload_with_session(
-                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+                request,
+                api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
             ),
         )
 

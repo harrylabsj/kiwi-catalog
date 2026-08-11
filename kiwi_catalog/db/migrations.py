@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 
 @dataclass(frozen=True)
@@ -760,6 +760,42 @@ def migration_021_merchant_application_agent_id(conn: sqlite3.Connection) -> Non
         )
 
 
+_DISCOVERY_ENTRIES_DDL = [
+    """
+    create table if not exists discovery_entries (
+        entry_id text primary key,
+        merchant_id text not null,
+        name text not null,
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+    create index if not exists idx_discovery_entries_merchant
+        on discovery_entries(merchant_id)
+    """,
+    """
+    create index if not exists idx_discovery_entries_name_lower
+        on discovery_entries(lower(name))
+    """,
+]
+
+
+def migration_022_discovery_entries(conn: sqlite3.Connection) -> None:
+    """发现条目表（catalog-local discovery entry，替代 shopping-cli 代理通道）。
+
+    商家经门户上传商品名称（仅名称），买家 agent 经 /v1/discovery/search
+    匿名检索并按 agent 引用跳转。DDL 与 db/models.py 的 SCHEMA 逐字一致
+    （tests/test_shadow_tables.py 锁定 fresh 路径与迁移路径等价）。
+
+    伴随变更（无数据迁移——代理/绑定功能从未部署）：
+    merchant_tokens.shopping_token_encrypted 列保留在库中（无害），但代码
+    已不再读写——shopping-token 绑定面随代理通道一并移除。
+    """
+    for statement in _DISCOVERY_ENTRIES_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -782,6 +818,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(19, "listing_handoff_destination_ref", migration_019_listing_handoff_destination_ref),
     Migration(20, "merchant_shopping_token", migration_020_merchant_shopping_token),
     Migration(21, "merchant_application_agent_id", migration_021_merchant_application_agent_id),
+    Migration(22, "discovery_entries", migration_022_discovery_entries),
 )
 
 
