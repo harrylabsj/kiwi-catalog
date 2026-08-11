@@ -887,11 +887,12 @@ document.getElementById('resend').addEventListener('click', () => {
 
 
 def portal_products() -> dict[str, Any]:
-    """「我的商品」：商家登录后自助维护商品（含成交入口），写回 shopping-cli。
+    """「我的商品」：发现条目管理（上传商品名称到 catalog 发现目录）。
 
-    - 从 /v1/accounts/me 取 merchant_id + owner token（登录态）；
-    - 绑定 shopping-cli token（SHOPPING_MERCHANT_TOKEN，Fernet 加密存 catalog）；
-    - 列商品（shopping-cli 投影）/ 新增 / 编辑（标题/价格/库存/成交入口）。
+    - 从 /v1/accounts/me 取 merchant_id / token 状态 / agents_count（登录态）；
+    - 无有效令牌 → 引导到「令牌信息」申请；无注册 Agent → 引导先完成注册
+      （没有 Agent 的条目是死发现链接，服务端同样会拒绝）；
+    - 正常：单输入（商品名称）上传 + 列表 + 删除，全部走账号会话（cookie）。
     """
     body = (
         _nav("products")
@@ -905,131 +906,94 @@ def portal_products() -> dict[str, Any]:
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
-  <p class="lead">维护商品与每商品成交入口（写回 shopping-cli）。保存后需重新
-    <code>kiwi merchant publish</code> 同步进 catalog 的 listing。
-    未签发令牌的账号走免费通道：可免费上架 10 件商品，超出后请到「我的账户」申请商家令牌。</p>
+  <p class="lead">上传商品名称到 Kiwi 发现目录。买家 agent 检索到名称后，会按你注册的
+    Agent 信息跳转成交；完整商品数据（价格/库存/详情）由你自己的 agent 提供。</p>
 
-  <div style="margin:0 0 16px"><button class="btn-form" id="show_add">上传商品</button></div>
+  <div class="notice" id="guide_token" style="display:none">上传商品名称到发现目录需要商家令牌——请先到
+    <a href="/portal/account">「令牌信息」</a>申请令牌，审核通过后即可上传。</div>
+  <div class="notice" id="guide_agent" style="display:none">你还没有注册 Agent——商品名称需要挂在已注册的
+    Agent 下才会被买家发现，请先完成 Agent 注册再上传。</div>
   <div id="out"></div>
 
-  <div class="card form-card" id="product_card" style="display:none">
-    <h3>商品列表</h3>
-    <div id="list"></div>
-  </div>
-
-  <div class="card form-card" id="add_card" style="display:none">
-    <h3>新增商品</h3>
-    <label for="f_sku">SKU</label><input id="f_sku" placeholder="VQ-003">
-    <label for="f_title">标题</label><input id="f_title" placeholder="商品标题">
-    <label for="f_price">价格</label><input id="f_price" type="number" step="0.01" placeholder="99">
-    <label for="f_stock">库存</label><input id="f_stock" type="number" placeholder="100">
-    <label for="f_category">分类</label><input id="f_category" placeholder="electronics">
-    <label for="f_handoff">成交入口（handoff_destination）</label><input id="f_handoff" placeholder="https://…/checkout/…">
-    <button class="btn-form" id="add_btn">新增商品</button>
-    <div id="add_out"></div>
+  <div id="manager" style="display:none">
+    <div class="card form-card">
+      <h3>上传商品名称</h3>
+      <label for="f_name">商品名称</label>
+      <input id="f_name" maxlength="200" placeholder="如：有机猕猴桃 5kg 礼盒装">
+      <button class="btn-form" id="add_btn">上传</button>
+      <div id="add_out"></div>
+    </div>
+    <div class="card form-card" style="margin-top:16px">
+      <h3>已上传</h3>
+      <div id="list"></div>
+    </div>
   </div>
 </div></section>
 <script>
 let MERCHANT = '';
-let OWNER_TOKEN = '';
 function esc(v) { return escHtml(v); }
-function bindProductData() {
-  getJson('/v1/accounts/me').then(r => {
-    if (!r.ok || !r.merchant_id) { document.getElementById('out').textContent = '账号信息加载失败——请重新登录。'; return; }
-    // merchant_id 注册即分配；未签发令牌时 OWNER_TOKEN 为空，走账号会话（cookie）免费通道
-    MERCHANT = r.merchant_id;
-    OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-    // 统一令牌（方案A）：owner token 即 shopping-cli 凭据；免费通道走账号会话，直接加载
-    document.getElementById('product_card').style.display = 'block';
-    loadProducts();
-  });
-}
-function loadProducts() {
+function loadEntries() {
   const list = document.getElementById('list');
-  const out = document.getElementById('out');
   list.innerHTML = '';
-  getJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/products', OWNER_TOKEN).then(r => {
-    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
-    out.className = ''; out.textContent = '共 ' + (r.results || []).length + ' 个商品（保存后需 merchant publish 同步 listing）。';
+  getJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries').then(r => {
+    if (!r.ok) {
+      const out = document.getElementById('out');
+      out.className = 'err'; out.textContent = r.error || '加载失败'; return;
+    }
+    const entries = r.results || [];
+    if (!entries.length) { list.innerHTML = '<p class="small muted">还没有上传商品名称</p>'; return; }
     const table = document.createElement('table');
     table.className = 'search-table';
-    table.innerHTML = '<thead><tr><th>SKU</th><th>标题</th><th>价格</th><th>库存</th><th>成交入口</th><th></th></tr></thead>';
-    (r.results || []).forEach(p => {
+    table.innerHTML = '<thead><tr><th>商品名称</th><th>上传时间</th><th></th></tr></thead>';
+    entries.forEach(e => {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td class="mono">' + esc(p.source_product_ref || p.sku || '') + '</td>'
-        + '<td><input data-k="title" value="' + esc(p.title || '') + '"></td>'
-        + '<td><input data-k="price" value="' + esc(p.commercial_hints && p.commercial_hints.price_range_hint || '') + '" style="width:80px"></td>'
-        + '<td><input data-k="stock" value="' + esc(p.availability_hint === 'in_stock' ? '1' : '0') + '" style="width:50px"></td>'
-        + '<td><input data-k="handoff_destination" value="' + esc(p.handoff_destination || '') + '" style="width:200px"></td>'
-        + '<td><button class="btn-mini" data-save="' + esc(p.source_product_ref || p.sku || '') + '">保存</button></td>';
+      tr.innerHTML = '<td>' + esc(e.name) + '</td>'
+        + '<td class="small muted">' + esc((e.created_at || '').slice(0, 10)) + '</td>'
+        + '<td><button class="btn-mini" data-del="' + esc(e.entry_id) + '">删除</button></td>';
       table.appendChild(tr);
     });
     list.appendChild(table);
-    table.addEventListener('click', e => {
-      const sku = e.target.dataset.save;
-      if (!sku) return;
-      const row = e.target.closest('tr');
-      const payload = { title: row.querySelector('[data-k="title"]').value };
-      const priceEl = row.querySelector('[data-k="price"]');
-      const price = parseFloat(priceEl.value);
-      if (!isNaN(price)) payload.price = price;
-      const stock = parseInt(row.querySelector('[data-k="stock"]').value, 10);
-      if (!isNaN(stock)) payload.stock = stock;
-      const handoff = row.querySelector('[data-k="handoff_destination"]').value.trim();
-      if (handoff) payload.handoff_destination = handoff;
-      fetch('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/products/' + encodeURIComponent(sku), {
-        method: 'PATCH', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OWNER_TOKEN},
-        body: JSON.stringify(payload),
+    table.addEventListener('click', ev => {
+      const entryId = ev.target.dataset.del;
+      if (!entryId) return;
+      fetch('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries/' + encodeURIComponent(entryId), {
+        method: 'DELETE',
       }).then(res => res.json()).then(r => {
         const out = document.getElementById('out');
-        if (r.ok) { out.className = ''; out.textContent = '已保存 ' + sku + '。'; loadProducts(); }
-        else { out.className = 'err'; out.textContent = (r.error || '保存失败') + (r.message ? ' · ' + r.message : ''); }
+        if (r.ok) { out.className = ''; out.textContent = '已删除。'; loadEntries(); }
+        else { out.className = 'err'; out.textContent = r.error || '删除失败'; }
       });
     });
   });
 }
-function resolveMerchantThen(next) {
-  // MERCHANT 可能因 bindProductData 的 fetch 尚未返回而暂空——点击时重新解析身份
-  if (MERCHANT !== '') { next(); return; }
-  getJson('/v1/accounts/me').then(r => {
-    if (r.ok && r.merchant_id) {
-      MERCHANT = r.merchant_id;
-      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-    }
-    next();
-  });
-}
-document.getElementById('show_add').addEventListener('click', () => {
-  const card = document.getElementById('add_card');
-  resolveMerchantThen(() => {
-    if (MERCHANT === '') {
-      document.getElementById('out').textContent = '账号信息加载中，请稍候再试。免费通道可上架 10 件商品，超出后请到「我的账户」申请商家令牌。';
-      return;
-    }
-    card.style.display = card.style.display === 'none' ? 'block' : 'none';
-  });
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+  if (!r.ok) { window.location.href = '/portal/login'; return; }
+  MERCHANT = r.merchant_id || '';
+  if (!(r.token && r.token.status === 'active')) {
+    document.getElementById('guide_token').style.display = 'block';
+    return;
+  }
+  if (!r.agents_count) {
+    document.getElementById('guide_agent').style.display = 'block';
+    return;
+  }
+  document.getElementById('manager').style.display = 'block';
+  loadEntries();
 });
 document.getElementById('add_btn').addEventListener('click', () => {
-  const payload = {
-    sku: document.getElementById('f_sku').value.trim(),
-    title: document.getElementById('f_title').value.trim(),
-    price: parseFloat(document.getElementById('f_price').value),
-    stock: parseInt(document.getElementById('f_stock').value, 10),
-  };
-  const category = document.getElementById('f_category').value.trim();
-  if (category) payload.category = category;
-  const handoff = document.getElementById('f_handoff').value.trim();
-  if (handoff) payload.handoff_destination = handoff;
   const out = document.getElementById('add_out');
-  if (!payload.sku || !payload.title || isNaN(payload.price) || isNaN(payload.stock)) {
-    out.className = 'err'; out.textContent = 'SKU/标题/价格/库存必填'; return;
-  }
-  postJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/products', payload, OWNER_TOKEN).then(r => {
-    if (r.ok) { out.className = ''; out.textContent = '已新增 ' + payload.sku + '。'; loadProducts(); }
-    else { out.className = 'err'; out.textContent = r.error || '新增失败' + (r.message ? ' · ' + r.message : ''); }
+  const name = document.getElementById('f_name').value.trim();
+  if (!name) { out.className = 'err'; out.textContent = '商品名称不能为空'; return; }
+  postJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries', {name: name}).then(r => {
+    if (r.ok) {
+      out.className = 'ok'; out.textContent = '已上传。';
+      document.getElementById('f_name').value = '';
+      loadEntries();
+    } else {
+      out.className = 'err'; out.textContent = r.error || '上传失败';
+    }
   });
 });
-bindProductData();
 </script>
 """
         + _FOOTER
@@ -1055,8 +1019,7 @@ def portal_account() -> dict[str, Any]:
   <div id="out"></div>
   <div id="content" style="display:none">
     <div class="card form-card">
-      <p class="small">每个商家都可以<strong>免费上架 10 件商品</strong>，无需令牌，直接在「我的商品」页上传即可。
-        需要上架超过 10 件商品时，请在本页申请商家令牌——平台审核通过后签发，令牌商家上架不限量；
+      <p class="small">上传商品名称到发现目录需要商家令牌——在本页申请，平台审核通过后签发；
         令牌同时也是你的 Agent 接入 API 的凭据。</p>
       <div id="profile"></div>
       <div id="token_box"></div>
@@ -1118,7 +1081,7 @@ function loadMe() {
       applyBtn.disabled = true;
       document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。你仍可免费上架 10 件商品（见上方说明）；超过 10 件或有 API 接入需求时，点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
+      tb.innerHTML = '<p class="small muted">还没有令牌。上传商品名称到发现目录需要商家令牌——点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
       copyBtn.disabled = true;  // 无令牌：复制令牌变灰
       applyBtn.disabled = false;
       document.getElementById('apply_form').style.display = 'none';

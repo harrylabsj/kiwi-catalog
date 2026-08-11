@@ -212,7 +212,8 @@ create table if not exists merchant_tokens (
         merchant_id text primary key,
         token_hash text not null,
         token_encrypted text not null default '',
-        -- v20 — 商家绑定的 shopping-cli token（Fernet 加密；"我的商品"写回用）
+        -- v20 — 商家绑定的 shopping-cli token（Fernet 加密）。v22 起 shopping-cli
+        -- 代理/绑定面已移除，列保留但代码不再读写（从未部署，无数据迁移）。
         shopping_token_encrypted text not null default '',
         status text not null default 'active'
             check(status in ('active','revoked')),
@@ -407,6 +408,28 @@ create table if not exists buyer_search_events (
     """
 create index if not exists idx_buyer_search_events_created
         on buyer_search_events(created_at desc, event_id desc)
+
+    """,
+    # v22 — 发现条目（catalog-local discovery entry）：商家上传商品名称
+    #（仅名称），买家 agent 匿名检索后按 agent 引用跳转。无配额逻辑。
+    # DDL 与迁移链 migration_022 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists discovery_entries (
+        entry_id text primary key,
+        merchant_id text not null,
+        name text not null,
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create index if not exists idx_discovery_entries_merchant
+        on discovery_entries(merchant_id)
+
+    """,
+    """
+create index if not exists idx_discovery_entries_name_lower
+        on discovery_entries(lower(name))
 
     """,
 ]

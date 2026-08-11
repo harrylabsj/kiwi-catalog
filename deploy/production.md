@@ -40,7 +40,7 @@ KIWI_CATALOG_OWNER_TOKEN_SECRET=<强随机值>  # 存量 HMAC 派生 fallback（
 KIWI_CATALOG_EMAIL_VERIFICATION_MODE=smtp  # 生产必须 smtp；未配置会 fail-closed
 # KIWI_CATALOG_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM
 # 可选：KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR=5（默认 5 次/时/邮箱）
-# 可选：KIWI_CATALOG_PROXY_TOKEN=<与 shopping-cli 共享的强随机值>  # 免费通道代理凭据（未配置则免费上传不可用）
+# 可选：KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE=60（默认 60 次/分，公开发现目录检索）
 ```
 
 > 若线上已有 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 且 merchant 在用 HMAC token，
