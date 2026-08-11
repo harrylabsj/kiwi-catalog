@@ -40,6 +40,9 @@ from kiwi_catalog.services import discovery_entries as entries_service
 from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
 _SEARCH_RATE_LIMIT_PER_MINUTE_ENV = "KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE"
+_SEARCH_GLOBAL_RATE_LIMIT_PER_MINUTE_ENV = (
+    "KIWI_CATALOG_DISCOVERY_SEARCH_GLOBAL_RATE_LIMIT_PER_MINUTE"
+)
 
 
 def _search_rate_limit_per_minute() -> int:
@@ -48,6 +51,26 @@ def _search_rate_limit_per_minute() -> int:
     return rate_limit_per_minute(
         os.environ.get(_SEARCH_RATE_LIMIT_PER_MINUTE_ENV), default=60, maximum=2**63 - 1
     )
+
+
+def _search_global_rate_limit_per_minute() -> int:
+    from kiwi_catalog.services.buyer_bootstrap import rate_limit_per_minute
+
+    # 总量兜底默认 600/min：必须高于 per-IP 默认（60），否则退化为共享单桶
+    return rate_limit_per_minute(
+        os.environ.get(_SEARCH_GLOBAL_RATE_LIMIT_PER_MINUTE_ENV),
+        default=600,
+        maximum=2**63 - 1,
+    )
+
+
+def _search_client_bucket(query: dict[str, Any]) -> str:
+    """限流分桶键：transport 注入的客户端 IP（``_client_ip``，X-Forwarded-For
+    首跳优先、无代理时取直连对端）；缺失（无头/CLI 直调）兜底匿名共享桶。"""
+    client_ip = str(query.get("_client_ip") or "").strip()
+    if client_ip:
+        return f"discovery_search:ip:{client_ip}"
+    return "discovery_search:anonymous"
 
 
 def _session_account(conn, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -162,15 +185,24 @@ def search_discovery(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
     """GET /v1/discovery/search（匿名，限流）——买家 agent 检索商品名称。"""
     limit = result_limit(query.get("limit"), default=20)
     with db_session(db_path) as conn:
-        # 匿名共享桶（调用方无身份）：与既有限流服务同一固定窗口模式
+        # 审查 P3-06：按客户端 IP 分桶（此前全匿名共享单桶——一个客户端即可
+        # 耗尽全体预算对所有人 429）；同时保留 global 总量桶作分布式滥用兜底。
+        backend = SQLiteRateLimitBackend(
+            conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
+        )
         enforce_rate_limit(
-            SQLiteRateLimitBackend(
-                conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
-            ),
-            key="discovery_search:anonymous",
+            backend,
+            key=_search_client_bucket(query),
             limit=_search_rate_limit_per_minute(),
             window_seconds=60,
-            description="discovery search",
+            description="discovery search (per client IP)",
+        )
+        enforce_rate_limit(
+            backend,
+            key="discovery_search:global",
+            limit=_search_global_rate_limit_per_minute(),
+            window_seconds=60,
+            description="discovery search (global)",
         )
         rows = entries_service.search_entries(conn, str(query.get("q") or ""), limit=limit)
         return {"ok": True, "results": [_search_result(row) for row in rows]}

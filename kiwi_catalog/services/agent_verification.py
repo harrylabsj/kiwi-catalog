@@ -1425,11 +1425,16 @@ class VerificationQueue:
     def __del__(self) -> None:
         """GC 兜底：wait=False 的调用方负责最终 shutdown，但若对象被丢弃
         前未关 ledger 连接（测试/短期嵌入场景），随 GC 关闭防泄漏
-        （审查附录 A ResourceWarning）。worker 为 daemon 线程，此时无在途写。
+        （审查附录 A ResourceWarning）。worker/runner 是绑定方法引用，
+        对象能被 GC 即说明无线程持有在途写，此时关闭安全。
+
+        审查 P3-09：不再以 ``not self._shutdown.is_set()`` 为关闭前提——
+        shutdown(wait=False) 后 _shutdown 已置位，该守卫会让 ledger 连接
+        永远无法关闭（shutdown 幂等早退，__del__ 又跳过）→ ResourceWarning。
         """
         try:
             conn = self._db_conn
-            if conn is not None and not self._shutdown.is_set():
+            if conn is not None:
                 conn.close()
                 self._db_conn = None
         except Exception:  # noqa: BLE001 —— GC 路径绝不抛

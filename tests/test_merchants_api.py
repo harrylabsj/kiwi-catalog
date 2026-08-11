@@ -430,6 +430,25 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertEqual(payload["agents_count"], 1)
         self.assertEqual(payload["listings_count"], 1)
 
+    def test_self_resolves_correct_merchant_among_many(self) -> None:
+        """审查 P3-08：多商家 active token 并存时按 token_hash 命中正确商家。"""
+        _, applied_a = self._apply({"contact_email": "a@acme.example"})
+        _, issued_a = self._approve(applied_a["application"]["application_id"])
+        _, applied_b = self._apply({"contact_email": "b@acme.example"})
+        _, issued_b = self._approve(applied_b["application"]["application_id"])
+        self.assertNotEqual(issued_a["merchant_id"], issued_b["merchant_id"])
+
+        status, payload = _call_http(
+            self.app, "GET", "/v1/merchants/self?owner_token=" + issued_b["token"]
+        )[:2]
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["merchant_id"], issued_b["merchant_id"])
+        status, payload = _call_http(
+            self.app, "GET", "/v1/merchants/self?owner_token=" + issued_a["token"]
+        )[:2]
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["merchant_id"], issued_a["merchant_id"])
+
     def test_self_rejects_unknown_and_revoked_tokens(self) -> None:
         status, payload = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=mkt_bogus")[:2]
         self.assertEqual(status, 403, payload)

@@ -218,7 +218,7 @@ RouteEntry(
 RouteEntry(
         {"GET"},
         "/v1/discovery/search",
-        lambda db_path, payload, query, **kw: _v1_search_discovery(db_path, query),
+        lambda db_path, payload, query, **kw: _v1_search_discovery(db_path, query, payload),
     ),
 # ── /v1/merchants（token 分发，docs/kiwi-catalog-token-portal-design-v0.1 §4）──
 # 顺序约束：/v1/merchants/applications 先于 /v1/merchants/{merchant_id}/rotate
@@ -490,8 +490,14 @@ def _v1_search_listings(db_path, payload, query):
     return listings_handlers.v1_search_listings(db_path, query or {})
 
 
-def _v1_search_discovery(db_path, query):
-    return discovery_entries_handlers.search_discovery(db_path, query or {})
+def _v1_search_discovery(db_path, query, payload=None):
+    merged = dict(query or {})
+    # fallback 栈经 payload 透传 _client_ip（限流 per-IP 分桶，审查 P3-06）；
+    # FastAPI 栈在路由层直接注入 query。
+    client_ip = str((payload or {}).get("_client_ip") or "").strip()
+    if client_ip:
+        merged["_client_ip"] = client_ip
+    return discovery_entries_handlers.search_discovery(db_path, merged)
 
 
 # ── /v1/merchants wrapper（token 分发）────────────────────────────────────

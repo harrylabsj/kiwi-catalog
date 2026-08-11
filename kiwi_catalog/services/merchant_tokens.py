@@ -34,7 +34,6 @@ from kiwi_catalog.core.errors import ConflictError, NotFoundError
 from kiwi_catalog.core.tokens import (
     generate_merchant_token,
     token_digest,
-    token_matches,
 )
 from kiwi_catalog.db.session import now_iso
 
@@ -268,15 +267,16 @@ def revoke_token(conn: sqlite3.Connection, merchant_id: str) -> str:
 
 
 def resolve_merchant_by_token(conn: sqlite3.Connection, token: str) -> sqlite3.Row | None:
-    """按呈现 token 的 SHA-256 恒时匹配 merchant_tokens active 行（token 即身份）。
+    """按呈现 token 的 SHA-256 等值命中 merchant_tokens active 行（token 即身份）。
 
+    审查 P3-08：原 O(n) 全表逐行恒时比较改为 token_hash 直接查找——SHA-256
+    输出均匀分布，等值匹配不引入时序侧信道（恒时比较语义不弱化）。
     只认 active：已吊销 token 自查同样 fail-closed（与写路径一致）。
     """
-    digest = token_digest(token)
-    for row in conn.execute("select * from merchant_tokens where status = 'active'").fetchall():
-        if token_matches(digest, str(row["token_hash"])):
-            return row
-    return None
+    return conn.execute(
+        "select * from merchant_tokens where status = 'active' and token_hash = ?",
+        (token_digest(token),),
+    ).fetchone()
 
 
 def merchant_status(

@@ -142,6 +142,15 @@ class MarketplaceASGIApp:
         cookie = headers.get("cookie", "")
         if cookie:
             payload["_cookie"] = cookie
+        # 客户端 IP（/v1/discovery/search 限流 per-IP 分桶，审查 P3-06）：
+        # X-Forwarded-For 首跳优先，无代理时取 ASGI scope 的直连对端。
+        client_ip = headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if not client_ip:
+            client = scope.get("client")
+            if client:
+                client_ip = str(client[0] or "")
+        if client_ip:
+            payload["_client_ip"] = client_ip
         try:
             raw_query = scope.get("query_string", b"").decode("utf-8")
         except UnicodeDecodeError:

@@ -54,13 +54,16 @@ def entry_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _require_active_token(conn: sqlite3.Connection, merchant_id: str) -> None:
+def _require_active_token(
+    conn: sqlite3.Connection, merchant_id: str, *, action: str = "上传商品名称"
+) -> None:
     row = conn.execute(
         "select status from merchant_tokens where merchant_id = ?", (merchant_id,)
     ).fetchone()
     if row is None or str(row["status"]) != "active":
         raise ValidationError(
-            "上传商品名称需要商家令牌——请先在「我的账户」的令牌信息页申请令牌"
+            f"{action}需要有效商家令牌——令牌未签发或已吊销，"
+            "请先在「我的账户」的令牌信息页申请令牌"
         )
 
 
@@ -106,7 +109,12 @@ def create_entry(conn: sqlite3.Connection, merchant_id: str, name: str) -> dict[
 
 
 def list_entries(conn: sqlite3.Connection, merchant_id: str) -> list[dict[str, Any]]:
-    """列商家自己的发现条目（按名称排序，确定性）。"""
+    """列商家自己的发现条目（按名称排序，确定性）。
+
+    取舍（审查 P3-04）：只读自身数据，不做 active token 检查——令牌吊销后
+    商家在会话有效期内仍可查看自己的条目（无写面副作用，数据本就属于
+    该商家）；写路径（create/delete）强制 active token。
+    """
     rows = conn.execute(
         "select * from discovery_entries where merchant_id = ?"
         " order by lower(name), entry_id",
@@ -116,16 +124,28 @@ def list_entries(conn: sqlite3.Connection, merchant_id: str) -> list[dict[str, A
 
 
 def delete_entry(conn: sqlite3.Connection, merchant_id: str, entry_id: str) -> None:
-    """删除商家自己的条目（越权/不存在 → 404，不泄露归属）。"""
+    """删除商家自己的条目（越权/不存在 → 404，不泄露归属）。
+
+    审查 P3-04：与 create 同款 active token 检查——令牌吊销后，7 天会话
+    cookie 不得再改动发现目录写面。
+    """
     entry_id = str(entry_id or "").strip()
     if not entry_id:
         raise ValidationError("entry_id is required")
-    cursor = conn.execute(
-        "delete from discovery_entries where entry_id = ? and merchant_id = ?",
-        (entry_id, str(merchant_id or "").strip()),
-    )
-    if cursor.rowcount != 1:
+    merchant_id = str(merchant_id or "").strip()
+    # 先归属/存在性（404 不泄露归属），再令牌门槛——无令牌商家删他人条目
+    # 仍是 404，只有删自己的条目才暴露「令牌已吊销」。
+    owned = conn.execute(
+        "select 1 from discovery_entries where entry_id = ? and merchant_id = ?",
+        (entry_id, merchant_id),
+    ).fetchone()
+    if owned is None:
         raise NotFoundError(f"Unknown discovery entry: {entry_id}")
+    _require_active_token(conn, merchant_id, action="删除商品名称")
+    conn.execute(
+        "delete from discovery_entries where entry_id = ? and merchant_id = ?",
+        (entry_id, merchant_id),
+    )
 
 
 def search_entries(

@@ -77,7 +77,12 @@ class MerchantShadowTableTest(unittest.TestCase):
     def test_weak_reference_without_shadow_row_does_not_crash(self) -> None:
         db = _make_db()
         self._seed_agent(db, merchant_id="mrc-missing")
-        row = get_catalog_agent_with_merchant(open_connection(db), "cagt-1")
+        # 内联 open_connection 不关连接会漏 ResourceWarning（审查 P3-09）——显式 close
+        conn = open_connection(db)
+        try:
+            row = get_catalog_agent_with_merchant(conn, "cagt-1")
+        finally:
+            conn.close()
         self.assertIsNotNone(row)
         self.assertEqual(row["merchant_id"], "mrc-missing")
         # 影子表无此 merchant → join 字段为 None（弱引用语义，不崩）。
@@ -105,7 +110,11 @@ class MerchantShadowTableTest(unittest.TestCase):
         conn.close()
         self._seed_agent(db, merchant_id="mrc-1")
 
-        row = get_catalog_agent_with_merchant(open_connection(db), "cagt-1")
+        conn = open_connection(db)
+        try:
+            row = get_catalog_agent_with_merchant(conn, "cagt-1")
+        finally:
+            conn.close()
         self.assertEqual(row["merchant_name"], "Acme Tea")
         self.assertEqual(row["merchant_city"], "Hangzhou")
         self.assertEqual(row["merchant_service_area"], "Xihu")
@@ -213,11 +222,15 @@ class AuditShadowTableTest(unittest.TestCase):
         )
         self.assertIn("agent_trust_observations", migrated_tables)
         # 弱引用统一：两条路径都没有 FK 约束。
-        with sqlite3.connect(db) as conn:
+        #（sqlite3.Connection 的 with 只管事务不关连接——显式 close，审查 P3-09）
+        conn = sqlite3.connect(db)
+        try:
             self.assertEqual(
                 len(conn.execute("pragma foreign_key_list(catalog_agents)").fetchall()),
                 0,
             )
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":

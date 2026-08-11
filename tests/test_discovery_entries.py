@@ -14,14 +14,19 @@
 
 """发现条目（discovery entry）测试（v22：catalog 本地目录，替代代理通道）。
 
-- 服务层：token 门槛 / agent 门槛 / 重名（大小写不敏感）/ 名称边界 / CRUD；
-- handler：admin / owner token / portal 账号会话授权（越权 403）；
-- 公开搜索：匿名可用、子串匹配、限流接线；
+- 服务层：token 门槛（create/delete 强制 active，吊销即拒；list 只读放行）
+  / agent 门槛 / 重名（大小写不敏感）/ 名称边界 / CRUD；
+- handler：admin / owner token / portal 账号会话授权（越权 403、吊销后会话
+  删除被拒）；
+- 公开搜索：匿名可用、子串匹配、限流接线（per-IP 分桶 + global 总量兜底，
+  X-Forwarded-For 首跳注入）；
 - portal 页：三种状态（无令牌 / 无 Agent / 正常）与代理时代文案清除。
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -158,6 +163,29 @@ class DiscoveryEntryServiceTest(unittest.TestCase):
             entries_service.delete_entry(conn, "mkt_test", "dsc_missing")
         conn.close()
 
+    def test_revoked_token_blocks_create_and_delete_but_not_list(self) -> None:
+        """审查 P3-04：吊销后 create/delete 被拒（写面一致）；list 是只读
+        自身数据，放行（取舍见 list_entries docstring）。"""
+        db = _make_db()
+        conn = open_connection(db)
+        _ready_merchant(conn)
+        entry = entries_service.create_entry(conn, "mkt_test", "商品")
+        conn.execute(
+            "update merchant_tokens set status = 'revoked' where merchant_id = 'mkt_test'"
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            entries_service.create_entry(conn, "mkt_test", "商品B")
+        self.assertIn("商家令牌", str(ctx.exception))
+        with self.assertRaises(ValidationError) as ctx:
+            entries_service.delete_entry(conn, "mkt_test", entry["entry_id"])
+        self.assertIn("商家令牌", str(ctx.exception))
+        # list 放行：吊销只切断写面，商家仍可只读自己的条目
+        self.assertEqual(
+            [e["entry_id"] for e in entries_service.list_entries(conn, "mkt_test")],
+            [entry["entry_id"]],
+        )
+        conn.close()
+
 
 class DiscoveryEntryHandlersTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -235,6 +263,32 @@ class DiscoveryEntryHandlersTest(unittest.TestCase):
         with self.assertRaises(PermissionDenied):
             handlers.list_entries(self.db, "mkt_test", {"kiwi_session": session})
 
+    def test_session_delete_after_revoke_rejected(self) -> None:
+        """审查 P3-04：令牌吊销后，7 天会话 cookie 不得再删除发现条目
+        （会话写面与 owner token 写面一致 fail-closed）；list 只读放行。"""
+        merchant_id, session = self._make_account("revoked@acme.example")
+        conn = open_connection(self.db)
+        _ready_merchant(conn, merchant_id)
+        conn.commit()
+        conn.close()
+        res = handlers.create_entry(
+            self.db, merchant_id, {"kiwi_session": session, "name": "商品D"}
+        )
+        entry_id = res["entry"]["entry_id"]
+        conn = open_connection(self.db)
+        conn.execute(
+            "update merchant_tokens set status = 'revoked' where merchant_id = ?",
+            (merchant_id,),
+        )
+        conn.commit()
+        conn.close()
+        with self.assertRaises(ValidationError) as ctx:
+            handlers.delete_entry(self.db, merchant_id, entry_id, {"kiwi_session": session})
+        self.assertIn("商家令牌", str(ctx.exception))
+        # list（只读自身数据）放行——吊销只切断写面
+        res = handlers.list_entries(self.db, merchant_id, {"kiwi_session": session})
+        self.assertEqual([e["entry_id"] for e in res["results"]], [entry_id])
+
 
 class DiscoverySearchTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -286,6 +340,102 @@ class DiscoverySearchTest(unittest.TestCase):
             self.assertTrue(res["ok"])
             with self.assertRaises(RateLimitError):
                 handlers.search_discovery(self.db, {"q": "车厘子"})
+
+    def test_search_rate_limit_per_client_ip_buckets(self) -> None:
+        """审查 P3-06：按客户端 IP 分桶——单 IP 超限 429 不影响其他 IP。"""
+        with mock.patch.dict(
+            os.environ,
+            {"KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE": "1"},
+            clear=False,
+        ):
+            res = handlers.search_discovery(
+                self.db, {"q": "猕猴桃", "_client_ip": "203.0.113.1"}
+            )
+            self.assertTrue(res["ok"])
+            with self.assertRaises(RateLimitError):
+                handlers.search_discovery(
+                    self.db, {"q": "猕猴桃", "_client_ip": "203.0.113.1"}
+                )
+            # 不同 IP 独立桶：不受 203.0.113.1 超限影响
+            res = handlers.search_discovery(
+                self.db, {"q": "猕猴桃", "_client_ip": "203.0.113.2"}
+            )
+            self.assertTrue(res["ok"])
+
+    def test_search_global_rate_limit_cap(self) -> None:
+        """审查 P3-06：global 总量桶兜底——不同 IP 共享总量上限（防分布式滥用）。"""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE": "60",
+                "KIWI_CATALOG_DISCOVERY_SEARCH_GLOBAL_RATE_LIMIT_PER_MINUTE": "2",
+            },
+            clear=False,
+        ):
+            handlers.search_discovery(self.db, {"_client_ip": "198.51.100.1"})
+            handlers.search_discovery(self.db, {"_client_ip": "198.51.100.2"})
+            with self.assertRaises(RateLimitError):
+                handlers.search_discovery(self.db, {"_client_ip": "198.51.100.3"})
+
+
+class DiscoverySearchTransportTest(unittest.TestCase):
+    """_client_ip 双栈注入接线（fallback ASGI：X-Forwarded-For 首跳优先）。"""
+
+    def setUp(self) -> None:
+        self.db = _make_db()
+        conn = open_connection(self.db)
+        _ready_merchant(conn)
+        entries_service.create_entry(conn, "mkt_test", "有机猕猴桃礼盒")
+        conn.commit()
+        conn.close()
+
+    def _get(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict]:
+        from kiwi_catalog.api.app import create_catalog_app
+
+        app = create_catalog_app(str(self.db))
+        scope_headers = [(key.lower().encode("latin1"), value.encode("latin1")) for key, value in (headers or {}).items()]
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": path.split("?", 1)[0],
+            "headers": scope_headers,
+            "query_string": (path.split("?", 1)[1].encode() if "?" in path else b""),
+        }
+        received: list[dict] = []
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg: dict) -> None:
+            received.append(msg)
+
+        asyncio.run(app(scope, receive, send))
+        start = next(m for m in received if m["type"] == "http.response.start")
+        body = b"".join(m.get("body", b"") for m in received if m["type"] == "http.response.body")
+        return int(start.get("status", 500)), json.loads(body.decode())
+
+    def test_forwarded_for_drives_per_ip_bucket(self) -> None:
+        """审查 P3-06：X-Forwarded-For 首跳决定限流桶——同一首跳第二次 429，
+        换首跳不受牵连。"""
+        with mock.patch.dict(
+            os.environ,
+            {"KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE": "1"},
+            clear=False,
+        ):
+            status, _ = self._get(
+                "/v1/discovery/search?q=猕猴桃",
+                {"X-Forwarded-For": "203.0.113.9, 10.0.0.1"},
+            )
+            self.assertEqual(status, 200)
+            status, _ = self._get(
+                "/v1/discovery/search?q=猕猴桃",
+                {"X-Forwarded-For": "203.0.113.9, 10.0.0.2"},
+            )
+            self.assertEqual(status, 429)
+            status, payload = self._get(
+                "/v1/discovery/search?q=猕猴桃", {"X-Forwarded-For": "203.0.113.10"}
+            )
+            self.assertEqual(status, 200, payload)
 
 
 class PortalProductsPageTest(unittest.TestCase):
