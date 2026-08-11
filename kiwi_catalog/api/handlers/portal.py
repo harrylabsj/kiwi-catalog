@@ -1020,19 +1020,32 @@ document.getElementById('bind_btn').addEventListener('click', () => {
     else { out.className = 'err'; out.textContent = r.error || '绑定失败'; }
   });
 });
+function resolveMerchantThen(next) {
+  // MERCHANT 可能因 bindProductData 的 fetch 尚未返回而暂空——点击时重新解析身份
+  if (MERCHANT !== '') { next(); return; }
+  getJson('/v1/accounts/me').then(r => {
+    if (r.ok && r.merchant_id) {
+      MERCHANT = r.merchant_id;
+      OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
+    }
+    next();
+  });
+}
 document.getElementById('show_add').addEventListener('click', () => {
   const card = document.getElementById('add_card');
-  if (MERCHANT === '') {
-    document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌，审批通过后再上传商品。';
-    return;
-  }
-  if (!SHOP_BOUND) {
-    document.getElementById('bind_card').style.display = 'block';
-    document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
-    card.style.display = 'none';
-    return;
-  }
-  card.style.display = card.style.display === 'none' ? 'block' : 'none';
+  resolveMerchantThen(() => {
+    if (MERCHANT === '') {
+      document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌，审批通过后再上传商品。';
+      return;
+    }
+    if (!SHOP_BOUND) {
+      document.getElementById('bind_card').style.display = 'block';
+      document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = card.style.display === 'none' ? 'block' : 'none';
+  });
 });
 document.getElementById('add_btn').addEventListener('click', () => {
   const payload = {
