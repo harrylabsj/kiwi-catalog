@@ -35,7 +35,7 @@ from unittest import mock
 from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.api.auth import owner_token
 from kiwi_catalog.core.errors import ConflictError
-from kiwi_catalog.db.session import open_connection
+from kiwi_catalog.db.session import db_session, open_connection
 from kiwi_catalog.services.agent_catalog_writes import register_catalog_agent
 
 OWNER_SECRET = "test-multi-merchant-secret"
@@ -178,7 +178,7 @@ class MultiMerchantHttpTest(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.app = create_catalog_app(self.db_path)
         # A 的 governed（suspended）agent 在 shared.example。
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             self.a_id = register_catalog_agent(
                 conn, domain="shared.example", merchant_id="mrc-A", actor="test"
             )["catalog_agent_id"]
@@ -205,7 +205,7 @@ class MultiMerchantHttpTest(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         b_id = payload["agent"]["catalog_agent_id"]
         self.assertNotEqual(b_id, self.a_id)
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             a_row = conn.execute(
                 "select merchant_id, administrative_state from catalog_agents where catalog_agent_id=?",
                 (self.a_id,),
@@ -236,7 +236,7 @@ class MultiMerchantHttpTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["agent"]["catalog_agent_id"], self.a_id)
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             a_row = conn.execute(
                 "select merchant_id, administrative_state from catalog_agents where catalog_agent_id=?",
                 (self.a_id,),

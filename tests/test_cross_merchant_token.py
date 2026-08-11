@@ -38,7 +38,7 @@ from unittest import mock
 from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.api.auth import owner_token
 from kiwi_catalog.core.errors import AuthError, ConflictError
-from kiwi_catalog.db.session import open_connection
+from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services.agent_catalog_writes import (
     claim_catalog_agent,
     register_catalog_agent,
@@ -100,7 +100,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
         self.t1 = owner_token("mrc-1")
         self.t2 = owner_token("mrc-2")
         self.t3 = owner_token("mrc-3")  # 无 agent 的新商户，用于正向 claim
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             # mrc-1 已绑定 agent + 一个未绑定（匿名）agent。
             self.bound_id = register_catalog_agent(
                 conn, domain="bound.example", merchant_id="mrc-1", actor="test"
@@ -137,7 +137,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         cid = payload["agent"]["catalog_agent_id"]
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             row = conn.execute(
                 "select merchant_id from catalog_agents where catalog_agent_id = ?", (cid,)
             ).fetchone()
@@ -148,7 +148,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
         status, payload = self._register({"domain": "anon.example", "owner_token": self.t1})
         self.assertEqual(status, 200, payload)
         cid = payload["agent"]["catalog_agent_id"]
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             row = conn.execute(
                 "select merchant_id from catalog_agents where catalog_agent_id = ?", (cid,)
             ).fetchone()
@@ -169,7 +169,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
         ):
             status, payload = self._claim(self.free_id, {"merchant_id": "mrc-3", "owner_token": self.t3})
         self.assertEqual(status, 200, payload)
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             row = conn.execute(
                 "select merchant_id from catalog_agents where catalog_agent_id = ?", (self.free_id,)
             ).fetchone()
@@ -198,7 +198,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
     def test_claim_identity_requires_token_to_match_body_merchant(self) -> None:
         from kiwi_catalog.api.handlers.agent_catalog import _claim_identity
 
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             from kiwi_catalog.agent_catalog.sqlite_repository import require_catalog_agent
 
             row = require_catalog_agent(conn, self.free_id)
@@ -213,7 +213,7 @@ class CrossMerchantTokenTest(unittest.TestCase):
     def test_service_claim_blocks_cross_merchant_takeover(self) -> None:
         """service 兜底：domain 挑战通过（攻击者真控制域名）也无法把已绑定
         agent 改绑到别的 merchant。"""
-        with open_connection(self.db_path) as conn:
+        with db_session(self.db_path) as conn:
             with self.assertRaises(ConflictError):
                 claim_catalog_agent(
                     conn,

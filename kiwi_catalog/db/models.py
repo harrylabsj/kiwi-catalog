@@ -207,14 +207,12 @@ create table if not exists merchants (
     # token_encrypted = Fernet 加密明文（v14 起，登录后"我的"可查）；明文不进
     # 日志。merchant_applications：申请工单，approve 时平台签发 mkt_<rand>
     # merchant_id 并原子写入三张表；account_id（v14）归属注册账号。
+    #（v20 的 shopping_token_encrypted 列随代理/绑定面移除成为死列，v23 已删除。）
     """
 create table if not exists merchant_tokens (
         merchant_id text primary key,
         token_hash text not null,
         token_encrypted text not null default '',
-        -- v20 — 商家绑定的 shopping-cli token（Fernet 加密）。v22 起 shopping-cli
-        -- 代理/绑定面已移除，列保留但代码不再读写（从未部署，无数据迁移）。
-        shopping_token_encrypted text not null default '',
         status text not null default 'active'
             check(status in ('active','revoked')),
         issued_at text not null,

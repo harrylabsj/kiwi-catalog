@@ -313,11 +313,15 @@ class AccountsApiTest(unittest.TestCase):
         # 明文与签发时一致（加密存储可解密找回）
         self.assertEqual(payload["token"]["token"], issued["token"])
         self.assertNotEqual(payload["token"]["token"], "")
-        with sqlite3.connect(self.db_path) as conn:
+        # sqlite3.Connection 的 with 只管事务不关连接（审查 P3-09）——显式 close
+        conn = sqlite3.connect(self.db_path)
+        try:
             event = conn.execute(
                 "select event, details_json from audit_events "
                 "where event = 'merchant_token_viewed' order by id desc limit 1"
             ).fetchone()
+        finally:
+            conn.close()
         self.assertIsNotNone(event)
         self.assertEqual(event[0], "merchant_token_viewed")
         self.assertNotIn(issued["token"], event[1])

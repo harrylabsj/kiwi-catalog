@@ -393,7 +393,15 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/discovery/search")
     def v1_search_discovery(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_search_discovery(db_path, _query_params_from_request(request))
+        query = _query_params_from_request(request)
+        # 限流 per-IP 分桶（审查 P3-06）：X-Forwarded-For 首跳优先，无代理时
+        # 取直连对端；与 fallback 注入同一 _client_ip 键。
+        client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        if not client_ip and request.client is not None:
+            client_ip = str(request.client.host or "")
+        if client_ip:
+            query["_client_ip"] = client_ip
+        return _v1_search_discovery(db_path, query)
 
     @app.get("/v1/listings/{listing_id}")
     def v1_get_listing(listing_id: str) -> dict[str, Any]:

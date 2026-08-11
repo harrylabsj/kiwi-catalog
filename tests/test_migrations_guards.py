@@ -16,7 +16,8 @@
 
 - v7 唯一索引：历史重复 merchant 绑定 → fail-closed 明确错误（而非静默卡死启动）；
 - v8 回填：只回填仍持默认值的行——中间版本已写入的真实三域值不得被覆盖；
-- v11 canonical_domain 唯一索引：数据层兜底存在，重复写入抛 IntegrityError。
+- v11 canonical_domain 唯一索引：数据层兜底存在，重复写入抛 IntegrityError；
+- v23 死列删除：shopping_token_encrypted 从旧库移除，既有行其他列不丢。
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from kiwi_catalog.db.migrations import (
     migration_007_merchant_single_agent,
     migration_008_three_state_domains,
     migration_011_search_indexes_and_domain_unique,
+    migration_023_drop_merchant_shopping_token,
 )
 
 _TS = "2026-01-01T00:00:00+00:00"
@@ -143,6 +145,56 @@ class Migration011DomainUniqueTest(unittest.TestCase):
             conn.commit()
             with self.assertRaises(sqlite3.IntegrityError):
                 _insert_agent(conn, "cagt_b", "dup.example")
+        finally:
+            conn.close()
+
+
+class Migration023DropShoppingTokenTest(unittest.TestCase):
+    """审查 P3-05：v23 删除 merchant_tokens.shopping_token_encrypted 死列。"""
+
+    def _db_at_v22(self) -> sqlite3.Connection:
+        """只跑到 v22 的旧库（仍含 shopping_token_encrypted 列）。"""
+        tmp = tempfile.mkdtemp()
+        conn = sqlite3.connect(Path(tmp) / "legacy.sqlite")
+        conn.row_factory = sqlite3.Row
+        for migration in MIGRATIONS:
+            if migration.version > 22:
+                break
+            migration.apply(conn)
+        _set_schema_user_version(conn, 22)
+        conn.commit()
+        return conn
+
+    def test_column_dropped_and_other_columns_preserved(self) -> None:
+        conn = self._db_at_v22()
+        try:
+            conn.execute(
+                "insert into merchant_tokens("
+                " merchant_id, token_hash, token_encrypted, shopping_token_encrypted,"
+                " status, issued_at, rotated_at, revoked_at)"
+                " values ('mkt_a', 'hash-a', 'enc-a', 'shop-enc-a', 'active', ?, 'r1', '')",
+                (_TS,),
+            )
+            conn.commit()
+            migration_023_drop_merchant_shopping_token(conn)
+            conn.commit()
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(merchant_tokens)").fetchall()
+            }
+            self.assertNotIn("shopping_token_encrypted", columns)
+            # 数据保留：既有行的其他列不丢
+            row = conn.execute(
+                "select * from merchant_tokens where merchant_id = 'mkt_a'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["token_hash"], "hash-a")
+            self.assertEqual(row["token_encrypted"], "enc-a")
+            self.assertEqual(row["status"], "active")
+            self.assertEqual(row["issued_at"], _TS)
+            self.assertEqual(row["rotated_at"], "r1")
+            # 幂等：列已不存在再跑不报错
+            migration_023_drop_merchant_shopping_token(conn)
         finally:
             conn.close()
 

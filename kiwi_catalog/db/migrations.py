@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 
 @dataclass(frozen=True)
@@ -745,6 +745,7 @@ def migration_020_merchant_shopping_token(conn: sqlite3.Connection) -> None:
 
     商家在 portal 绑定自己的 SHOPPING_MERCHANT_TOKEN，Fernet 加密存储（与 owner
     token 的 token_encrypted 同机制）。幂等 ALTER（参照 v16 模式）。
+    （代理/绑定面从未部署即移除，该死列由 v23 重新删除。）
     """
     if not _column_exists(conn, "merchant_tokens", "shopping_token_encrypted"):
         conn.execute(
@@ -789,11 +790,24 @@ def migration_022_discovery_entries(conn: sqlite3.Connection) -> None:
     （tests/test_shadow_tables.py 锁定 fresh 路径与迁移路径等价）。
 
     伴随变更（无数据迁移——代理/绑定功能从未部署）：
-    merchant_tokens.shopping_token_encrypted 列保留在库中（无害），但代码
-    已不再读写——shopping-token 绑定面随代理通道一并移除。
+    merchant_tokens.shopping_token_encrypted 列的代码读写随代理通道移除
+    （v23 已把该死列从库中删除）。
     """
     for statement in _DISCOVERY_ENTRIES_DDL:
         conn.execute(statement)
+
+
+def migration_023_drop_merchant_shopping_token(conn: sqlite3.Connection) -> None:
+    """删除 merchant_tokens.shopping_token_encrypted 死列（审查 P3-05）。
+
+    代理/绑定面随 v22 移除后该列无任何读写（从未部署，无数据迁移——
+    列值全是默认空串）。SQLite ≥3.35 原生 DROP COLUMN（部署镜像
+    python:3.13 自带 3.4x）；幂等：列不存在则跳过。
+    """
+    if _column_exists(conn, "merchant_tokens", "shopping_token_encrypted"):
+        conn.execute(
+            "alter table merchant_tokens drop column shopping_token_encrypted"
+        )
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -819,6 +833,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(20, "merchant_shopping_token", migration_020_merchant_shopping_token),
     Migration(21, "merchant_application_agent_id", migration_021_merchant_application_agent_id),
     Migration(22, "discovery_entries", migration_022_discovery_entries),
+    Migration(23, "drop_merchant_shopping_token", migration_023_drop_merchant_shopping_token),
 )
 
 
