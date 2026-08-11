@@ -193,6 +193,25 @@ def revoke_token(
         return {"ok": True, "merchant_id": merchant_id, "token_status": token_status}
 
 
+def validate_token(
+    db_path: str | Path, merchant_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/merchants/{merchant_id}/token/validate（跨服务校验）。
+
+    shopping-cli 等信任方校验商家 owner token（方案A：catalog 做身份权威）。
+    调用方出示要校验的 token，返回 valid。同机服务调用，无需调用方凭据。
+    """
+    merchant_id = str(merchant_id).strip()
+    presented = str(payload.get("token") or "").strip()
+    if not merchant_id:
+        raise ValidationError("merchant_id is required")
+    if not presented:
+        raise ValidationError("token is required")
+    with db_session(db_path) as conn:
+        valid = api_auth.validate_merchant_token(presented, merchant_id, conn)
+        return {"ok": True, "valid": bool(valid), "merchant_id": merchant_id}
+
+
 def self_status(
     db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
 ) -> dict[str, Any]:

@@ -69,9 +69,20 @@ def get_shopping_token(conn, merchant_id: str) -> str:
 
 
 def _require_token(conn, merchant_id: str) -> str:
-    token = get_shopping_token(conn, merchant_id)
+    """统一令牌（方案A）：用 catalog owner token 调 shopping-cli（跨服务校验）。
+
+    shopping-cli 配置了 KIWI_CATALOG_AUTH_URL 后，商家 owner token 即通用
+    凭据——无需单独绑定 SHOPPING_MERCHANT_TOKEN。
+    """
+    row = conn.execute(
+        "select token_encrypted from merchant_tokens where merchant_id = ?",
+        (merchant_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(f"Unknown merchant: {merchant_id}")
+    token = decrypt_merchant_token(str(row["token_encrypted"] or ""))
     if not token:
-        raise ValidationError("未绑定 shopping-cli token——请先在「我的商品」页绑定")
+        raise ValidationError("商家尚未签发 owner token——请先在 My Account 申请令牌")
     return token
 
 
