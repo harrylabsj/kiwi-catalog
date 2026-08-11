@@ -241,7 +241,6 @@ def _nav(active: str = "") -> str:
     申请按钮）。
     """
     account_cls = ' class="active"' if active == "account" else ""
-    products_cls = ' class="active"' if active == "products" else ""
     return f"""
 <nav class="nav"><div class="nav-inner">
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
@@ -251,7 +250,6 @@ def _nav(active: str = "") -> str:
     <a href="{_OFFICIAL_HOME}merchants.html">For Merchants</a>
     <a href="{_OFFICIAL_HOME}developers.html">For Developers</a>
     <a href="/portal/account"{account_cls}>My Account</a>
-    <a href="/portal/products"{products_cls}>我的商品</a>
   </div>
 </div></nav>
 """
@@ -895,7 +893,7 @@ def portal_products() -> dict[str, Any]:
   <div class="kicker">Merchant</div>
   <h2>我的商品</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>申请令牌</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
   </div>
@@ -914,6 +912,7 @@ def portal_products() -> dict[str, Any]:
 
   <div class="card form-card" id="product_card" style="display:none">
     <h3>商品列表</h3>
+    <div style="margin-bottom:12px"><button class="btn-form" id="show_add">上传商品</button></div>
     <div id="out"></div>
     <div id="list"></div>
   </div>
@@ -943,7 +942,7 @@ function bindProductData() {
       if (!s.ok) { document.getElementById('out').textContent = s.error || '查询失败'; return; }
       if (!s.bound) { document.getElementById('bind_card').style.display = 'block'; return; }
       document.getElementById('bind_card').style.display = 'none';
-      document.getElementById('add_card').style.display = 'block';
+      document.getElementById('product_card').style.display = 'block';
       loadProducts();
     });
   });
@@ -1000,9 +999,13 @@ document.getElementById('bind_btn').addEventListener('click', () => {
     method: 'PUT', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OWNER_TOKEN},
     body: JSON.stringify({ shopping_cli_token: token }),
   }).then(res => res.json()).then(r => {
-    if (r.ok) { out.className = ''; out.textContent = '绑定成功。'; document.getElementById('bind_card').style.display = 'none'; document.getElementById('add_card').style.display = 'block'; loadProducts(); }
+    if (r.ok) { out.className = ''; out.textContent = '绑定成功。'; document.getElementById('bind_card').style.display = 'none'; document.getElementById('product_card').style.display = 'block'; loadProducts(); }
     else { out.className = 'err'; out.textContent = r.error || '绑定失败'; }
   });
+});
+document.getElementById('show_add').addEventListener('click', () => {
+  const card = document.getElementById('add_card');
+  card.style.display = card.style.display === 'none' ? 'block' : 'none';
 });
 document.getElementById('add_btn').addEventListener('click', () => {
   const payload = {
@@ -1042,7 +1045,7 @@ def portal_account() -> dict[str, Any]:
   <div class="kicker">My Account</div>
   <h2>我的</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>申请令牌</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
   </div>
@@ -1068,19 +1071,6 @@ def portal_account() -> dict[str, Any]:
         <textarea id="a_purpose" rows="2" placeholder="想销售的商品类目"></textarea>
         <button class="btn-form" id="request_token">申请令牌</button>
       </div>
-      <div class="section-title" style="text-align:left;margin-top:26px">账户基本信息</div>
-      <div id="profile_edit" style="text-align:left">
-        <label for="p_email">邮箱（登录账号，不可修改）</label>
-        <input id="p_email" disabled>
-        <label for="p_name">商家名称</label>
-        <input id="p_name">
-        <label for="p_agent_id">Agent ID（可修改/增添）</label>
-        <input id="p_agent_id">
-        <label for="p_phone">电话（选填）</label>
-        <input id="p_phone">
-        <button class="btn-form" id="save_profile">保存基本信息</button>
-        <div id="out_profile"></div>
-      </div>
       <button class="btn-form" id="logout">退出登录</button>
     </div>
   </div>
@@ -1104,15 +1094,11 @@ function loadMe() {
         + ' · ' + esc(r.application.agent_name) + ' · ' + esc(r.application.domain) + '</p>';
     }
     p.innerHTML = html;
-    document.getElementById('p_email').value = r.email;
-    document.getElementById('p_name').value = r.merchant_name || '';
-    document.getElementById('p_phone').value = r.phone || '';
-    document.getElementById('p_agent_id').value = (r.application && r.application.agent_id) || '';
     const tb = document.getElementById('token_box');
     const copyBtn = document.getElementById('copy_token');
     const applyBtn = document.getElementById('show_apply');
     if (r.token && r.token.status === 'active') {
-      tb.innerHTML = '<p class="small">商家令牌（mkt_…，当前登录会话可查看；遗失或疑似泄露请联系运营轮换）</p>'
+      tb.innerHTML = '<p class="small">商家令牌（仅你可见，请妥善保存）</p>'
         + '<div class="token-box">' + esc(r.token.token) + '</div>'
         + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
         + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
@@ -1160,26 +1146,6 @@ document.getElementById('request_token').addEventListener('click', () => {
     }
   });
 });
-document.getElementById('save_profile').addEventListener('click', () => {
-  const btn = document.getElementById('save_profile');
-  btn.disabled = true;
-  postJson('/v1/accounts/profile', {
-    merchant_name: document.getElementById('p_name').value.trim(),
-    phone: document.getElementById('p_phone').value.trim(),
-    agent_id: document.getElementById('p_agent_id').value.trim(),
-  }).then(r => {
-    const out = document.getElementById('out_profile');
-    if (r.ok) {
-      out.className = 'ok';
-      out.textContent = '已保存。';
-      loadMe();
-    } else {
-      out.className = 'err';
-      out.textContent = r.error || '保存失败';
-      btn.disabled = false;
-    }
-  });
-});
 document.getElementById('logout').addEventListener('click', () => {
   postJson('/v1/accounts/logout', {}).then(() => { window.location.href = '/portal'; });
 });
@@ -1202,7 +1168,7 @@ def portal_account_profile() -> dict[str, Any]:
   <div class="kicker">My Account</div>
   <h2>我的</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>申请令牌</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
   </div>
