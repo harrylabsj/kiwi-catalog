@@ -539,6 +539,20 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
         )
 
+    def _merchant_payload_with_session(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """商家商品路由的 payload：追加透传会话 cookie（免费通道账号会话鉴权）。
+
+        与 fallback_asgi 的全量 cookie 透传对齐；payload 应先经
+        api_auth.payload_with_auth 合并 Authorization/idempotency 头。
+        """
+        cookie = request.headers.get("cookie", "")
+        if cookie:
+            payload = dict(payload)
+            payload["_cookie"] = cookie
+        return payload
+
     @app.get("/v1/merchants/{merchant_id}/products")
     def v1_merchant_products_list(
         merchant_id: str, request: _FastAPIRequest
@@ -546,25 +560,34 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _v1_merchant_products_list(
             db_path,
             merchant_id,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _merchant_payload_with_session(
+                request,
+                api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            ),
             _query_params_from_request(request),
         )
 
     @app.post("/v1/merchants/{merchant_id}/products")
     def v1_merchant_products_create(
         merchant_id: str,
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
         return _v1_merchant_products_create(
-            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path,
+            merchant_id,
+            _merchant_payload_with_session(
+                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            ),
         )
 
     @app.patch("/v1/merchants/{merchant_id}/products/{sku}")
     def v1_merchant_products_update(
         merchant_id: str,
         sku: str,
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
@@ -573,7 +596,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path,
             merchant_id,
             sku,
-            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+            _merchant_payload_with_session(
+                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            ),
         )
 
     @app.get("/v1/merchants/self")
