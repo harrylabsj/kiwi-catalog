@@ -1055,6 +1055,9 @@ def portal_account() -> dict[str, Any]:
   <div id="out"></div>
   <div id="content" style="display:none">
     <div class="card form-card">
+      <p class="small">每个商家都可以<strong>免费上架 10 件商品</strong>，无需令牌，直接在「我的商品」页上传即可。
+        需要上架超过 10 件商品时，请在本页申请商家令牌——平台审核通过后签发，令牌商家上架不限量；
+        令牌同时也是你的 Agent 接入 API 的凭据。</p>
       <div id="profile"></div>
       <div id="token_box"></div>
       <div class="token-actions">
@@ -1115,7 +1118,7 @@ function loadMe() {
       applyBtn.disabled = true;
       document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
+      tb.innerHTML = '<p class="small muted">还没有令牌。你仍可免费上架 10 件商品（见上方说明）；超过 10 件或有 API 接入需求时，点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
       copyBtn.disabled = true;  // 无令牌：复制令牌变灰
       applyBtn.disabled = false;
       document.getElementById('apply_form').style.display = 'none';
