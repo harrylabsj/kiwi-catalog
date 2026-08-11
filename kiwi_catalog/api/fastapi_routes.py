@@ -60,7 +60,6 @@ from kiwi_catalog.api.route_table import (
     _v1_merchant_discovery_entry_create,
     _v1_merchant_discovery_entry_delete,
     _v1_merchant_self,
-    _v1_merchant_validate_token,
     _v1_publish_listing,
     _v1_refresh_agent,
     _v1_register_agent,
@@ -509,16 +508,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _v1_revoke_token(
             db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.post("/v1/merchants/{merchant_id}/token/validate")
-    def v1_merchant_validate_token(
-        merchant_id: str,
-        payload: dict[str, Any],
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_merchant_validate_token(
-            db_path, merchant_id, api_auth.payload_with_auth(payload, "", idempotency_key)
         )
 
     def _merchant_payload_with_session(

@@ -283,13 +283,6 @@ RouteEntry(
         ),
     ),
 RouteEntry(
-        {"POST"},
-        "/v1/merchants/{merchant_id}/token/validate",
-        lambda db_path, payload, query, merchant_id: _v1_merchant_validate_token(
-            db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
         {"GET"},
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
@@ -538,10 +531,6 @@ def _v1_merchant_discovery_entries_list(db_path, merchant_id, payload):
 
 def _v1_merchant_discovery_entry_delete(db_path, merchant_id, entry_id, payload):
     return discovery_entries_handlers.delete_entry(db_path, merchant_id, entry_id, payload)
-
-
-def _v1_merchant_validate_token(db_path, merchant_id, payload):
-    return merchants_handlers.validate_token(db_path, merchant_id, payload)
 
 
 def _v1_merchant_self(db_path, payload, query):

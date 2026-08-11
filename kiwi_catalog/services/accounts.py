@@ -23,7 +23,7 @@
   httpOnly cookie 传递（服务端渲染的页面用 cookie，API 端到端测试用 header）；
 - **token 找回**：merchant_tokens.token_encrypted 存 Fernet 加密明文——
   登录后"我的"随时可查（解决签发即丢失）；Fernet key 从
-  KIWI_CATALOG_OWNER_TOKEN_SECRET 经 HKDF-SHA256 派生（零新配置）；
+  KIWI_CATALOG_OWNER_TOKEN_SECRET 加固定盐前缀经 SHA-256 派生（零新配置）；
 - 密码 hash：PBKDF2-HMAC-SHA256（200k 迭代 + 随机盐）。
 
 依赖例外：cryptography（Fernet）——标准库无可逆加密；安全存储商家

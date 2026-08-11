@@ -42,7 +42,7 @@ shadow tables），是 kiwi 仓（`<WORKSPACE>/kiwi`）AgentDiscovery 的消费�
 ## 常用命令
 
 ```sh
-python3 -m unittest discover -s tests   # 全量测试（5 skip 为 FastAPI 条件）
+python3 -m unittest discover -s tests   # 全量测试（10 skip 为 FastAPI 条件）
 docker build -t kiwi-catalog:test .     # 部署冒烟
 docker run --rm -p 8601:8600 -e KIWI_CATALOG_OWNER_TOKEN_SECRET=... kiwi-catalog:test
 ```
@@ -70,10 +70,18 @@ docker run --rm -p 8601:8600 -e KIWI_CATALOG_OWNER_TOKEN_SECRET=... kiwi-catalog
 ## 约定
 
 - 数据目录/文件 0700/0600；owner token 双路径（docs/kiwi-catalog-token-portal-design-v0.1）：
-  随机 token（`mkt_` + 32B urlsafe，SHA-256 落库 merchant_tokens，明文仅
-  签发/轮换时响应一次）优先；HMAC-SHA256(secret, `kiwi-catalog-owner:{merchant_id}`)
-  派生路径 fallback（存量兼容）。轮换/吊销只走 admin（泄露场景下旧 token 自助
-  轮换=攻击者也能轮换）。
+  随机 token（`mkt_` + 32B urlsafe）落库 merchant_tokens 优先；HMAC-SHA256(secret,
+  `kiwi-catalog-owner:{merchant_id}`) 派生路径 fallback（存量兼容）。轮换/吊销只走
+  admin（泄露场景下旧 token 自助轮换=攻击者也能轮换）。
+  - **存储双轨**：`token_hash`（SHA-256，校验时恒时比较）+ `token_encrypted`
+    （Fernet 可逆加密明文，key 由 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 加固定盐前缀
+    经 SHA-256 派生，services/accounts.py）。签发/轮换响应回明文一次；此外已登录
+    会话的 `/v1/accounts/me` **每次回显明文**——刻意的「令牌找回」设计（补救
+    签发即丢失），每次回显记 `merchant_token_viewed` 审计（不含明文，
+    handlers/accounts.py `_audit_token_view`）。
+  - **威胁模型**：DB 文件与 owner secret 单独泄露都不够——hash 不可逆、密文
+    无 key 解不开；两者同时泄露 → 全部商家令牌可解密（owner secret 因此按
+    与 DB 同等级保护）。
 - 时间戳格式：全库 ISO 文本（UTC、无微秒，`now_iso()`）——唯一例外是
   `verification_queue_tasks` 的 `enqueued_at`/`started_at`/`finished_at`
   （epoch REAL，与 `time.time()` 同单位，数值比较；跨表比较前先转换）。
