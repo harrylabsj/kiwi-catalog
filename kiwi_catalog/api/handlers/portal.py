@@ -932,17 +932,25 @@ def portal_products() -> dict[str, Any]:
 <script>
 let MERCHANT = '';
 let OWNER_TOKEN = '';
+let SHOP_BOUND = false;
 function esc(v) { return escHtml(v); }
 function bindProductData() {
   getJson('/v1/accounts/me').then(r => {
     if (!r.ok || !r.merchant_id) { document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌。'; return; }
     MERCHANT = r.merchant_id;
     OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
+    // 上传/列表入口始终可见；未绑定 shopping-cli 令牌则先提示绑定
+    document.getElementById('product_card').style.display = 'block';
     getJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/shopping-token/status', OWNER_TOKEN).then(s => {
       if (!s.ok) { document.getElementById('out').textContent = s.error || '查询失败'; return; }
-      if (!s.bound) { document.getElementById('bind_card').style.display = 'block'; return; }
+      if (!s.bound) {
+        SHOP_BOUND = false;
+        document.getElementById('bind_card').style.display = 'block';
+        document.getElementById('out').textContent = '已显示上传入口。保存/上传商品前，请先绑定 shopping-cli 令牌。';
+        return;
+      }
+      SHOP_BOUND = true;
       document.getElementById('bind_card').style.display = 'none';
-      document.getElementById('product_card').style.display = 'block';
       loadProducts();
     });
   });
@@ -999,13 +1007,16 @@ document.getElementById('bind_btn').addEventListener('click', () => {
     method: 'PUT', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OWNER_TOKEN},
     body: JSON.stringify({ shopping_cli_token: token }),
   }).then(res => res.json()).then(r => {
-    if (r.ok) { out.className = ''; out.textContent = '绑定成功。'; document.getElementById('bind_card').style.display = 'none'; document.getElementById('product_card').style.display = 'block'; loadProducts(); }
+    if (r.ok) { out.className = ''; out.textContent = '绑定成功。'; SHOP_BOUND = true; document.getElementById('bind_card').style.display = 'none'; document.getElementById('product_card').style.display = 'block'; loadProducts(); }
     else { out.className = 'err'; out.textContent = r.error || '绑定失败'; }
   });
 });
 document.getElementById('show_add').addEventListener('click', () => {
   const card = document.getElementById('add_card');
-  card.style.display = card.style.display === 'none' ? 'block' : 'none';
+  if (SHOP_BOUND) { card.style.display = card.style.display === 'none' ? 'block' : 'none'; return; }
+  document.getElementById('bind_card').style.display = 'block';
+  document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
+  card.style.display = 'none';
 });
 document.getElementById('add_btn').addEventListener('click', () => {
   const payload = {
@@ -1043,7 +1054,7 @@ def portal_account() -> dict[str, Any]:
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">My Account</div>
-  <h2>我的</h2>
+  <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
@@ -1156,7 +1167,7 @@ loadMe();
     )
     # 二级导航高亮（申请令牌 = 本页）
     body = body.replace("{sub_apply}", ' class="active"').replace("{sub_profile}", "").replace("{sub_products}", "")
-    return _account_page("我的", body)
+    return _account_page("我的账户", body)
 
 
 def portal_account_profile() -> dict[str, Any]:
@@ -1166,7 +1177,7 @@ def portal_account_profile() -> dict[str, Any]:
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">My Account</div>
-  <h2>我的</h2>
+  <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
