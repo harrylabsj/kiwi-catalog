@@ -36,6 +36,17 @@ _JSON_COLUMNS = (
     "handoff_destination_types_json",
 )
 
+# json 列的按列默认值：dict 列 → {}，list 列 → []。此前统一用 {} 解码导致
+# list 列（regions/tags/handoff_destination_types）被 decode_json 的 dict 默认
+# 检查吞成空 dict（handoff_destination_types 因此从未出现在搜索结果里）。
+_JSON_DEFAULTS: dict[str, object] = {
+    "attributes_json": {},
+    "regions_json": [],
+    "tags_json": [],
+    "commercial_hints_json": {},
+    "handoff_destination_types_json": [],
+}
+
 _LISTING_COLUMNS = (
     "id",
     "listing_id",
@@ -69,7 +80,7 @@ def _row_to_listing(row: sqlite3.Row) -> dict[str, Any]:
     """Row → dict；json 列解码（wire 层字段名，序列化器直接透传）。"""
     data = dict(row)
     for column in _JSON_COLUMNS:
-        data[column] = decode_json(data.get(column), {})
+        data[column] = decode_json(data.get(column), _JSON_DEFAULTS.get(column, {}))
     return data
 
 
