@@ -226,6 +226,13 @@ function getJson(url, token) {
   if (token) headers['Authorization'] = 'Bearer ' + token;
   return fetch(url, {method: 'GET', headers}).then(r => r.json());
 }
+(function () {
+  const el = document.getElementById('nav_logout');
+  if (el) el.addEventListener('click', (e) => {
+    e.preventDefault();
+    postJson('/v1/accounts/logout', {}).then(() => { window.location.href = '/portal'; });
+  });
+})();
 """
 
 
@@ -896,6 +903,7 @@ def portal_products() -> dict[str, Any]:
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <p class="lead">维护商品与每商品成交入口（写回 shopping-cli）。保存后需重新
     <code>kiwi merchant publish</code> 同步进 catalog 的 listing。</p>
@@ -1067,6 +1075,7 @@ def portal_account() -> dict[str, Any]:
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
   <div id="content" style="display:none">
@@ -1090,7 +1099,6 @@ def portal_account() -> dict[str, Any]:
         <textarea id="a_purpose" rows="2" placeholder="想销售的商品类目"></textarea>
         <button class="btn-form" id="request_token">申请令牌</button>
       </div>
-      <button class="btn-form" id="logout">退出登录</button>
     </div>
   </div>
 </div></section>
@@ -1165,9 +1173,7 @@ document.getElementById('request_token').addEventListener('click', () => {
     }
   });
 });
-document.getElementById('logout').addEventListener('click', () => {
-  postJson('/v1/accounts/logout', {}).then(() => { window.location.href = '/portal'; });
-});
+// 退出登录已移至二级导航（nav_logout，见 _PORTAL_JS 共享 handler）
 loadMe();
 </script>
 """
@@ -1190,6 +1196,7 @@ def portal_account_profile() -> dict[str, Any]:
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
   <div class="card form-card">
