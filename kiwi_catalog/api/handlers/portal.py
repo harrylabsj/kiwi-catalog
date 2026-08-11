@@ -893,9 +893,9 @@ def portal_products() -> dict[str, Any]:
   <div class="kicker">Merchant</div>
   <h2>我的商品</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
   </div>
   <p class="lead">维护商品与每商品成交入口（写回 shopping-cli）。保存后需重新
     <code>kiwi merchant publish</code> 同步进 catalog 的 listing。</p>
@@ -910,10 +910,11 @@ def portal_products() -> dict[str, Any]:
     <div id="bind_out"></div>
   </div>
 
+  <div style="margin:0 0 16px"><button class="btn-form" id="show_add">上传商品</button></div>
+  <div id="out"></div>
+
   <div class="card form-card" id="product_card" style="display:none">
     <h3>商品列表</h3>
-    <div style="margin-bottom:12px"><button class="btn-form" id="show_add">上传商品</button></div>
-    <div id="out"></div>
     <div id="list"></div>
   </div>
 
@@ -1013,10 +1014,17 @@ document.getElementById('bind_btn').addEventListener('click', () => {
 });
 document.getElementById('show_add').addEventListener('click', () => {
   const card = document.getElementById('add_card');
-  if (SHOP_BOUND) { card.style.display = card.style.display === 'none' ? 'block' : 'none'; return; }
-  document.getElementById('bind_card').style.display = 'block';
-  document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
-  card.style.display = 'none';
+  if (MERCHANT === '') {
+    document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌，审批通过后再上传商品。';
+    return;
+  }
+  if (!SHOP_BOUND) {
+    document.getElementById('bind_card').style.display = 'block';
+    document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = card.style.display === 'none' ? 'block' : 'none';
 });
 document.getElementById('add_btn').addEventListener('click', () => {
   const payload = {
@@ -1056,9 +1064,9 @@ def portal_account() -> dict[str, Any]:
   <div class="kicker">My Account</div>
   <h2>我的账户</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
   </div>
   <div id="out"></div>
   <div id="content" style="display:none">
@@ -1179,9 +1187,9 @@ def portal_account_profile() -> dict[str, Any]:
   <div class="kicker">My Account</div>
   <h2>我的账户</h2>
   <div class="subnav">
-    <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/products"{sub_products}>我的商品</a>
+    <a href="/portal/account"{sub_apply}>令牌信息</a>
   </div>
   <div id="out"></div>
   <div class="card form-card">
