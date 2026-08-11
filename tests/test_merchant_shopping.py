@@ -108,7 +108,7 @@ class MerchantShoppingHandlersTest(unittest.TestCase):
         page = portal_products()
         self.assertIn("__html__", page)
         self.assertIn("我的商品", page["__html__"])
-        self.assertIn("shopping-token", page["__html__"])
+        self.assertIn("上传商品", page["__html__"])
 
 
 if __name__ == "__main__":

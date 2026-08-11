@@ -908,16 +908,6 @@ def portal_products() -> dict[str, Any]:
   <p class="lead">维护商品与每商品成交入口（写回 shopping-cli）。保存后需重新
     <code>kiwi merchant publish</code> 同步进 catalog 的 listing。</p>
 
-  <div class="card form-card" id="bind_card" style="display:none">
-    <h3>绑定 shopping-cli 令牌</h3>
-    <p class="small">首次使用需绑定你的 SHOPPING_MERCHANT_TOKEN，之后才能读写商品。
-      令牌 Fernet 加密存储在 catalog，不落明文日志。</p>
-    <label for="shop_token">SHOPPING_MERCHANT_TOKEN</label>
-    <input id="shop_token" type="password" placeholder="shopping-cli merchant token" autocomplete="off">
-    <button class="btn-form" id="bind_btn">绑定</button>
-    <div id="bind_out"></div>
-  </div>
-
   <div style="margin:0 0 16px"><button class="btn-form" id="show_add">上传商品</button></div>
   <div id="out"></div>
 
@@ -941,27 +931,15 @@ def portal_products() -> dict[str, Any]:
 <script>
 let MERCHANT = '';
 let OWNER_TOKEN = '';
-let SHOP_BOUND = false;
 function esc(v) { return escHtml(v); }
 function bindProductData() {
   getJson('/v1/accounts/me').then(r => {
     if (!r.ok || !r.merchant_id) { document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌。'; return; }
     MERCHANT = r.merchant_id;
     OWNER_TOKEN = r.token && r.token.token ? r.token.token : '';
-    // 上传/列表入口始终可见；未绑定 shopping-cli 令牌则先提示绑定
+    // 统一令牌（方案A）：owner token 即 shopping-cli 凭据，直接加载
     document.getElementById('product_card').style.display = 'block';
-    getJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/shopping-token/status', OWNER_TOKEN).then(s => {
-      if (!s.ok) { document.getElementById('out').textContent = s.error || '查询失败'; return; }
-      if (!s.bound) {
-        SHOP_BOUND = false;
-        document.getElementById('bind_card').style.display = 'block';
-        document.getElementById('out').textContent = '已显示上传入口。保存/上传商品前，请先绑定 shopping-cli 令牌。';
-        return;
-      }
-      SHOP_BOUND = true;
-      document.getElementById('bind_card').style.display = 'none';
-      loadProducts();
-    });
+    loadProducts();
   });
 }
 function loadProducts() {
@@ -1008,18 +986,6 @@ function loadProducts() {
     });
   });
 }
-document.getElementById('bind_btn').addEventListener('click', () => {
-  const token = document.getElementById('shop_token').value.trim();
-  const out = document.getElementById('bind_out');
-  if (!token) { out.className = 'err'; out.textContent = '请输入 token'; return; }
-  fetch('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/shopping-token', {
-    method: 'PUT', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OWNER_TOKEN},
-    body: JSON.stringify({ shopping_cli_token: token }),
-  }).then(res => res.json()).then(r => {
-    if (r.ok) { out.className = ''; out.textContent = '绑定成功。'; SHOP_BOUND = true; document.getElementById('bind_card').style.display = 'none'; document.getElementById('product_card').style.display = 'block'; loadProducts(); }
-    else { out.className = 'err'; out.textContent = r.error || '绑定失败'; }
-  });
-});
 function resolveMerchantThen(next) {
   // MERCHANT 可能因 bindProductData 的 fetch 尚未返回而暂空——点击时重新解析身份
   if (MERCHANT !== '') { next(); return; }
@@ -1036,12 +1002,6 @@ document.getElementById('show_add').addEventListener('click', () => {
   resolveMerchantThen(() => {
     if (MERCHANT === '') {
       document.getElementById('out').textContent = '尚未关联商家——请先在 My Account 申请令牌，审批通过后再上传商品。';
-      return;
-    }
-    if (!SHOP_BOUND) {
-      document.getElementById('bind_card').style.display = 'block';
-      document.getElementById('out').textContent = '请先绑定 shopping-cli 令牌，再上传商品。';
-      card.style.display = 'none';
       return;
     }
     card.style.display = card.style.display === 'none' ? 'block' : 'none';

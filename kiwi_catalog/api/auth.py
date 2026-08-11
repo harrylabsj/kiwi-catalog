@@ -113,6 +113,37 @@ def require_owner_token(payload: dict[str, Any], merchant_id: str) -> None:
         raise AuthError("invalid owner token")
 
 
+def validate_merchant_token(
+    presented: str, merchant_id: str, conn: sqlite3.Connection | None = None
+) -> bool:
+    """Return True iff *presented* is a valid owner token for *merchant_id*.
+
+    跨服务校验用（shopping-cli → catalog token/validate）：random 落库路径
+    （SHA-256 恒时比较，active 行权威）+ HMAC 派生 fallback。与
+    require_merchant_token 同一逻辑，只返回 bool 不抛错。
+    """
+    presented = str(presented or "")
+    if not presented:
+        return False
+    if conn is not None:
+        rows = conn.execute(
+            "select token_hash, status from merchant_tokens where merchant_id = ?",
+            (merchant_id,),
+        ).fetchall()
+        if rows:
+            for row in rows:
+                if str(row["status"]) == "active":
+                    digest = token_digest(presented)
+                    if token_matches(digest, str(row["token_hash"])):
+                        return True
+            return False
+    try:
+        require_owner_token({"owner_token": presented}, merchant_id)
+        return True
+    except AuthError:
+        return False
+
+
 def require_merchant_token(
     payload: dict[str, Any], merchant_id: str, conn: sqlite3.Connection | None = None
 ) -> None:
@@ -125,7 +156,12 @@ def require_merchant_token(
 
     *conn* 缺省时只走 HMAC fallback（无 DB 的调用点行为不变）。
     """
-    presented = str((payload or {}).get("owner_token") or "")
+    # owner_token（body 直传）或 _auth_token（Authorization 头经 transport 合并）
+    presented = str(
+        (payload or {}).get("owner_token")
+        or (payload or {}).get("_auth_token")
+        or ""
+    )
     if presented and conn is not None:
         rows = conn.execute(
             "select token_hash, status from merchant_tokens where merchant_id = ?",
