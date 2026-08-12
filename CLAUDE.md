@@ -5,6 +5,16 @@ kiwi-catalog：独立的 Commerce Agent Catalog 服务（Python FastAPI，v1.1
 注册/发现/搜索/验证/治理，**不依赖 shopping-cli 数据库**（弱引用 +
 shadow tables），是 kiwi 仓（`<WORKSPACE>/kiwi`）AgentDiscovery 的消费端。
 
+## 发布（Release）
+
+PyPI 发布只走 kiwi 仓 `.github/workflows/portfolio-release.yml`（trusted
+publisher 绑定该 workflow + `kiwi-release` 环境，本仓无 registry token；
+本地 `uv publish` 会被拒）。bump 清单：`pyproject.toml` +
+`kiwi_catalog/__init__.py` + `kiwi_catalog/db/session.py` 的 `VERSION` +
+`uv lock`，pytest + ruff + mypy 全绿后提交推送，并通知更新 kiwi 仓
+`portfolio.lock.json` 的 `kiwi-catalog` 锚。版本未变则发布 job 幂等跳过。
+注意：生产部署（rsync 直部署）与 PyPI 发布是两条独立通道。
+
 ## 与 kiwi 仓的契约（改这里前必读）
 
 - **wire 契约权威在 kiwi 仓**：`contracts/kiwi-catalog/1.0/agent-record.schema.json`
