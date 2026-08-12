@@ -536,24 +536,23 @@ class AccountsApiTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["phone"], "+86 139")
 
-    # ── 公开路径申请 → 审批 → 账号关联 ────────────────────────────────────
+    # ── 无账号工单（存量匿名通道数据）→ 审批 → 账号关联 ─────────────────────
 
-    def test_public_apply_links_account_on_approve(self) -> None:
-        """公开提交的工单（account_id=0）审批后按邮箱兜底关联账号。"""
+    def test_accountless_application_links_account_on_approve(self) -> None:
+        """无账号工单（account_id=0，匿名通道关闭前的存量数据）审批后按邮箱兜底关联账号。"""
         session, _ = self._register()
-        # 公开路径提交（不带账号信息）
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/merchants/applications",
-            json.dumps(
-                {"domain": "public.example", "agent_name": "Public Shop",
-                 "agent_id": "merchant-001",
-                 "contact_email": "ops@acme.example"}
-            ).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        app_id = payload["application"]["application_id"]
+        # 直插 account_id=0 的工单（2026-08-12 起匿名提交端点已关闭，仅存量数据存在此形态）
+        from kiwi_catalog.db.session import db_session, now_iso
+
+        with db_session(self.db_path) as conn:
+            cursor = conn.execute(
+                "insert into merchant_applications"
+                " (status, domain, agent_name, agent_id, contact_email, purpose, phone, created_at)"
+                " values ('pending', 'public.example', 'Public Shop', 'merchant-001',"
+                " 'ops@acme.example', '', '', ?)",
+                (now_iso(),),
+            )
+            app_id = int(cursor.lastrowid or 0)
         self._approve_application_by_id(app_id)
         # 账号 merchant_id 回填
         status, payload, _ = _call_http(
@@ -563,6 +562,29 @@ class AccountsApiTest(unittest.TestCase):
         self.assertTrue(payload["merchant_id"].startswith("mkt_"))
         self.assertIsNotNone(payload["token"])
         self.assertEqual(payload["token"]["status"], "active")
+
+    # ── request_token fail-closed ──────────────────────────────────────────
+
+    def test_request_token_requires_merchant_id(self) -> None:
+        """纵深防御：账号无 merchant_id 时 request_token 抛 ValidationError。
+
+        正常路径 resolve_session 已懒回填；此处直接构造无 merchant_id 的账号
+        dict 绕过懒回填，验证服务层 fail-closed。
+        """
+        from kiwi_catalog.core.errors import ValidationError
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import accounts as accounts_service
+
+        account = {"account_id": 0, "email": "ghost@acme.example", "merchant_id": ""}
+        with db_session(self.db_path) as conn:
+            with self.assertRaises(ValidationError):
+                accounts_service.request_token(
+                    conn,
+                    account,
+                    domain="acme.example",
+                    agent_name="Acme",
+                    agent_id="merchant-001",
+                )
 
     # ── 登出 ───────────────────────────────────────────────────────────────
 

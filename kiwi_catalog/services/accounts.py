@@ -439,6 +439,11 @@ def request_token(
     提示等待；被拒后可重新申请（新建 pending 工单，原被拒工单保留为
     审计记录）；否则用本次填写的商家基本信息建工单（注册极简，基本信息
     在此一步补齐），并回填账户基本信息（商家名称/电话）。"""
+    # fail-closed 纵深防御（2026-08-12 关闭匿名申请通道）：申请必须绑定已
+    # 分配 merchant_id 的账号；正常路径 resolve_session 已懒回填，为空说明
+    # 账号未完成注册，直接拒绝。
+    if not str(account.get("merchant_id") or "").strip():
+        raise ValidationError("account has no merchant_id — complete registration first")
     view = account_view(conn, account)
     if view["token"] and view["token"]["status"] == "active":
         return {"status": "active", "message": "token already issued", **view}
