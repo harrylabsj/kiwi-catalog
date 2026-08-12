@@ -206,6 +206,102 @@ def verify_email_code(
     return True
 
 
+# ── 密码重置（忘记密码，与邮箱验证码同机制）──────────────────────────────
+
+
+def send_password_reset_email(email: str, code: str) -> None:
+    """发送密码重置验证码邮件（标准库 smtplib；SMTP 凭据走 env）。
+
+    env 与 send_verification_email 相同：KIWI_CATALOG_SMTP_HOST / _PORT /
+    _USER / _PASSWORD / _FROM。发送失败抛 RuntimeError。
+    """
+    host = os.environ.get("KIWI_CATALOG_SMTP_HOST") or ""
+    if not host:
+        raise RuntimeError("SMTP is not configured")
+    import smtplib
+    from email.message import EmailMessage
+
+    port = int(os.environ.get("KIWI_CATALOG_SMTP_PORT") or "587")
+    user = os.environ.get("KIWI_CATALOG_SMTP_USER") or ""
+    password = os.environ.get("KIWI_CATALOG_SMTP_PASSWORD") or ""
+    from_addr = os.environ.get("KIWI_CATALOG_SMTP_FROM") or user
+
+    message = EmailMessage()
+    message["Subject"] = "Kiwi 商家账号密码重置验证码"
+    message["From"] = from_addr
+    message["To"] = email
+    message.set_content(
+        f"你的 Kiwi 商家账号密码重置验证码是：{code}\n\n"
+        "15 分钟内有效。如果不是你本人的操作，请忽略此邮件。"
+    )
+    with smtplib.SMTP(host, port, timeout=15) as smtp:
+        smtp.starttls()
+        if user:
+            smtp.login(user, password)
+        smtp.send_message(message)
+
+
+def issue_password_reset(
+    conn: sqlite3.Connection, account_id: int, email: str
+) -> str:
+    """生成重置码、落库（SHA-256 + 15 分钟过期）、按模式发送。
+
+    console 模式返回重置码明文（开发用）；smtp 模式返回空串（重置码只进
+    邮箱）；未配置 fail-closed（抛 RuntimeError）。
+    """
+    code = generate_verification_code()
+    expires_at = (
+        datetime.now(UTC) + timedelta(minutes=15)
+    ).replace(microsecond=0).isoformat()
+    conn.execute(
+        "update merchant_accounts set reset_code_hash = ?,"
+        " reset_expires_at = ?, updated_at = ? where account_id = ?",
+        (token_digest(code), expires_at, now_iso(), account_id),
+    )
+    mode = _verification_mode()
+    if mode == "console":
+        return code
+    if mode == "smtp":
+        send_password_reset_email(email, code)
+        return ""
+    raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
+
+
+def reset_password(
+    conn: sqlite3.Connection, account: dict[str, Any], code: str, new_password: str
+) -> bool:
+    """校验重置码并改密：恒时比较 + 未过期，失败返回 False。
+
+    成功则：更新 password_hash、清重置两列、顺手置 email_verified=1
+    （能收到码即证明邮箱归属，避免未验证账号重置后仍无法登录的死角）、
+    删除该账号全部会话（改密后所有会话失效）。
+    """
+    account_id = int(account["account_id"])
+    row = conn.execute(
+        "select reset_code_hash, reset_expires_at from merchant_accounts"
+        " where account_id = ?",
+        (account_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    stored_hash = str(row["reset_code_hash"] or "")
+    if not stored_hash or not token_matches(token_digest(str(code or "").strip()), stored_hash):
+        return False
+    if str(row["reset_expires_at"] or "") < now_iso():
+        return False
+    conn.execute(
+        "update merchant_accounts set password_hash = ?, email_verified = 1,"
+        " reset_code_hash = '', reset_expires_at = '', updated_at = ?"
+        " where account_id = ?",
+        (hash_password(new_password), now_iso(), account_id),
+    )
+    conn.execute(
+        "delete from account_sessions where account_id = ?",
+        (account_id,),
+    )
+    return True
+
+
 def account_by_email(conn: sqlite3.Connection, email: str) -> dict[str, Any] | None:
     row = conn.execute(
         "select * from merchant_accounts where email = ?",

@@ -625,6 +625,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_account_resend_code(payload: dict[str, Any]) -> dict[str, Any]:
         return accounts_handlers.resend_code(db_path, payload)
 
+    @app.post("/v1/accounts/forgot-password")
+    def v1_account_forgot_password(payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.forgot_password(db_path, payload)
+
+    @app.post("/v1/accounts/reset-password")
+    def v1_account_reset_password(payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.reset_password(db_path, payload)
+
     @app.get("/v1/accounts/me")
     def v1_account_me(request: _FastAPIRequest) -> dict[str, Any]:
         return accounts_handlers.me(db_path, _account_payload(request, {}), {})
@@ -718,6 +726,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/login")
     def portal_login_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_login())
+
+    @app.get("/portal/reset-password")
+    def portal_reset_password_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_reset_password())
 
     @app.get("/portal/account")
     def portal_account_page() -> HTMLResponse:

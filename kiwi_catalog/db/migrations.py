@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24
 
 
 @dataclass(frozen=True)
@@ -810,6 +810,20 @@ def migration_023_drop_merchant_shopping_token(conn: sqlite3.Connection) -> None
         )
 
 
+def migration_024_password_reset(conn: sqlite3.Connection) -> None:
+    """忘记密码重置（docs/accounts.md）：merchant_accounts 幂等加 2 列。
+
+    reset_code_hash（6 位重置码 SHA-256，与邮箱验证码同机制）、
+    reset_expires_at（15 分钟过期）。fresh 路径由 models.py SCHEMA 创建。
+    """
+    for column in (
+        "reset_code_hash text not null default ''",
+        "reset_expires_at text not null default ''",
+    ):
+        if not _column_exists(conn, "merchant_accounts", column.split()[0]):
+            conn.execute(f"alter table merchant_accounts add column {column}")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -834,6 +848,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(21, "merchant_application_agent_id", migration_021_merchant_application_agent_id),
     Migration(22, "discovery_entries", migration_022_discovery_entries),
     Migration(23, "drop_merchant_shopping_token", migration_023_drop_merchant_shopping_token),
+    Migration(24, "password_reset", migration_024_password_reset),
 )
 
 

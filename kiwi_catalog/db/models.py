@@ -268,6 +268,8 @@ create table if not exists usage_metrics (
     # 验证码 SHA-256）、verification_expires_at（15 分钟过期）。
     # v16 — 账户基本信息：merchant_name（商家名称）、phone（电话，选填）；
     # merchant_applications.phone（申请工单电话，选填）。
+    # v24 — 忘记密码重置：reset_code_hash（6 位重置码 SHA-256）、
+    # reset_expires_at（15 分钟过期），与邮箱验证码同机制。
     """
 create table if not exists merchant_accounts (
         account_id integer primary key autoincrement,
@@ -276,6 +278,8 @@ create table if not exists merchant_accounts (
         email_verified integer not null default 0,
         verification_code_hash text not null default '',
         verification_expires_at text not null default '',
+        reset_code_hash text not null default '',
+        reset_expires_at text not null default '',
         merchant_name text not null default '',
         phone text not null default '',
         merchant_id text not null default '',
