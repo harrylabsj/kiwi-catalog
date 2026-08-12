@@ -569,6 +569,11 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertIn("r.merchant_id", raw)
         self.assertIn("尚未分配商家 ID", raw)
         self.assertIn("/portal/register", raw)
+        # 商家名称只读（基本信息页修改）+ 「商家域名」标签
+        self.assertIn('id="t_name" readonly', raw)
+        self.assertIn("基本信息", raw)
+        self.assertIn("商家域名", raw)
+        self.assertNotIn("店铺域名", raw)
 
     def test_portal_admin_hidden_by_default(self) -> None:
         """审核后台不对外公布：默认 404，页面不含审核表单。"""

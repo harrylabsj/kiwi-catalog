@@ -280,8 +280,9 @@ def portal_home() -> dict[str, Any]:
     """门户首页 = Token 申请（登录态表单；未登录引导登录）。
 
     邮箱/电话不需要填写——注册与账户基本信息已提供，提交时自动带上。
-    商家 ID 为平台分配、只读展示（取自 /v1/accounts/me）；未分配时提交
-    按钮灰化并引导先完成注册。
+    商家 ID（平台分配）与商家名称均为只读展示（取自 /v1/accounts/me；
+    名称在「基本信息」页修改）；未分配商家 ID 或未填写名称时提交按钮
+    灰化并引导先补全。
     """
     body = (
         _nav("portal")
@@ -293,10 +294,10 @@ def portal_home() -> dict[str, Any]:
   <div class="card form-card">
     <label for="t_merchant_id">商家 ID（平台分配，只读）</label>
     <input id="t_merchant_id" readonly placeholder="加载中…">
-    <label for="t_domain">店铺域名（如 acme.example）</label>
+    <label for="t_name">商家名称（只读，可在<a href="/portal/account/profile">基本信息</a>页修改）</label>
+    <input id="t_name" readonly placeholder="加载中…">
+    <label for="t_domain">商家域名（如 acme.example）</label>
     <input id="t_domain" placeholder="acme.example" autocomplete="off">
-    <label for="t_name">商家名称</label>
-    <input id="t_name" placeholder="Acme Merchant">
     <label for="t_agent_id">Agent ID（必填，你的 agent 标识）</label>
     <input id="t_agent_id" placeholder="merchant-001" autocomplete="off">
     <label for="t_purpose">用途说明（选填）</label>
@@ -309,14 +310,19 @@ def portal_home() -> dict[str, Any]:
 // 登录态检查：未登录进入登录流程（邮箱/电话自动从账户带出）
 fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
   if (!r.ok) { window.location.href = '/portal/login'; return; }
-  if (r.merchant_name) { document.getElementById('t_name').value = r.merchant_name; }
+  document.getElementById('t_name').value = r.merchant_name || '';
   document.getElementById('t_merchant_id').value = r.merchant_id || '';
+  const out = document.getElementById('t_out');
   if (!r.merchant_id) {
     // 未分配商家 ID：禁止提交，引导先完成注册（服务端 request_token 同样 fail-closed）
     document.getElementById('t_submit').disabled = true;
-    const out = document.getElementById('t_out');
     out.className = 'err';
     out.innerHTML = '尚未分配商家 ID，请先<a href="/portal/register">完成注册</a>';
+  } else if (!r.merchant_name) {
+    // 商家名称只读：为空时引导先去基本信息页补全（服务端要求 agent_name 非空）
+    document.getElementById('t_submit').disabled = true;
+    out.className = 'err';
+    out.innerHTML = '尚未填写商家名称，请先在<a href="/portal/account/profile">基本信息</a>页补全';
   }
 });
 document.getElementById('t_submit').addEventListener('click', () => {
