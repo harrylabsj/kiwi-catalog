@@ -39,7 +39,7 @@ KIWI_CATALOG_ADMIN_TOKEN=<强随机值>        # 审核后台/签发/轮换/吊�
 KIWI_CATALOG_OWNER_TOKEN_SECRET=<强随机值>  # 存量 HMAC 派生 fallback（兼容旧调用方）
 KIWI_CATALOG_EMAIL_VERIFICATION_MODE=smtp  # 生产必须 smtp；未配置会 fail-closed
 # KIWI_CATALOG_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM
-# 可选：KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR=5（默认 5 次/时/邮箱）
+# 已移除：KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR（2026-08-12 匿名申请通道关闭，限流并入登录限流 env）
 # 可选：KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE=60（默认 60 次/分，公开发现目录检索）
 ```
 

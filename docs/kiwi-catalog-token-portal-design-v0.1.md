@@ -69,17 +69,24 @@ DDL 同时进 `db/models.py::SCHEMA`（fresh 路径）与 `db/migrations.py` v12
 ## 4. Token 生命周期
 
 ```
-申请(apply, 公开) → 审核(list/approve/reject, admin) → 签发(approve 原子完成)
+申请(apply, 会话鉴权) → 审核(list/approve/reject, admin) → 签发(approve 原子完成)
 → 交付(明文仅一次) → 使用(注册 agent / 发布 listing) → 轮换(rotate, admin) / 吊销(revoke, admin)
 ```
 
-### 4.1 申请 `POST /v1/merchants/applications`（公开）
+### 4.1 申请 `POST /v1/merchants/applications`（会话鉴权）
+
+> 2026-08-12 变更：原为匿名公开通道，生产上被滥用（`y@y.com` 等假邮箱直接
+> 提交工单并被误批准），已关闭。该端点改为会话鉴权，与
+> `POST /v1/accounts/token-request` 同一处理函数（`handlers/accounts.py`
+> `token_request`）：`_require_session` 鉴权 + 按账号限流 +
+> `accounts_service.request_token` 建工单，contact_email 取账号邮箱；
+> payload 多余字段（contact_email 等）自然忽略。
 
 - body：`domain`（店铺规范域名，bare hostname 校验复用 normalize_canonical_domain）、
-  `agent_name`、`contact_email`、`purpose`（可选）。
-- 限流：按联系邮箱固定窗口（复用 `services/rate_limit.py`）。
+  `agent_name`、`agent_id`、`purpose`（可选）；contact_email 取会话账号邮箱。
+- 限流：按账号固定窗口（复用登录限流 env，`services/rate_limit.py`）。
 - 响应：`{"application_id": N, "status": "pending"}`，不含任何凭证。
-- 审计：不落 audit_events（公开面，防日志轰炸）；DB 行即工单。
+- 审计：不落 audit_events；DB 行即工单。
 
 ### 4.2 列表 `GET /v1/merchants/applications?status=pending`（admin）
 
@@ -175,7 +182,7 @@ catalog 监听收紧为 127.0.0.1（见 production.md 安全边界）。
 
 ## 10. 测试要点
 
-- apply：公开、校验失败、限流；
+- apply：会话鉴权（2026-08-12 关闭匿名公开通道）、校验失败、按账号限流；
 - approve/rotate/revoke：admin 必填（fail-closed）、明文仅一次、旧 token 轮换后失效、
   吊销后失效、重复 approve 409；
 - 双路径：HMAC 旧 token 仍可 publish（兼容）；新随机 token 可 register(带 merchant)/publish；

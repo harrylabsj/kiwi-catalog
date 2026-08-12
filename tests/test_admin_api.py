@@ -108,6 +108,7 @@ class AdminApiTest(unittest.TestCase):
             {
                 "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
                 "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             },
             clear=False,
         )
@@ -116,7 +117,32 @@ class AdminApiTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
 
     def _seed_merchant(self) -> dict:
-        """走完整链路造一个商家：apply → approve → register → publish。"""
+        """走完整链路造一个商家：注册账号（console 验证）→ 会话申请 → approve → register → publish。"""
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import accounts as accounts_service
+
+        email = "ops@acme.example"
+        status, registered = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 200, registered)
+        status, verified = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": email, "code": registered["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200, verified)
+        # 申请需会话（2026-08-12 关闭匿名通道）；本文件 _call_http 不透传 cookie，
+        # 直接建会话并经 body 的 kiwi_session 字段传递（handler 支持的备选通道）
+        with db_session(self.db_path) as conn:
+            account_id = conn.execute(
+                "select account_id from merchant_accounts where email = ?", (email,)
+            ).fetchone()["account_id"]
+            session = accounts_service.create_session(conn, int(account_id))
         status, applied = _call_http(
             self.app,
             "POST",
@@ -126,12 +152,12 @@ class AdminApiTest(unittest.TestCase):
                     "domain": "acme.example",
                     "agent_name": "Acme Merchant",
                     "agent_id": "merchant-001",
-                    "contact_email": "ops@acme.example",
+                    "kiwi_session": session,
                 }
             ).encode(),
         )
         self.assertEqual(status, 200, applied)
-        app_id = applied["application"]["application_id"]
+        app_id = applied["application_id"]
         status, issued = _call_http(
             self.app,
             "POST",

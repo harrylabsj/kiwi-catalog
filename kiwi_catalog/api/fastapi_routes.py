@@ -457,12 +457,18 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.post("/v1/merchants/applications")
     def v1_submit_application(
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
+        # 2026-08-12 起会话鉴权（原匿名公开通道被滥用关闭）：与
+        # /v1/accounts/token-request 同一处理函数，cookie 经 _account_payload 透传。
         return _v1_submit_application(
-            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path,
+            _account_payload(
+                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            ),
         )
 
     @app.get("/v1/merchants/applications")

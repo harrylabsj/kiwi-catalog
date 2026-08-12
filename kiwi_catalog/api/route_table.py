@@ -223,6 +223,8 @@ RouteEntry(
 # ── /v1/merchants（token 分发，docs/kiwi-catalog-token-portal-design-v0.1 §4）──
 # 顺序约束：/v1/merchants/applications 先于 /v1/merchants/{merchant_id}/rotate
 #（_match_path 顺序匹配，全路径正则无参数冲突；method 也不同）。
+# POST /v1/merchants/applications 2026-08-12 起会话鉴权（原匿名公开通道被滥用
+# 关闭），与 /v1/accounts/token-request 同一处理函数。
 RouteEntry(
         {"POST"},
         "/v1/merchants/applications",
@@ -504,7 +506,10 @@ def _v1_search_discovery(db_path, query, payload=None):
 
 
 def _v1_submit_application(db_path, payload):
-    return merchants_handlers.submit_application(db_path, payload)
+    # 2026-08-12 关闭匿名申请通道（假邮箱直接提交工单被滥用）：该端点改为
+    # 会话鉴权，与 /v1/accounts/token-request 同一处理函数；payload 多余字段
+    #（contact_email 等）自然忽略，contact_email 取账号邮箱。
+    return accounts_handlers.token_request(db_path, payload, {})
 
 
 def _v1_list_applications(db_path, payload, query):

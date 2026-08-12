@@ -15,7 +15,8 @@
 """Merchant token 分发 API 集成测试（docs/kiwi-catalog-token-portal-design-v0.1 §4/§10）。
 
 覆盖：
-- apply：公开提交、字段校验、按邮箱限流；
+- apply：会话鉴权（2026-08-12 关闭匿名公开通道，与 /v1/accounts/token-request
+  同一处理函数）、字段校验、按账号限流；
 - list_applications：admin 必填（fail-closed）、status 过滤；
 - approve：admin 必填、签发 mkt_ merchant_id + 明文 token 仅一次、
   重复 approve 409、审计不含明文；
@@ -126,6 +127,7 @@ class MerchantsApiTest(unittest.TestCase):
             {
                 "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
                 "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             },
             clear=False,
         )
@@ -134,9 +136,47 @@ class MerchantsApiTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
         self._agents: dict[str, str] = {}
 
-    def _apply(self, overrides: dict | None = None) -> tuple[int, dict]:
+    def _new_session(self, email: str = "ops@acme.example") -> str:
+        """注册账号并验证邮箱（console 模式验证码随响应返回），返回会话 token。"""
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        code = payload["verification_code"]
+        self.assertTrue(code, "console 模式应返回验证码")
+        status, payload, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": email, "code": code}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        return headers["set-cookie"].split(";")[0].split("=", 1)[1]
+
+    def _apply(
+        self,
+        session: str | None = None,
+        overrides: dict | None = None,
+        email: str = "ops@acme.example",
+    ) -> tuple[int, dict]:
+        """会话路径提交申请（匿名通道已关闭，与 /v1/accounts/token-request 同处理）。
+
+        不传 session 时为 email 新建账号会话；响应为 token_request 形状
+        （status/application_id），contact_email 取账号邮箱（payload 里的被忽略）。
+        """
+        if session is None:
+            session = self._new_session(email)
         body = {**APPLY_BODY, **(overrides or {})}
-        return _call_http(self.app, "POST", "/v1/merchants/applications", json.dumps(body).encode())[:2]
+        return _call_http(
+            self.app,
+            "POST",
+            "/v1/merchants/applications",
+            json.dumps(body).encode(),
+            headers={"Cookie": f"kiwi_session={session}"},
+        )[:2]
 
     def _approve(self, app_id: int) -> tuple[int, dict]:
         return _call_http(
@@ -180,32 +220,52 @@ class MerchantsApiTest(unittest.TestCase):
 
     # ── apply ──────────────────────────────────────────────────────────────
 
-    def test_apply_public_success(self) -> None:
+    def test_apply_without_session_rejected(self) -> None:
+        """匿名通道已关闭（2026-08-12）：无会话提交 → 403。"""
+        status, payload = _call_http(
+            self.app, "POST", "/v1/merchants/applications", json.dumps(APPLY_BODY).encode()
+        )[:2]
+        self.assertEqual(status, 403, payload)
+
+    def test_apply_with_session_success(self) -> None:
         status, payload = self._apply()
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["application"]["status"], "pending")
-        self.assertEqual(payload["application"]["domain"], "acme.example")
+        self.assertEqual(payload["status"], "pending")
         self.assertNotIn("token", payload)
+        # 工单落库：domain 取自表单，contact_email 取账号邮箱（payload 伪造值被忽略）
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select domain, contact_email from merchant_applications"
+                " where application_id = ?",
+                (payload["application_id"],),
+            ).fetchone()
+        self.assertEqual(row["domain"], "acme.example")
+        self.assertEqual(row["contact_email"], "ops@acme.example")
 
     def test_apply_validation(self) -> None:
-        status, payload = self._apply({"domain": "not a hostname"})
+        session = self._new_session()
+        status, payload = self._apply(session, {"domain": "not a hostname"})
         self.assertEqual(status, 400, payload)
-        status, payload = self._apply({"contact_email": "not-an-email"})
+        status, payload = self._apply(session, {"agent_name": ""})
         self.assertEqual(status, 400, payload)
-        status, payload = self._apply({"agent_name": ""})
+        status, payload = self._apply(session, {"agent_id": ""})
         self.assertEqual(status, 400, payload)
 
-    def test_apply_rate_limited_by_email(self) -> None:
-        with mock.patch.dict(os.environ, {"KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR": "2"}, clear=False):
-            status, _ = self._apply()
+    def test_apply_rate_limited_per_account(self) -> None:
+        """会话限流：token-request 复用登录限流 env，按账号维度计数。"""
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False):
+            session = self._new_session()
+            status, _ = self._apply(session)
             self.assertEqual(status, 200)
-            status, _ = self._apply()
+            status, _ = self._apply(session)  # pending 去重返回，仍计限流
             self.assertEqual(status, 200)
-            status, payload = self._apply()
+            status, payload = self._apply(session)
             self.assertEqual(status, 429, payload)
-            # 不同邮箱不受影响
-            status, _ = self._apply({"contact_email": "other@acme.example"})
+            # 其他账号不受影响
+            status, _ = self._apply(email="other@acme.example")
             self.assertEqual(status, 200)
 
     # ── list_applications ──────────────────────────────────────────────────
@@ -235,7 +295,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_approve_requires_admin_and_issues_token_once(self) -> None:
         _, applied = self._apply()
-        app_id = applied["application"]["application_id"]
+        app_id = applied["application_id"]
         status, payload = _call_http(
             self.app, "POST", f"/v1/merchants/applications/{app_id}/approve", b"{}"
         )[:2]
@@ -254,7 +314,7 @@ class MerchantsApiTest(unittest.TestCase):
     def test_approve_audit_has_no_plaintext(self) -> None:
         """签发审计含 merchant_id + token_prefix，不含明文 token。"""
         _, applied = self._apply()
-        app_id = applied["application"]["application_id"]
+        app_id = applied["application_id"]
         _, issued = self._approve(app_id)
 
         # 审计含签发事件、不含明文 token
@@ -272,7 +332,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_approve_token_works_for_register_and_publish(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         self.assertEqual(self._register(issued["merchant_id"], issued["token"]), 200)
         self.assertEqual(self._publish(issued["merchant_id"], issued["token"]), 200)
 
@@ -280,7 +340,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_reject_pending_only(self) -> None:
         _, applied = self._apply()
-        app_id = applied["application"]["application_id"]
+        app_id = applied["application_id"]
         status, payload = _call_http(
             self.app,
             "POST",
@@ -301,7 +361,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_rotate_invalidates_old_token(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         old_token = issued["token"]
         mid = issued["merchant_id"]
         self.assertEqual(self._publish(mid, old_token), 200)
@@ -321,7 +381,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_rotate_requires_admin(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         status, _ = _call_http(
             self.app, "POST", f"/v1/merchants/{issued['merchant_id']}/rotate", b"{}"
         )[:2]
@@ -331,7 +391,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_revoke_blocks_token_and_is_idempotent(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         mid, token = issued["merchant_id"], issued["token"]
         self.assertEqual(self._publish(mid, token), 200)
 
@@ -396,7 +456,7 @@ class MerchantsApiTest(unittest.TestCase):
         # 2) 进入 token 体系（apply+approve 签发随机 token）后：HMAC 派生
         #    token 立即失效——凭证以 active 随机 token 为唯一权威
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         mid, random_token = issued["merchant_id"], issued["token"]
         mid_agent = _register_with_domain(mid, random_token, "onboarded.example")
         self.assertEqual(_publish_with(mid, random_token, mid_agent), 200)
@@ -417,7 +477,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_self_resolves_token_to_merchant(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         self._register(issued["merchant_id"], issued["token"])
         self._publish(issued["merchant_id"], issued["token"])
 
@@ -432,10 +492,10 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_self_resolves_correct_merchant_among_many(self) -> None:
         """审查 P3-08：多商家 active token 并存时按 token_hash 命中正确商家。"""
-        _, applied_a = self._apply({"contact_email": "a@acme.example"})
-        _, issued_a = self._approve(applied_a["application"]["application_id"])
-        _, applied_b = self._apply({"contact_email": "b@acme.example"})
-        _, issued_b = self._approve(applied_b["application"]["application_id"])
+        _, applied_a = self._apply(email="a@acme.example")
+        _, issued_a = self._approve(applied_a["application_id"])
+        _, applied_b = self._apply(email="b@acme.example")
+        _, issued_b = self._approve(applied_b["application_id"])
         self.assertNotEqual(issued_a["merchant_id"], issued_b["merchant_id"])
 
         status, payload = _call_http(
@@ -453,7 +513,7 @@ class MerchantsApiTest(unittest.TestCase):
         status, payload = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=mkt_bogus")[:2]
         self.assertEqual(status, 403, payload)
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         _call_http(
             self.app,
             "POST",
@@ -467,7 +527,7 @@ class MerchantsApiTest(unittest.TestCase):
 
     def test_self_admin_by_merchant_id(self) -> None:
         _, applied = self._apply()
-        _, issued = self._approve(applied["application"]["application_id"])
+        _, issued = self._approve(applied["application_id"])
         status, payload = _call_http(
             self.app,
             "GET",
@@ -499,6 +559,16 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertIn("text/html", headers.get("content-type", ""))
             self.assertIn("no-store", headers.get("cache-control", ""))
             self.assertIn("Kiwi", payload.get("_raw", ""))
+
+    def test_portal_home_shows_readonly_merchant_id(self) -> None:
+        """Token 申请表单：只读商家 ID 字段 + 未分配时灰化提交并引导注册。"""
+        status, payload, _ = _call_http(self.app, "GET", "/portal")
+        raw = payload.get("_raw", "")
+        self.assertEqual(status, 200, payload)
+        self.assertIn('id="t_merchant_id" readonly', raw)
+        self.assertIn("r.merchant_id", raw)
+        self.assertIn("尚未分配商家 ID", raw)
+        self.assertIn("/portal/register", raw)
 
     def test_portal_admin_hidden_by_default(self) -> None:
         """审核后台不对外公布：默认 404，页面不含审核表单。"""

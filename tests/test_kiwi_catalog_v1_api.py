@@ -545,7 +545,35 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         self.assertEqual(self._row()["administrative_state"], "suspended")
 
     def _issue_merchant_token(self, email: str, domain: str) -> tuple[str, str]:
-        """apply → approve 签发随机 merchant token，返回 (merchant_id, token)。"""
+        """注册账号（console 验证）→ 会话申请 → approve 签发随机 merchant token。
+
+        2026-08-12 起 /v1/merchants/applications 需会话（匿名通道关闭）；
+        本文件 _call_http 不透传 cookie，直接建会话并经 body 的 kiwi_session
+        字段传递（handler 支持的备选通道）。
+        """
+        from kiwi_catalog.services import accounts as accounts_service
+
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "console"
+        self.addCleanup(os.environ.pop, "KIWI_CATALOG_EMAIL_VERIFICATION_MODE", None)
+        status, registered = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 200, registered)
+        status, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": email, "code": registered["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200)
+        with db_session(self.db_path) as conn:
+            account_id = conn.execute(
+                "select account_id from merchant_accounts where email = ?", (email,)
+            ).fetchone()["account_id"]
+            session = accounts_service.create_session(conn, int(account_id))
         status, applied = _call_http(
             self.app,
             "POST",
@@ -555,13 +583,13 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                     "domain": domain,
                     "agent_name": "Merchant Agent",
                     "agent_id": "merchant-001",
-                    "contact_email": email,
                     "purpose": "sell industrial displays",
+                    "kiwi_session": session,
                 }
             ).encode(),
         )
         self.assertEqual(status, 200, applied)
-        app_id = applied["application"]["application_id"]
+        app_id = applied["application_id"]
         status, issued = _call_http(
             self.app,
             "POST",

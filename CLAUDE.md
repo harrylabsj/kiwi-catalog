@@ -59,8 +59,10 @@ docker run --rm -p 8601:8600 -e KIWI_CATALOG_OWNER_TOKEN_SECRET=... kiwi-catalog
   （verify/mark_stale/suspend/reinstate 三域编排）、agent_catalog_writes.py
   （register/claim，public-only 字段白名单）
 - `api/` — app.py（路由表 + FastAPI 双栈）、handlers/agent_catalog.py（v1 +
-  legacy handler）、handlers/merchants.py（token 分发：apply/approve/rotate/
-  revoke/self，docs/kiwi-catalog-token-portal-design-v0.1）、handlers/portal.py
+  legacy handler）、handlers/merchants.py（token 分发：approve/rotate/revoke/
+  self；申请提交 POST /v1/merchants/applications 2026-08-12 起会话鉴权——匿名
+  通道被滥用关闭，路由指向 accounts 的 token_request，
+  docs/kiwi-catalog-token-portal-design-v0.1）、handlers/portal.py
   （/portal/* HTML 门户页，`{"__html__": ...}` 标记经 fallback _send_json
   发 text/html + no-store）、auth.py（admin token / owner token 双路径：
   随机 token 落库 merchant_tokens 优先，HMAC 派生 fallback）、idempotency.py

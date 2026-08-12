@@ -46,7 +46,7 @@ owner token 双路径（`api/auth.py`）：
 | `POST /v1/accounts/resend-code` | 重发验证码 |
 | `POST /v1/accounts/logout` | 吊销会话 |
 | `GET /v1/accounts/me` | 当前会话账号视图 |
-| `POST /v1/accounts/token-request` | 登录态提交 token 申请（替代匿名 `/v1/merchants/apply` 路径） |
+| `POST /v1/accounts/token-request` | 登录态提交 token 申请（`/v1/merchants/applications` 的 POST 与本端点同一处理函数） |
 | `GET /v1/accounts/profile` | 会话账号 + 名下 merchants 状态 |
 
 限流：register/login 均 15min 窗口 per-email（`merchant_application_limits`）。
@@ -55,7 +55,7 @@ owner token 双路径（`api/auth.py`）：
 
 | 路由 | 语义 |
 | --- | --- |
-| `POST /v1/merchants/apply` | 提交接入申请（匿名，限流） |
+| `POST /v1/merchants/applications` | 提交接入申请（**会话鉴权**：2026-08-12 起关闭匿名公开通道——假邮箱直接提交工单被滥用；与 `/v1/accounts/token-request` 同一处理函数，contact_email 取账号邮箱） |
 | `GET /v1/merchants/applications` | 列出申请（admin） |
 | `POST /v1/merchants/applications/{id}/approve` | 审批通过 → 签发随机 token（Fernet 加密落库），响应含 `token_prefix` |
 | `POST /v1/merchants/applications/{id}/reject` | 拒绝 |

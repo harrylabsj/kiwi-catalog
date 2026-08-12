@@ -87,15 +87,6 @@ def list_applications(
     return [application_row(row) for row in rows]
 
 
-def get_application(conn: sqlite3.Connection, application_id: int) -> dict[str, Any]:
-    row = conn.execute(
-        "select * from merchant_applications where application_id = ?", (application_id,)
-    ).fetchone()
-    if row is None:
-        raise NotFoundError(f"Unknown application: {application_id}")
-    return application_row(row)
-
-
 def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[str, Any]:
     """原子签发：平台 merchant_id → 影子 merchants 行 → merchant_tokens active
     行 → 工单置 approved。返回含明文 token（仅此一次）。重复 approve → 409。"""
