@@ -316,6 +316,16 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _v1_account_resend_code(db_path, payload),
     ),
 RouteEntry(
+        {"POST"},
+        "/v1/accounts/forgot-password",
+        lambda db_path, payload, query, **kw: _v1_account_forgot_password(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/reset-password",
+        lambda db_path, payload, query, **kw: _v1_account_reset_password(db_path, payload),
+    ),
+RouteEntry(
         {"GET"},
         "/v1/accounts/me",
         lambda db_path, payload, query, **kw: _v1_account_me(db_path, payload, query),
@@ -388,6 +398,11 @@ RouteEntry(
         {"GET"},
         "/portal/login",
         lambda db_path, payload, query, **kw: _portal_login(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/reset-password",
+        lambda db_path, payload, query, **kw: _portal_reset_password(),
     ),
 RouteEntry(
         {"GET"},
@@ -571,6 +586,14 @@ def _v1_account_resend_code(db_path, payload):
     return accounts_handlers.resend_code(db_path, payload)
 
 
+def _v1_account_forgot_password(db_path, payload):
+    return accounts_handlers.forgot_password(db_path, payload)
+
+
+def _v1_account_reset_password(db_path, payload):
+    return accounts_handlers.reset_password(db_path, payload)
+
+
 def _v1_account_me(db_path, payload, query):
     return accounts_handlers.me(db_path, payload, query or {})
 
@@ -631,6 +654,10 @@ def _portal_register():
 
 def _portal_login():
     return portal_handlers.portal_login()
+
+
+def _portal_reset_password():
+    return portal_handlers.portal_reset_password()
 
 
 def _portal_account():

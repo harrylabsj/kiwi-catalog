@@ -30,7 +30,9 @@ owner token 双路径（`api/auth.py`）：
 | `usage_metrics` | 令牌使用量（rotated/revoked 等） |
 
 - 迁移：v13（usage_metrics）、v14（accounts）、v15（邮箱验证）、
-  v16（基本信息字段）；`CURRENT_SCHEMA_VERSION = 16`。
+  v16（基本信息字段）、v24（忘记密码重置：merchant_accounts 加
+  `reset_code_hash` / `reset_expires_at`，与邮箱验证码同机制——SHA-256
+  落库 + 15 分钟过期）；`CURRENT_SCHEMA_VERSION = 24`。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
   ——token 明文永不落盘。
 
@@ -44,6 +46,8 @@ owner token 双路径（`api/auth.py`）：
 | `POST /v1/accounts/login` | 校验 + 签发会话（`__cookies__` 透传）；邮箱未验证 → 403 |
 | `POST /v1/accounts/verify-email` | 验证码核验（通过后才可登录） |
 | `POST /v1/accounts/resend-code` | 重发验证码 |
+| `POST /v1/accounts/forgot-password` | 签发密码重置验证码；**防枚举**：邮箱不存在也返回同样的 ok 文案（不发码）；console 模式响应含 `reset_code`，smtp 模式发邮件 |
+| `POST /v1/accounts/reset-password` | 重置码 + 新密码改密；账号不存在与码错误统一 403（不区分）；成功后该账号全部会话失效、邮箱标记已验证 |
 | `POST /v1/accounts/logout` | 吊销会话 |
 | `GET /v1/accounts/me` | 当前会话账号视图 |
 | `POST /v1/accounts/token-request` | 登录态提交 token 申请（`/v1/merchants/applications` 的 POST 与本端点同一处理函数） |
@@ -77,6 +81,7 @@ owner token 双路径（`api/auth.py`）：
 | `/portal/admin` | admin 审批列表 |
 | `/portal/dashboard` | 商家仪表盘 |
 | `/portal/register` / `/portal/login` | 账号注册/登录 |
+| `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + Token 管理 |
 
 ## 4. 安全属性
@@ -87,6 +92,11 @@ owner token 双路径（`api/auth.py`）：
   因此会话应按凭据保护，疑似泄露时立即轮换；每次登录态展示记录
   `merchant_token_viewed` 审计事件（不含明文）；admin 列表/审计仅回显 `token_prefix`；
 - 注册/登录/申请均限流；`require_merchant_token` 恒时比较（sha256 digest）；
+- 忘记密码：重置码与邮箱验证码同机制（6 位、SHA-256 落库、15 分钟过期）；
+  forgot-password 对未知邮箱返回相同 ok 文案防账号枚举；reset-password
+  不区分「账号不存在」与「码错误」；改密成功即删除该账号全部
+  account_sessions（所有会话失效），并顺带置 email_verified=1
+  （能收到码即证明邮箱归属，避免未验证账号重置后仍无法登录的死角）；
 - 生产部署需配置 `KIWI_CATALOG_ADMIN_TOKEN` 与
   `KIWI_CATALOG_OWNER_TOKEN_SECRET`（未配置时鉴权一律 fail-closed）。
 

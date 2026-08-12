@@ -847,7 +847,8 @@ def portal_login() -> dict[str, Any]:
       <button class="btn-form" id="verify">验证并登录</button>
       <button class="btn-mini" id="resend" style="margin-top:12px">重新发送验证码</button>
     </div>
-    <p class="small" style="margin-top:16px">还没有账号？<a href="/portal/register">注册商家账号</a></p>
+    <p class="small" style="margin-top:16px">还没有账号？<a href="/portal/register">注册商家账号</a>
+      　忘记密码？<a href="/portal/reset-password">重置</a></p>
   </div>
 </div></section>
 <script>
@@ -902,6 +903,86 @@ document.getElementById('resend').addEventListener('click', () => {
         + _FOOTER
     )
     return _account_page("商家登录", body)
+
+
+def portal_reset_password() -> dict[str, Any]:
+    """忘记密码页：邮箱 → 重置验证码 → 新密码 → 回登录页。
+
+    防枚举：step1 无论邮箱是否注册都进入 step2（服务端同样返回通用 ok
+    文案）；console（演示）模式直接显示重置码。
+    """
+    body = (
+        _nav("portal")
+        + """
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">Reset Password</div>
+  <h2>重置密码</h2>
+  <p class="lead">输入注册邮箱，收到验证码后设置新密码。重置成功后需要重新登录。</p>
+  <div class="card form-card">
+    <div id="step1">
+      <label for="email">邮箱</label>
+      <input id="email" type="email" placeholder="ops@acme.example" autocomplete="email">
+      <button class="btn-form" id="send">发送重置验证码</button>
+      <div id="out1"></div>
+    </div>
+    <div id="step2" style="display:none">
+      <p class="ok" id="sent_note">如果该邮箱已注册，重置验证码已发送到你的邮箱。</p>
+      <label for="code">重置验证码</label>
+      <input id="code" placeholder="6 位验证码" autocomplete="one-time-code">
+      <label for="password">新密码（至少 8 位）</label>
+      <input id="password" type="password" autocomplete="new-password">
+      <button class="btn-form" id="reset">重置密码</button>
+      <div id="out2"></div>
+    </div>
+    <p class="small" style="margin-top:16px">想起来了？<a href="/portal/login">去登录</a></p>
+  </div>
+</div></section>
+<script>
+let resetEmail = '';
+document.getElementById('send').addEventListener('click', () => {
+  const btn = document.getElementById('send');
+  const out = document.getElementById('out1');
+  btn.disabled = true;
+  resetEmail = document.getElementById('email').value.trim();
+  postJson('/v1/accounts/forgot-password', {email: resetEmail}).then(r => {
+    if (r.ok) {
+      if (r.reset_code) {
+        document.getElementById('sent_note').textContent = '演示模式：重置码 ' + r.reset_code;
+      }
+      document.getElementById('step1').style.display = 'none';
+      document.getElementById('step2').style.display = 'block';
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '发送失败';
+      btn.disabled = false;
+    }
+  });
+});
+document.getElementById('reset').addEventListener('click', () => {
+  const btn = document.getElementById('reset');
+  const out = document.getElementById('out2');
+  btn.disabled = true;
+  postJson('/v1/accounts/reset-password', {
+    email: resetEmail,
+    code: document.getElementById('code').value.trim(),
+    new_password: document.getElementById('password').value,
+  }).then(r => {
+    if (r.ok) {
+      out.className = 'ok';
+      out.textContent = '密码已重置，正在跳转到登录页…';
+      setTimeout(() => go('/portal/login'), 800);
+    } else {
+      out.className = 'err';
+      out.textContent = r.error || '重置失败';
+      btn.disabled = false;
+    }
+  });
+});
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("重置密码", body)
 
 
 def portal_products() -> dict[str, Any]:

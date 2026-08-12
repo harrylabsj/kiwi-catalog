@@ -28,7 +28,7 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api.handlers.common import require_field
-from kiwi_catalog.core.errors import AuthError
+from kiwi_catalog.core.errors import AuthError, ValidationError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services.rate_limit import (
@@ -207,6 +207,63 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             "email": email,
             "verification_code": code,  # console 模式才有值
         }
+
+
+def forgot_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/accounts/forgot-password（公开）——签发密码重置验证码。
+
+    防枚举：邮箱不存在也返回同样的 ok 通用文案（只是不发码）。console
+    模式响应带 reset_code（开发/演示）；smtp 模式为空串。
+    """
+    email = str(require_field(payload, "email")).strip().lower()
+
+    with db_session(db_path) as conn:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"forgot:{email}",
+                limit=limit,
+                window_seconds=900,
+                description=f"password reset request ({limit}/15min per email)",
+            )
+        account = accounts_service.account_by_email(conn, email)
+        code = ""
+        if account is not None:
+            code = accounts_service.issue_password_reset(
+                conn, int(account["account_id"]), email
+            )
+        return {
+            "ok": True,
+            "message": "如果该邮箱已注册，重置验证码已发送",
+            "reset_code": code,  # console 模式才有值
+        }
+
+
+def reset_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST /v1/accounts/reset-password（公开）——重置码改密。
+
+    账号不存在与码错误统一 AuthError（不区分，防枚举侧信道）。成功后
+    该账号全部会话失效、邮箱标记已验证（服务层语义）。
+    """
+    email = str(require_field(payload, "email")).strip().lower()
+    code = str(require_field(payload, "code")).strip()
+    new_password = str(require_field(payload, "new_password"))
+    if len(new_password) < 8:
+        raise ValidationError("password must be at least 8 characters")
+    if len(new_password) > 200:
+        raise ValidationError("password too long")
+
+    with db_session(db_path) as conn:
+        account = accounts_service.account_by_email(conn, email)
+        if account is None or not accounts_service.reset_password(
+            conn, account, code, new_password
+        ):
+            raise AuthError("invalid or expired reset code")
+        return {"ok": True, "message": "password reset"}
 
 
 def logout(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:

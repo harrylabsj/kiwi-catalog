@@ -654,5 +654,160 @@ class AccountsApiTest(unittest.TestCase):
             self.assertIn(marker, payload.get("_raw", ""), path)
 
 
+class PasswordResetApiTest(unittest.TestCase):
+    """忘记密码重置流程（迁移 v24，docs/accounts.md）。
+
+    覆盖：防枚举（未知邮箱也 ok）、console 模式返回重置码、错误码/未知
+    邮箱统一 403、成功后旧密码失效 + 新密码可登录 + email_verified 置 1
+    （未验证账号死角）、旧会话全部失效、过期码拒绝、新密码长度校验。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp, "catalog.sqlite")
+        env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+            },
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        self.app = create_catalog_app(self.db_path)
+
+    def _register(self, email: str = "ops@acme.example", password: str = "strong-pw-123") -> None:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"email": email, "password": password}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+
+    def _forgot(self, email: str = "ops@acme.example") -> dict:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/forgot-password",
+            json.dumps({"email": email}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        return payload
+
+    def _reset(self, email: str, code: str, new_password: str) -> tuple[int, dict]:
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/reset-password",
+            json.dumps({"email": email, "code": code, "new_password": new_password}).encode(),
+        )
+        return status, payload
+
+    def _login(self, email: str, password: str) -> tuple[int, dict, dict]:
+        return _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/login",
+            json.dumps({"email": email, "password": password}).encode(),
+        )
+
+    def test_forgot_password_unknown_email_returns_ok(self) -> None:
+        """防枚举：未知邮箱同样返回 ok 通用文案，且不带 reset_code。"""
+        payload = self._forgot("ghost@acme.example")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload.get("reset_code") or "", "")
+
+    def test_forgot_password_known_email_returns_code(self) -> None:
+        self._register()
+        payload = self._forgot()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["reset_code"], "console 模式应返回重置码")
+
+    def test_reset_password_wrong_code_and_unknown_email(self) -> None:
+        self._register()
+        self._forgot()
+        # 错误码 → 403（与账号不存在同一错误，不区分）
+        status, payload = self._reset("ops@acme.example", "000000", "new-strong-pw-456")
+        self.assertEqual(status, 403, payload)
+        # 未知邮箱 → 同样 403
+        status, payload = self._reset("ghost@acme.example", "000000", "new-strong-pw-456")
+        self.assertEqual(status, 403, payload)
+
+    def test_reset_password_success_flow(self) -> None:
+        """成功重置：旧密码登录失败、新密码登录成功、未验证账号顺带完成邮箱验证。"""
+        self._register()  # 未验证邮箱（此前无法登录）
+        code = self._forgot()["reset_code"]
+        status, payload = self._reset("ops@acme.example", code, "new-strong-pw-456")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["message"], "password reset")
+        # email_verified 置 1（能收到码即证明邮箱归属）
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select email_verified, reset_code_hash from merchant_accounts"
+                " where email = 'ops@acme.example'"
+            ).fetchone()
+        self.assertEqual(int(row["email_verified"]), 1)
+        self.assertEqual(row["reset_code_hash"], "", "重置码用后清除")
+        # 旧密码登录失败，新密码登录成功（未验证死角也随 email_verified=1 消除）
+        status, _, _ = self._login("ops@acme.example", "strong-pw-123")
+        self.assertEqual(status, 403)
+        status, payload, headers = self._login("ops@acme.example", "new-strong-pw-456")
+        self.assertEqual(status, 200, payload)
+        self.assertIn("set-cookie", headers)
+
+    def test_reset_password_invalidates_sessions(self) -> None:
+        """改密后所有旧会话失效（重置前登录拿的 session 之后 /me 403）。"""
+        self._register()
+        code = self._forgot()["reset_code"]
+        status, payload = self._reset("ops@acme.example", code, "new-strong-pw-456")
+        self.assertEqual(status, 200, payload)
+        # 重置顺带完成邮箱验证 → 可登录拿会话
+        status, _, headers = self._login("ops@acme.example", "new-strong-pw-456")
+        self.assertEqual(status, 200)
+        session = headers["set-cookie"].split(";")[0].split("=", 1)[1]
+        # 再次重置 → 刚拿的会话也应失效
+        code = self._forgot()["reset_code"]
+        status, payload = self._reset("ops@acme.example", code, "another-pw-789")
+        self.assertEqual(status, 200, payload)
+        status, payload, _ = _call_http(
+            self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 403, payload)
+
+    def test_reset_password_expired_code(self) -> None:
+        self._register()
+        code = self._forgot()["reset_code"]
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update merchant_accounts set reset_expires_at = '2000-01-01T00:00:00+00:00'"
+                " where email = 'ops@acme.example'"
+            )
+        status, payload = self._reset("ops@acme.example", code, "new-strong-pw-456")
+        self.assertEqual(status, 403, payload)
+
+    def test_reset_password_short_password(self) -> None:
+        self._register()
+        code = self._forgot()["reset_code"]
+        status, payload = self._reset("ops@acme.example", code, "short")
+        self.assertEqual(status, 400, payload)
+
+    def test_portal_reset_password_page(self) -> None:
+        status, payload, _ = _call_http(self.app, "GET", "/portal/reset-password")
+        self.assertEqual(status, 200, payload)
+        raw = payload.get("_raw", "")
+        self.assertTrue(raw.startswith("<!doctype html"))
+        self.assertIn("重置密码", raw)
+        # 登录页有「忘记密码」入口
+        _, payload, _ = _call_http(self.app, "GET", "/portal/login")
+        self.assertIn("/portal/reset-password", payload.get("_raw", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
