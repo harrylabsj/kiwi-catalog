@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-catalog"
-version = "0.1.1"
+version = "0.2.0"
 description = "Standalone Agent Catalog service (published from shopping-cli extraction plan, phase 2)"
 readme = "README.md"
 requires-python = ">=3.11"
