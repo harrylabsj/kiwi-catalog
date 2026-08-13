@@ -427,6 +427,33 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["token"]["token"].startswith("mkt_"))
 
+    def test_me_returns_error_not_empty_token_when_decrypt_fails(self) -> None:
+        """审查 C-M3：/me 解密失败必须返回可诊断错误，绝不静默给空 token。"""
+        session, _ = self._register()
+        self._request_token(session)
+        self._approve_first_application()
+        status, payload, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/login",
+            json.dumps({"email": "ops@acme.example", "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        session = headers["set-cookie"].split(";")[0].split("=", 1)[1]
+        # 篡改 token_encrypted → 解密必然失败（C-H1 fail-closed 路径）。
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute("update merchant_tokens set token_encrypted = 'v2:corrupted'")
+            conn.commit()
+        finally:
+            conn.close()
+        status, payload, _ = _call_http(
+            self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
+        )
+        # fail-closed：非 200 错误信封，绝不 200 + 空 token（C-M3 读路径）。
+        self.assertNotEqual(status, 200)
+        self.assertNotIn("token", payload)
+
     # ── token-request ──────────────────────────────────────────────────────
 
     def test_token_request_with_merchant_info(self) -> None:

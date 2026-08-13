@@ -58,6 +58,9 @@ _KIWI_SCHEMA = (
     / "1.0"
     / "agent-record.schema.json"
 )
+# 审查 C-M5：golden fixture（kiwi schema enum 的最近快照）——CI 无 sibling kiwi
+# 仓时 schema 检查 self-skip，enum 漂移不被捕获；golden 检查**始终运行**。
+_GOLDEN_FIXTURE = _REPO_ROOT / "tests" / "fixtures" / "handoff_destination_types.json"
 
 
 class FoldVerificationStatusTest(unittest.TestCase):
@@ -155,8 +158,17 @@ class HandoffVocabularyContractTest(unittest.TestCase):
     def test_destination_types_match_kiwi_schema_enum(self) -> None:
         """跨仓单一词表：HANDOFF_DESTINATION_TYPES 与 kiwi 仓 agent-record
         schema 的 enum 逐值一致（顺序也一致）。"""
+        # 审查 C-M5：先做 golden fixture 断言（始终运行，CI 无 sibling kiwi 仓也
+        # 捕获本仓词表漂移）；有 sibling schema 时再做跨仓精确核对。
+        golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
+        self.assertEqual(
+            list(HANDOFF_DESTINATION_TYPES),
+            golden,
+            "HANDOFF_DESTINATION_TYPES 与 golden fixture 漂移——若是有意改词表，"
+            "须同步更新 tests/fixtures/handoff_destination_types.json（及 kiwi 仓 schema）",
+        )
         if not _KIWI_SCHEMA.exists():
-            self.skipTest("kiwi repo schema not present")
+            self.skipTest("kiwi repo schema not present (golden fixture check still ran)")
         schema = json.loads(_KIWI_SCHEMA.read_text(encoding="utf-8"))
         schema_enum = schema["properties"]["handoff_destination_types"]["items"]["enum"]
         self.assertEqual(list(HANDOFF_DESTINATION_TYPES), schema_enum)

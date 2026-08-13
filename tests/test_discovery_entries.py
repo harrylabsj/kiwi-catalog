@@ -404,6 +404,9 @@ class DiscoverySearchTransportTest(unittest.TestCase):
             "path": path.split("?", 1)[0],
             "headers": scope_headers,
             "query_string": (path.split("?", 1)[1].encode() if "?" in path else b""),
+            # 审查 C-M2：直连对端回环 = 可信代理（本地反代形态）→ XFF 首跳被采信。
+            # 无此 client 时 XFF 被忽略（直连对端非可信代理），P3-06 分桶语义失效。
+            "client": ["127.0.0.1", 12345],
         }
         received: list[dict] = []
 

@@ -1,0 +1,13 @@
+[
+  "ucp_checkout",
+  "ucp_order",
+  "external_checkout_url",
+  "merchant_checkout_session",
+  "platform_deep_link",
+  "buyer_erp_request",
+  "procurement_request",
+  "purchase_order_draft",
+  "quote_document",
+  "merchant_contact",
+  "sales_handoff"
+]

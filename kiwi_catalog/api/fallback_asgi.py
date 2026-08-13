@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from kiwi_catalog.api import auth as api_auth
+from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.limits import max_request_body_bytes
 from kiwi_catalog.discovery.cache import compute_etag, etag_matches
 
@@ -142,13 +143,12 @@ class MarketplaceASGIApp:
         cookie = headers.get("cookie", "")
         if cookie:
             payload["_cookie"] = cookie
-        # 客户端 IP（/v1/discovery/search 限流 per-IP 分桶，审查 P3-06）：
-        # X-Forwarded-For 首跳优先，无代理时取 ASGI scope 的直连对端。
-        client_ip = headers.get("x-forwarded-for", "").split(",")[0].strip()
-        if not client_ip:
-            client = scope.get("client")
-            if client:
-                client_ip = str(client[0] or "")
+        # 客户端 IP（/v1/discovery/search 限流 per-IP 分桶，审查 P3-06 / C-M2）：
+        # 仅可信代理（默认回环）时采信 XFF；直连对端非可信代理则忽略 XFF，
+        # 用直连对端——直连客户端伪造 XFF 无法轮换 IP 绕过限流。
+        client = scope.get("client")
+        direct_peer = str(client[0] or "") if client else None
+        client_ip = resolve_client_ip(headers.get("x-forwarded-for", ""), direct_peer)
         if client_ip:
             payload["_client_ip"] = client_ip
         try:
