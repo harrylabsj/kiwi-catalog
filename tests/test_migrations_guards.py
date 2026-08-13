@@ -26,14 +26,19 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import kiwi_catalog.db.migrations as migrations_mod
 from kiwi_catalog.db.migrations import (
     MIGRATIONS,
+    Migration,
     _set_schema_user_version,
     migration_007_merchant_single_agent,
     migration_008_three_state_domains,
     migration_011_search_indexes_and_domain_unique,
     migration_023_drop_merchant_shopping_token,
+    run_migrations,
+    schema_user_version,
 )
 
 _TS = "2026-01-01T00:00:00+00:00"
@@ -145,6 +150,33 @@ class Migration011DomainUniqueTest(unittest.TestCase):
             conn.commit()
             with self.assertRaises(sqlite3.IntegrityError):
                 _insert_agent(conn, "cagt_b", "dup.example")
+        finally:
+            conn.close()
+
+
+class MigrationAtomicityTest(unittest.TestCase):
+    def test_failed_migration_rolls_back_user_version_and_ddl(self) -> None:
+        """审查 C-M4：迁移链 SAVEPOINT 原子——中途失败回滚 DDL 与 user_version。"""
+        tmp = tempfile.mkdtemp()
+        db = Path(tmp) / "atomic.sqlite"
+        conn = sqlite3.connect(db)
+        try:
+            def failing(c: sqlite3.Connection) -> None:
+                c.execute("create table tmp_c4_marker (x integer)")
+                _set_schema_user_version(c, 1)  # 模拟 apply 后的 user_version 推进
+                raise RuntimeError("boom mid-migration")
+
+            fake = [Migration(version=1, name="c4_fake", apply=failing)]
+            with mock.patch.object(migrations_mod, "MIGRATIONS", fake):
+                with self.assertRaises(RuntimeError):
+                    run_migrations(conn)
+            # DDL 回滚：失败迁移建的表不存在
+            row = conn.execute(
+                "select name from sqlite_master where type='table' and name='tmp_c4_marker'"
+            ).fetchone()
+            self.assertIsNone(row)
+            # user_version 回滚到 0（此前中途失败会停在最后成功条）
+            self.assertEqual(schema_user_version(conn), 0)
         finally:
             conn.close()
 

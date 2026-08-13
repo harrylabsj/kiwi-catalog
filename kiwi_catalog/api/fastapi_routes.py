@@ -31,6 +31,7 @@ from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
+from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.route_table import (
     _claim_catalog_agent,
@@ -394,11 +395,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/discovery/search")
     def v1_search_discovery(request: _FastAPIRequest) -> dict[str, Any]:
         query = _query_params_from_request(request)
-        # 限流 per-IP 分桶（审查 P3-06）：X-Forwarded-For 首跳优先，无代理时
-        # 取直连对端；与 fallback 注入同一 _client_ip 键。
-        client_ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-        if not client_ip and request.client is not None:
-            client_ip = str(request.client.host or "")
+        # 限流 per-IP 分桶（审查 P3-06 / C-M2）：仅可信代理（默认回环）时采信
+        # XFF，直连对端非可信代理则忽略 XFF 用直连对端；与 fallback 同键。
+        direct_peer = request.client.host if request.client is not None else None
+        client_ip = resolve_client_ip(request.headers.get("x-forwarded-for") or "", direct_peer)
         if client_ip:
             query["_client_ip"] = client_ip
         return _v1_search_discovery(db_path, query)

@@ -853,10 +853,21 @@ MIGRATIONS: tuple[Migration, ...] = (
 
 
 def run_migrations(conn: sqlite3.Connection) -> None:
+    # 审查 C-M4：迁移链包在 SAVEPOINT 里——legacy 隔离模式下 DDL 常立即自提交，
+    # 中途抛错则前半段已落库且 user_version 停在最后成功条（此前靠逐条幂等自愈）。
+    # SAVEPOINT 让整条链原子回滚（含 user_version 的 PRAGMA 改动）；并发双开靠
+    # busy_timeout 串行化，索引迁移的 CREATE INDEX IF NOT EXISTS 幂等兜底。
     current_version = schema_user_version(conn)
-    for migration in MIGRATIONS:
-        if migration.version <= current_version:
-            continue
-        migration.apply(conn)
-        _set_schema_user_version(conn, migration.version)
+    conn.execute("SAVEPOINT kiwi_migrations")
+    try:
+        for migration in MIGRATIONS:
+            if migration.version <= current_version:
+                continue
+            migration.apply(conn)
+            _set_schema_user_version(conn, migration.version)
+        conn.execute("RELEASE SAVEPOINT kiwi_migrations")
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT kiwi_migrations")
+        conn.execute("RELEASE SAVEPOINT kiwi_migrations")
+        raise
     conn.commit()
