@@ -60,9 +60,13 @@ def _make_db() -> Path:
 
 
 def _grant_token(conn: sqlite3.Connection, merchant_id: str, plaintext: str = "tok-abc") -> None:
-    """签发 active owner token（落库 SHA-256，与 approve_application 同机制）。"""
+    """签发 active owner token（落库 SHA-256，与 approve_application 同机制）。
+
+    用 insert or replace 对齐 approve_application——注册现在会种入 revoked 占位
+    行（审查 C-H2），纯 insert 会与占位行主键冲突。
+    """
     conn.execute(
-        "insert into merchant_tokens (merchant_id, token_hash, token_encrypted, status, issued_at)"
+        "insert or replace into merchant_tokens (merchant_id, token_hash, token_encrypted, status, issued_at)"
         " values (?, ?, '', 'active', ?)",
         (merchant_id, token_digest(plaintext), now_iso()),
     )

@@ -257,6 +257,42 @@ def revoke_token(conn: sqlite3.Connection, merchant_id: str) -> str:
     return "revoked"
 
 
+def backfill_legacy_merchant_tokens(conn: sqlite3.Connection) -> list[dict[str, str]]:
+    """为无 merchant_tokens 行的存量 merchant 签发随机 token（审查 C-H2 第 2 步）。
+
+    枚举 merchants 表中无 token 行的 merchant，各签发一条 active 随机 token。
+    返回 (merchant_id, token) 明文列表——仅此一次，操作者须脱机分发给对应商家
+    （分发后商家把随机 token 作为 owner_token 提交，替换旧的 HMAC 派生值）。
+
+    幂等：已有 token 行的 merchant 跳过；重复运行只补缺。明文 token 只经返回值
+    暴露，不写审计。
+    """
+    rows = conn.execute(
+        """
+        select m.id as merchant_id from merchants m
+        left join merchant_tokens t on t.merchant_id = m.id
+        where t.merchant_id is null
+        order by m.id
+        """
+    ).fetchall()
+    issued: list[dict[str, str]] = []
+    for row in rows:
+        merchant_id = str(row["merchant_id"])
+        token = generate_merchant_token()
+        # 延迟导入避免与 accounts 的循环依赖（approve_application 同款）。
+        from kiwi_catalog.services import accounts as accounts_service
+
+        encrypted = accounts_service.encrypt_merchant_token(token)
+        conn.execute(
+            "insert or ignore into merchant_tokens"
+            " (merchant_id, token_hash, token_encrypted, status, issued_at)"
+            " values (?, ?, ?, 'active', ?)",
+            (merchant_id, token_digest(token), encrypted, now_iso()),
+        )
+        issued.append({"merchant_id": merchant_id, "token": token})
+    return issued
+
+
 def resolve_merchant_by_token(conn: sqlite3.Connection, token: str) -> sqlite3.Row | None:
     """按呈现 token 的 SHA-256 等值命中 merchant_tokens active 行（token 即身份）。
 

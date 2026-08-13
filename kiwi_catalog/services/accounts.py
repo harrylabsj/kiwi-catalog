@@ -23,7 +23,8 @@
   httpOnly cookie 传递（服务端渲染的页面用 cookie，API 端到端测试用 header）；
 - **token 找回**：merchant_tokens.token_encrypted 存 Fernet 加密明文——
   登录后"我的"随时可查（解决签发即丢失）；Fernet key 从
-  KIWI_CATALOG_OWNER_TOKEN_SECRET 加固定盐前缀经 SHA-256 派生（零新配置）；
+  KIWI_CATALOG_OWNER_TOKEN_SECRET 经 scrypt 派生（v2: 前缀标记，旧 SHA-256
+  密文仍可解密回退）；
 - 密码 hash：PBKDF2-HMAC-SHA256（200k 迭代 + 随机盐）。
 
 依赖例外：cryptography（Fernet）——标准库无可逆加密；安全存储商家
@@ -42,7 +43,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kiwi_catalog.core.errors import ConflictError, ValidationError
+from kiwi_catalog.core.errors import ConflictError, ShoppingCliError, ValidationError
 from kiwi_catalog.core.tokens import token_digest, token_matches
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
@@ -82,29 +83,74 @@ def verify_password(password: str, stored: str) -> bool:
 # ── token 加密（Fernet，key 从 owner secret 派生）────────────────────────
 
 
-def _fernet() -> Any:
-    from cryptography.fernet import Fernet
+_FERNET_V2_PREFIX = "v2:"
+_KDF_SALT = b"kiwi-token-fernet"
+# scrypt 参数（审查 C-H1）：原单次 SHA-256 无拉伸，低熵 secret 可离线爆破。
+# n=2^15/r=8/p=1 → ~32MiB 内存硬 + 约 50ms/次，把离线暴力成本抬高数量级。
+_KDF_N = 2**15
+_KDF_R = 8
+_KDF_P = 1
 
-    secret = os.environ.get(_OWNER_SECRET_ENV) or ""
+
+def _owner_secret() -> str:
+    secret = str(os.environ.get(_OWNER_SECRET_ENV) or "").strip()
     if not secret:
         raise RuntimeError("KIWI_CATALOG_OWNER_TOKEN_SECRET is not configured")
-    key = base64.urlsafe_b64encode(
-        hashlib.sha256(("kiwi-token-fernet:" + secret).encode("utf-8")).digest()
+    return secret
+
+
+def _fernet(key: bytes) -> Any:
+    from cryptography.fernet import Fernet
+
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def _fernet_v2() -> Any:
+    """当前派生（scrypt）：新加密一律用此，密文带 v2: 前缀。"""
+    key = hashlib.scrypt(
+        _owner_secret().encode("utf-8"),
+        salt=_KDF_SALT,
+        n=_KDF_N,
+        r=_KDF_R,
+        p=_KDF_P,
+        # n=2^15/r=8 需 128*n*r = 32 MiB，显式放宽 OpenSSL 默认 32 MiB 上限。
+        maxmem=64 * 1024 * 1024,
+        dklen=32,
     )
-    return Fernet(key)
+    return _fernet(key)
+
+
+def _fernet_v1() -> Any:
+    """存量兼容：旧密文用单次 SHA-256 派生，仅用于解密回退，不再用于新加密。"""
+    key = hashlib.sha256(("kiwi-token-fernet:" + _owner_secret()).encode("utf-8")).digest()
+    return _fernet(key)
 
 
 def encrypt_merchant_token(token: str) -> str:
-    return _fernet().encrypt(str(token).encode("utf-8")).decode("ascii")
+    return _FERNET_V2_PREFIX + _fernet_v2().encrypt(str(token).encode("utf-8")).decode("ascii")
 
 
 def decrypt_merchant_token(encrypted: str) -> str:
     if not encrypted:
         return ""
+    raw = str(encrypted)
+    from cryptography.fernet import InvalidToken
+
+    if raw.startswith(_FERNET_V2_PREFIX):
+        cipher = _fernet_v2()
+        payload = raw[len(_FERNET_V2_PREFIX):]
+    else:
+        cipher = _fernet_v1()
+        payload = raw
+    # 审查 C-H1：解密失败（key 轮换 / 密文损坏）此前被 `except Exception: return ""`
+    # 静默吞掉，轮换即静默丢 token。改为 fail-closed：抛类型化错误，由 app
+    # 统一映射为错误信封，绝不把「不可恢复」伪装成「无 token」。
     try:
-        return _fernet().decrypt(str(encrypted).encode("ascii")).decode("utf-8")
-    except Exception:  # noqa: BLE001 —— 解密失败（key 轮换/数据损坏）按空处理
-        return ""
+        return cipher.decrypt(payload.encode("ascii")).decode("utf-8")
+    except InvalidToken as exc:
+        raise ShoppingCliError(
+            "merchant token 密文无法解密（密钥轮换或数据损坏，需重新签发）"
+        ) from exc
 
 
 # ── 邮箱验证（验证码 + SMTP 发送）────────────────────────────────────────
@@ -371,6 +417,17 @@ def register_account(
     account_id = int(cursor.lastrowid or 0)
     # 注册完成即分配平台 merchant_id（免费通道与审批商家同一身份空间）
     merchant_id = ensure_merchant_id(conn, account_id, email.split("@", 1)[0])
+    # 审查 C-H2：注册即种入 revoked 占位行，使 require_merchant_token 的 HMAC
+    # fallback 对新商户立即关闭——否则「已注册未签发」商户的凭证是对
+    # merchant_id 确定的 HMAC，secret 泄露即可派生且无法吊销。approve 的
+    # insert or replace 会把它替换为 active 行（无既有行时幂等跳过）。
+    if merchant_id:
+        conn.execute(
+            "insert or ignore into merchant_tokens"
+            " (merchant_id, token_hash, token_encrypted, status, issued_at, revoked_at)"
+            " values (?, '', '', 'revoked', ?, ?)",
+            (merchant_id, now, now),
+        )
     verification_code = issue_verification(conn, account_id, email)
     return {
         "account_id": account_id,
@@ -482,7 +539,10 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
         row = conn.execute(
             "select * from merchant_tokens where merchant_id = ?", (merchant_id,)
         ).fetchone()
-        if row is not None:
+        # 审查 C-H2：注册种入的 revoked 占位行 token_hash 为空——它只为关闭
+        # require_merchant_token 的 HMAC fallback，不得在 /me 里表现为「已有
+        # token」。空 hash 视为「尚未签发 token」，维持 token=None。
+        if row is not None and str(row["token_hash"] or "") != "":
             plaintext = ""
             if str(row["status"]) == "active":
                 plaintext = decrypt_merchant_token(str(row["token_encrypted"] or ""))

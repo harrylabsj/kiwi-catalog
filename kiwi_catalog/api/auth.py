@@ -38,6 +38,18 @@ from typing import Any
 from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.core.tokens import token_digest, token_matches
 
+_LEGACY_HMAC_ENV = "KIWI_CATALOG_LEGACY_HMAC_AUTH"
+
+
+def _legacy_hmac_enabled() -> bool:
+    """审查 C-H2 第 3 步：存量无行商户的 HMAC owner-token 回退收口开关。
+
+    默认 on（存量兼容）；设 off 后，无 merchant_tokens 行的商户不再能经
+    HMAC 派生凭证认证（须先迁移到随机 token）。
+    """
+    raw = str(os.environ.get(_LEGACY_HMAC_ENV) or "").strip().lower()
+    return raw in ("", "1", "true", "yes", "on")
+
 _OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 _ADMIN_TOKEN_ENV = "KIWI_CATALOG_ADMIN_TOKEN"
 
@@ -147,6 +159,12 @@ def require_merchant_token(
                     if token_matches(digest, str(row["token_hash"])):
                         return
             raise AuthError("invalid owner token")
-    # 无任何 token 记录（存量商户未上 token 体系）→ HMAC 派生路径
-    # （含未配置 fail-closed；conn 缺省的无 DB 调用点行为不变）
+        # 无任何 token 行：存量 legacy 商户的 HMAC 回退。审查 C-H2 第 3 步：
+        # 设 KIWI_CATALOG_LEGACY_HMAC_AUTH=off 收口关闭（须迁移到随机 token）。
+        if not _legacy_hmac_enabled():
+            raise AuthError(
+                "legacy HMAC owner-token auth is disabled "
+                "(KIWI_CATALOG_LEGACY_HMAC_AUTH=off)"
+            )
+    # conn 缺省（本地 CLI 信任边界）仍走 HMAC 派生路径，行为不变。
     require_owner_token(payload, merchant_id)

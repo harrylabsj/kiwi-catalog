@@ -27,6 +27,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -34,7 +37,13 @@ import tempfile
 import unittest
 from unittest import mock
 
+from cryptography.fernet import Fernet
+
+from kiwi_catalog.api import auth
 from kiwi_catalog.api.app import create_catalog_app
+from kiwi_catalog.core.errors import AuthError, ShoppingCliError
+from kiwi_catalog.db.session import open_connection
+from kiwi_catalog.services import accounts
 
 ADMIN_TOKEN = "admin-tok-123"
 OWNER_SECRET = "test-owner-secret"
@@ -183,6 +192,80 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIsNone(payload["token"])
         # 注册完成即分配平台 merchant_id（与审批签发同一格式 mkt_<slug>_<rand>）
         self.assertRegex(payload["merchant_id"], r"^mkt_[a-z0-9-]+_.+")
+
+    def test_register_seeds_revoked_row_and_closes_hmac_fallback(self) -> None:
+        """审查 C-H2：注册即种 revoked 占位行，HMAC fallback 对新商户立即关闭。"""
+        self._register()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "select merchant_id, status from merchant_tokens where token_hash = ''"
+            ).fetchone()
+            self.assertIsNotNone(row, "register 应种入 revoked 占位行")
+            self.assertEqual(row["status"], "revoked")
+            merchant_id = str(row["merchant_id"])
+            # HMAC 派生的 owner_token 不再通过（占位行关闭 fallback）。
+            owner = hmac.new(
+                OWNER_SECRET.encode("utf-8"),
+                f"kiwi-catalog-owner:{merchant_id}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            with self.assertRaises(AuthError):
+                auth.require_merchant_token({"owner_token": owner}, merchant_id, conn)
+        finally:
+            conn.close()
+
+    def test_legacy_hmac_fallback_closed_by_env_flag(self) -> None:
+        """审查 C-H2 第 3 步：KIWI_CATALOG_LEGACY_HMAC_AUTH=off 时无行商户 HMAC 被拒。"""
+        conn = open_connection(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            merchant_id = "mkt_legacy_x"
+            owner = hmac.new(
+                OWNER_SECRET.encode("utf-8"),
+                f"kiwi-catalog-owner:{merchant_id}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            # 默认（未设 flag）：无行商户经 HMAC 派生凭证放行
+            auth.require_merchant_token({"owner_token": owner}, merchant_id, conn)
+            # off：拒绝（须迁移到随机 token）
+            with mock.patch.dict(os.environ, {"KIWI_CATALOG_LEGACY_HMAC_AUTH": "off"}):
+                with self.assertRaises(AuthError):
+                    auth.require_merchant_token({"owner_token": owner}, merchant_id, conn)
+        finally:
+            conn.close()
+
+    def test_backfill_legacy_merchant_tokens(self) -> None:
+        """审查 C-H2 第 2 步：backfill 为无行商户签发随机 token，跳过已有行，幂等。"""
+        conn = open_connection(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            from kiwi_catalog.services import merchant_tokens as mt
+
+            ts = "2026-08-13T00:00:00+00:00"
+            for mid in ("mkt_legacy_1", "mkt_legacy_2", "mkt_has_token"):
+                conn.execute(
+                    "insert into merchants (id, name, created_at, updated_at) values (?, ?, ?, ?)",
+                    (mid, "m", ts, ts),
+                )
+            conn.execute(
+                "insert into merchant_tokens (merchant_id, token_hash, token_encrypted, status, issued_at)"
+                " values ('mkt_has_token', 'h', '', 'active', ?)",
+                (ts,),
+            )
+            conn.commit()
+
+            issued = mt.backfill_legacy_merchant_tokens(conn)
+            self.assertEqual(
+                sorted(e["merchant_id"] for e in issued),
+                ["mkt_legacy_1", "mkt_legacy_2"],
+            )
+            self.assertTrue(all(e["token"].startswith("mkt_") for e in issued))
+            # 幂等：第二次运行无新增
+            self.assertEqual(mt.backfill_legacy_merchant_tokens(conn), [])
+        finally:
+            conn.close()
 
     def test_register_duplicate_email_conflicts(self) -> None:
         self._register()
@@ -807,6 +890,37 @@ class PasswordResetApiTest(unittest.TestCase):
         # 登录页有「忘记密码」入口
         _, payload, _ = _call_http(self.app, "GET", "/portal/login")
         self.assertIn("/portal/reset-password", payload.get("_raw", ""))
+
+
+class TokenEncryptionTest(unittest.TestCase):
+    """审查 C-H1：Fernet 密钥派生升级为 scrypt + v2 前缀 + 解密 fail-closed。"""
+
+    def setUp(self) -> None:
+        self.env = mock.patch.dict(
+            os.environ,
+            {"KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
+        )
+        self.env.start()
+
+    def tearDown(self) -> None:
+        self.env.stop()
+
+    def test_v2_roundtrip_and_v1_backward_compat(self) -> None:
+        token = "mkt_" + "a" * 32
+        enc = accounts.encrypt_merchant_token(token)
+        self.assertTrue(enc.startswith("v2:"), enc[:8])
+        self.assertEqual(accounts.decrypt_merchant_token(enc), token)
+        # 旧单次 SHA-256 派生的存量密文仍可解密（向后兼容）。
+        legacy_key = base64.urlsafe_b64encode(
+            hashlib.sha256(("kiwi-token-fernet:" + OWNER_SECRET).encode("utf-8")).digest()
+        )
+        legacy = Fernet(legacy_key).encrypt(token.encode("utf-8")).decode("ascii")
+        self.assertEqual(accounts.decrypt_merchant_token(legacy), token)
+
+    def test_decrypt_fails_closed_on_corruption(self) -> None:
+        # 密文损坏 / 密钥轮换不再静默返回空串，而是抛类型化错误（fail-closed）。
+        with self.assertRaises(ShoppingCliError):
+            accounts.decrypt_merchant_token("v2:not-a-valid-ciphertext")
 
 
 if __name__ == "__main__":

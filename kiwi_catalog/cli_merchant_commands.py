@@ -115,6 +115,28 @@ def cmd_merchant_token_revoke(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_merchant_token_backfill(args: argparse.Namespace) -> None:
+    """catalog merchant token backfill
+
+    为无 merchant_tokens 行的存量 merchant 签发随机 token（审查 C-H2 第 2 步）。
+    明文 token 只在本命令输出一次——操作者须脱机分发给对应商家（商家把随机
+    token 作为 owner_token 提交，替换旧的 HMAC 派生值）。幂等：重复运行只补缺。
+    """
+    with db_session(db_path_from_args(args)) as conn:
+        issued = tokens_service.backfill_legacy_merchant_tokens(conn)
+    if args.format == "json":
+        emit({"ok": True, "count": len(issued), "issued": issued}, args.format)
+        return
+    if not issued:
+        print("(no legacy merchants without tokens)")
+        return
+    print(
+        f"issued {len(issued)} token(s) — distribute each plaintext token to its merchant ONCE:"
+    )
+    for entry in issued:
+        print(f"{entry['merchant_id']}\t{entry['token']}")
+
+
 def cmd_merchant_status(args: argparse.Namespace) -> None:
     """catalog merchant status [--token ... | --merchant-id ...]
 
