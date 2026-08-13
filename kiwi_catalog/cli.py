@@ -44,6 +44,7 @@ from kiwi_catalog.cli_merchant_commands import (
     cmd_merchant_applications_list,
     cmd_merchant_applications_reject,
     cmd_merchant_status,
+    cmd_merchant_token_backfill,
     cmd_merchant_token_revoke,
     cmd_merchant_token_rotate,
 )
@@ -159,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     token_revoke.add_argument("merchant_id", help="Merchant id (e.g. mkt_...)")
     token_revoke.add_argument("--format", choices=["text", "json"], default="text")
     token_revoke.set_defaults(func=cmd_merchant_token_revoke)
+    token_backfill = token_cmd.add_parser(
+        "backfill",
+        help="Issue random tokens to legacy merchants with no token row (C-H2 migration; plaintext shown once)",
+    )
+    token_backfill.add_argument("--format", choices=["text", "json"], default="text")
+    token_backfill.set_defaults(func=cmd_merchant_token_backfill)
 
     merchant_status = merchant_cmd.add_parser("status", help="Merchant self-check: token is identity; or --merchant-id for any merchant (local trust)")
     merchant_status.add_argument("--token", default="", help="Your merchant token (mkt_...); resolves identity server-side")
