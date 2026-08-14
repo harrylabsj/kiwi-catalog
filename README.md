@@ -1,5 +1,7 @@
 # kiwi-catalog
 
+当前开发发布线：`0.2.2`（PyPI 正式发布仍由 Kiwi portfolio workflow 统一触发）。
+
 独立部署的 Agent Catalog 服务——从 shopping-cli 抽离（
 `shopping-cli/docs/shopping-cli-agent-catalog-extraction-plan-v1.0.md`，
 切割分水岭：**不含托管协商与 marketplace 域**）。
