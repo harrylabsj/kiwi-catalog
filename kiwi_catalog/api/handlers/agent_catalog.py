@@ -568,6 +568,10 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
         )
         if replayed is not None:
             return replayed
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        actor = _require_catalog_write_auth(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -577,8 +581,6 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
         if replayed is not None:
             return replayed
         try:
-            agent = require_catalog_agent(conn, catalog_agent_id)
-            actor = _require_catalog_write_auth(conn, agent, payload)
             response = {
                 "ok": True,
                 "catalog_agent_id": catalog_agent_id,
@@ -621,6 +623,10 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
         )
         if replayed is not None:
             return replayed
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        actor = _require_catalog_write_auth(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -630,8 +636,6 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
         if replayed is not None:
             return replayed
         try:
-            agent = require_catalog_agent(conn, catalog_agent_id)
-            actor = _require_catalog_write_auth(conn, agent, payload)
             # 审查 P2-O：限流计数 + 幂等 claim 的写事务先落盘——此前这两笔写
             # 之后才做 2×30s 网络抓取，抓取窗口内 SQLite 写锁被持有（WAL 单
             # 写者 + busy_timeout 5s），并发 register/publish/withdraw 全部
@@ -672,6 +676,10 @@ def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dic
         )
         if replayed is not None:
             return replayed
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        merchant_id, actor = _claim_identity(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -681,8 +689,6 @@ def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dic
         if replayed is not None:
             return replayed
         try:
-            agent = require_catalog_agent(conn, catalog_agent_id)
-            merchant_id, actor = _claim_identity(conn, agent, payload)
             result = agent_catalog_writes.claim_catalog_agent(
                 conn,
                 catalog_agent_id=catalog_agent_id,
@@ -734,6 +740,12 @@ def _moderation_action(
         )
         if replayed is not None:
             return replayed
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        # Admin-only: moderation must never be driven by a merchant owner
+        # or the verification worker (raises AuthError → 401/403).
+        api_auth.require_admin_token(payload)
+        require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -743,10 +755,6 @@ def _moderation_action(
         if replayed is not None:
             return replayed
         try:
-            # Admin-only: moderation must never be driven by a merchant owner
-            # or the verification worker (raises AuthError → 401/403).
-            api_auth.require_admin_token(payload)
-            require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
             service = _verification_service(db_path, conn)
             result = getattr(service, action)(catalog_agent_id, actor="admin", reason=reason)
             if after_work is not None:

@@ -321,13 +321,16 @@ def register_catalog_agent(
                     "skill_id": str(s.get("skill_id") or ""),
                     "name": str(s.get("name") or ""),
                     "description": str(s.get("description") or ""),
-                    # 审查 P3：tags_json 客户端可传 list——写边界归一化为
+                    # 审查 P3：tags 客户端可传 list——写边界归一化为
                     # JSON 字符串（此前 sqlite3 绑定 list 抛 ProgrammingError
                     # → 500，未转换为 ValidationError）。
+                    # 审查 L5：wire 字段名是 schema 声明的 `tags`（additionalProperties
+                    # :false），此前误读 `tags_json`（schema 拒绝该字段）→ tags 被
+                    # 静默丢弃。
                     "tags_json": (
-                        s["tags_json"]
-                        if isinstance(s.get("tags_json"), str)
-                        else json.dumps(s.get("tags_json") or [], ensure_ascii=False)
+                        s["tags"]
+                        if isinstance(s.get("tags"), str)
+                        else json.dumps(s.get("tags") or [], ensure_ascii=False)
                     ),
                 }
                 for s in skills

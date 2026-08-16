@@ -28,6 +28,7 @@ from kiwi_catalog.discovery.fetcher import (
     FetchLimitError,
     ProfileFetcher,
     SSRFBlockError,
+    _is_blocked_ip,
     _port_of,
 )
 from kiwi_catalog.discovery.trust import TrustPolicy
@@ -47,6 +48,44 @@ class PortHelperTest(unittest.TestCase):
         self.assertEqual(_port_of(urllib.parse.urlparse("https://h.example:8443/"), "https"), 8443)
         self.assertEqual(_port_of(urllib.parse.urlparse("https://h.example/"), "https"), 443)
         self.assertEqual(_port_of(urllib.parse.urlparse("http://h.example/"), "http"), 80)
+
+
+class BlockedIpTest(unittest.TestCase):
+    """审查 M1：内嵌 IPv4 的 IPv6 写法（NAT64 / IPv4-compatible / 6to4）必须
+    按内嵌 IPv4 判定，不得仅靠 is_private 漏判。"""
+
+    def _assert_blocked(self, ip: str) -> None:
+        import ipaddress
+
+        self.assertIsNotNone(_is_blocked_ip(ipaddress.ip_address(ip)), f"{ip} should be blocked")
+
+    def _assert_allowed(self, ip: str) -> None:
+        import ipaddress
+
+        self.assertIsNone(_is_blocked_ip(ipaddress.ip_address(ip)), f"{ip} should be allowed")
+
+    def test_ipv4_mapped_private_is_blocked(self) -> None:
+        self._assert_blocked("::ffff:127.0.0.1")
+        self._assert_blocked("::ffff:169.254.169.254")
+        self._assert_blocked("::ffff:10.0.0.1")
+
+    def test_nat64_private_is_blocked(self) -> None:
+        self._assert_blocked("64:ff9b::7f00:1")  # → 127.0.0.1
+        self._assert_blocked("64:ff9b::a00:1")  # → 10.0.0.1
+        self._assert_blocked("64:ff9b::c0a8:1")  # → 192.168.0.1
+
+    def test_ipv4_compatible_private_is_blocked(self) -> None:
+        self._assert_blocked("::127.0.0.1")
+        self._assert_blocked("::10.0.0.1")
+
+    def test_6to4_is_blocked(self) -> None:
+        # 6to4（2002::/16）由 ipaddress.is_private 全拦（fail-closed，无需内嵌提取）。
+        self._assert_blocked("2002:7f00:1::")  # → 127.0.0.1
+        self._assert_blocked("2002:808:808::")  # → 8.8.8.8（内嵌公网也拦，过度但安全）
+
+    def test_embedded_public_ipv4_is_allowed(self) -> None:
+        self._assert_allowed("::ffff:8.8.8.8")
+        self._assert_allowed("64:ff9b::808:808")  # → 8.8.8.8
 
 
 class HttpSchemeSupportTest(unittest.TestCase):
