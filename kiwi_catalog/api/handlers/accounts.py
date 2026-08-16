@@ -56,6 +56,20 @@ def _audit_token_view(conn: Any, account: dict[str, Any], view: dict[str, Any]) 
     )
 
 
+def _redact_token_plaintext(view: dict[str, Any]) -> dict[str, Any]:
+    """登录/verify 响应不回明文 owner token（仅 /me 明示回显，审查 L4）。
+
+    ``_audit_token_view`` 已记录回显审计；此处只把明文字段置空，保留
+    status/merchant_id 等元数据，避免通过 WAF/代理 body 日志泄露凭据。
+    """
+    token = view.get("token")
+    if isinstance(token, dict):
+        redacted = dict(token)
+        redacted["token"] = ""
+        return {**view, "token": redacted}
+    return view
+
+
 def _login_rate_limit_per_15min() -> int:
     import os
 
@@ -87,7 +101,13 @@ def _require_session(
         raise AuthError("login required")
     _ctx = db_session(db_path)
     conn = _ctx.__enter__()
-    account = accounts_service.resolve_session(conn, session_token)
+    try:
+        account = accounts_service.resolve_session(conn, session_token)
+    except Exception:
+        # 审查 L6：resolve_session 抛异常时上下文未 exit，连接泄漏（此前只在
+        # account is None 路径 exit）。异常路径显式 exit 再重抛。
+        _ctx.__exit__(None, None, None)
+        raise
     if account is None:
         _ctx.__exit__(None, None, None)
         raise AuthError("session expired or invalid")
@@ -162,7 +182,7 @@ def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         _audit_token_view(conn, account, view)
         return {
             "ok": True,
-            **view,
+            **_redact_token_plaintext(view),
             "__cookies__": [accounts_service.session_cookie_value(session_token)],
         }
 
@@ -173,6 +193,20 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
     code = str(require_field(payload, "code")).strip()
 
     with db_session(db_path) as conn:
+        # 审查 H4：验证码校验此前无限流——6 位码（1M 空间）可在 15min 窗口内被
+        # 穷举，进而账号接管。按邮箱限流（复用登录限流 env，默认 10/15min）。
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"verify-email:{email.lower()}",
+                limit=limit,
+                window_seconds=900,
+                description=f"email verification ({limit}/15min per email)",
+            )
         account = accounts_service.account_by_email(conn, email)
         if account is None:
             raise AuthError("invalid verification code")
@@ -185,7 +219,7 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
         _audit_token_view(conn, account, view)
         return {
             "ok": True,
-            **view,
+            **_redact_token_plaintext(view),
             "__cookies__": [accounts_service.session_cookie_value(session_token)],
         }
 
@@ -194,6 +228,19 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/accounts/resend-code（公开）——重新签发验证码。"""
     email = str(require_field(payload, "email")).strip().lower()
     with db_session(db_path) as conn:
+        # 审查 H4：重发验证码同样按邮箱限流，防对某邮箱的刷码骚扰。
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"resend-code:{email.lower()}",
+                limit=limit,
+                window_seconds=900,
+                description=f"verification code resend ({limit}/15min per email)",
+            )
         account = accounts_service.account_by_email(conn, email)
         if account is None:
             raise AuthError("unknown email")
@@ -258,6 +305,21 @@ def reset_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
         raise ValidationError("password too long")
 
     with db_session(db_path) as conn:
+        # 审查 H4：密码重置码校验此前无限流——6 位码（1M 空间）可在 15min 窗口
+        # 内被穷举，成功后还会把 email_verified 翻 1，攻击者即可登录读明文
+        # 商家 token。按邮箱限流（复用登录限流 env，默认 10/15min）。
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"reset-password:{email.lower()}",
+                limit=limit,
+                window_seconds=900,
+                description=f"password reset verification ({limit}/15min per email)",
+            )
         account = accounts_service.account_by_email(conn, email)
         if account is None or not accounts_service.reset_password(
             conn, account, code, new_password

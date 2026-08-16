@@ -105,10 +105,22 @@ def _fernet(key: bytes) -> Any:
     return Fernet(base64.urlsafe_b64encode(key))
 
 
+_fernet_v2_cache: tuple[str, Any] | None = None
+
+
 def _fernet_v2() -> Any:
-    """当前派生（scrypt）：新加密一律用此，密文带 v2: 前缀。"""
+    """当前派生（scrypt）：新加密一律用此，密文带 v2: 前缀。
+
+    审查 M5：scrypt（n=2^15 → 32 MiB 内存硬，约 50ms/次）此前每次调用现算，
+    ``/me`` / ``login`` / ``verify-email`` 每请求都解密 token → 单请求即可钉
+    CPU。进程内按 secret 缓存派生结果（secret 变化时自动失效）。
+    """
+    global _fernet_v2_cache
+    secret = _owner_secret()
+    if _fernet_v2_cache is not None and _fernet_v2_cache[0] == secret:
+        return _fernet_v2_cache[1]
     key = hashlib.scrypt(
-        _owner_secret().encode("utf-8"),
+        secret.encode("utf-8"),
         salt=_KDF_SALT,
         n=_KDF_N,
         r=_KDF_R,
@@ -117,7 +129,9 @@ def _fernet_v2() -> Any:
         maxmem=64 * 1024 * 1024,
         dklen=32,
     )
-    return _fernet(key)
+    cipher = _fernet(key)
+    _fernet_v2_cache = (secret, cipher)
+    return cipher
 
 
 def _fernet_v1() -> Any:

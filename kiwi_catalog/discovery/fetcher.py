@@ -85,6 +85,11 @@ _EXTRA_BLOCKED_V6 = [
     ipaddress.IPv6Network("fec0::/10"),  # deprecated site-local
     ipaddress.IPv6Network("ff00::/8"),  # multicast
 ]
+# NAT64 well-known prefix（RFC 6052）与 IPv4-compatible（RFC 4291 已废弃）：
+# 低 32 位内嵌 IPv4，is_private 对二者均返回 False——需提取后按 IPv4 黑名单
+# 判定（审查 M1：NAT64 网络下域名解析到 64:ff9b::<私网v4> 可穿透黑名单）。
+_NAT64_V6 = ipaddress.IPv6Network("64:ff9b::/96")
+_IPV4_COMPATIBLE_V6 = ipaddress.IPv6Network("::/96")
 
 # ── Verified IP store (shared across handler and redirect handler) ─────────────
 # Maps (hostname, port) → verified IP string.  Populated by the redirect handler
@@ -144,6 +149,14 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | N
                 reason = _is_blocked_ip(v4)
                 if reason:
                     return f"IPv4-mapped {reason}"
+        # NAT64（64:ff9b::/96）与 IPv4-compatible（::/96）：低 32 位内嵌 IPv4。
+        # is_private 对二者均返回 False（6to4 2002::/16 已被 is_private 全拦，
+        # 无需单独提取）——需手动提取内嵌 IPv4 按黑名单判定。
+        if ip in _NAT64_V6 or ip in _IPV4_COMPATIBLE_V6:
+            v4 = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+            reason = _is_blocked_ip(v4)
+            if reason:
+                return f"embedded-IPv4 {reason}"
     else:
         if ip.is_link_local:
             return "link-local address"
