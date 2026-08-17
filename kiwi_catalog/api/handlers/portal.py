@@ -240,11 +240,11 @@ _OFFICIAL_HOME = "https://kiwi.harrylabsj.com/"
 
 
 def _nav(active: str = "") -> str:
-    """商家侧一级导航：Home / For Buyers / For Merchants / For Developers / My Account。
+    """商家侧一级导航：首页 / 买家 / 商家 / 开发者 / 我的账户。
 
     前四项与官网（kiwi.harrylabsj.com）导航一致，指向官网各页（Demo 已在
-    官网首页，不再单列）；My Account 为门户本地页（/portal/account）。令牌
-    申请/复制入口收敛在 My Account 页内（有令牌显示复制按钮，无令牌显示
+    官网首页，不再单列）；我的账户为门户本地页（/portal/account）。令牌
+    申请/复制入口收敛在我的账户页内（有令牌显示复制按钮，无令牌显示
     申请按钮）。
     """
     account_cls = ' class="active"' if active == "account" else ""
@@ -252,11 +252,11 @@ def _nav(active: str = "") -> str:
 <nav class="nav"><div class="nav-inner">
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
   <div class="nav-links">
-    <a href="{_OFFICIAL_HOME}">Home</a>
-    <a href="{_OFFICIAL_HOME}buyers.html">For Buyers</a>
-    <a href="{_OFFICIAL_HOME}merchants.html">For Merchants</a>
-    <a href="{_OFFICIAL_HOME}developers.html">For Developers</a>
-    <a href="/portal/account"{account_cls}>My Account</a>
+    <a href="{_OFFICIAL_HOME}">首页</a>
+    <a href="{_OFFICIAL_HOME}buyers">买家</a>
+    <a href="{_OFFICIAL_HOME}merchants">商家</a>
+    <a href="{_OFFICIAL_HOME}developers">开发者</a>
+    <a href="/portal/account"{account_cls}>我的账户</a>
   </div>
 </div></nav>
 """
@@ -397,7 +397,7 @@ function showToken(r) {
   const out = document.getElementById('result');
   card.style.display = 'block';
   out.innerHTML = '<p class="small">已批准商家</p><div class="token-box">' + escHtml(r.merchant_id)
-    + '</div><p class="small">令牌已签发并加密存储，商家可在自己的 My Account 查看。
+    + '</div><p class="small">令牌已签发并加密存储，商家可在自己的「我的账户」查看。
       运营无需记录令牌。</p>';
 }
 function loadList() {
@@ -692,7 +692,7 @@ document.getElementById('apps').addEventListener('click', e => {
   const rej = e.target.dataset.rej;
   if (app) {
     postJson('/v1/merchants/applications/' + app + '/approve', {}, token)
-      .then(r => { if (r.ok) { document.getElementById('out').className = ''; document.getElementById('out').textContent = '已批准 ' + r.merchant_id + '——令牌已加密存储，商家在 My Account 查看。'; loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
+      .then(r => { if (r.ok) { document.getElementById('out').className = ''; document.getElementById('out').textContent = '已批准 ' + r.merchant_id + '——令牌已加密存储，商家在「我的账户」查看。'; loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   } else if (rej) {
     const note = prompt('拒绝理由（必填，将展示给商家）：');
     if (note === null) { return; }
@@ -1107,7 +1107,7 @@ def portal_account() -> dict[str, Any]:
         _nav("account")
         + """
 <section class="section center-page"><div class="section-inner">
-  <div class="kicker">My Account</div>
+  <div class="kicker">我的账户</div>
   <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
@@ -1230,7 +1230,7 @@ def portal_account_profile() -> dict[str, Any]:
         _nav("account")
         + """
 <section class="section center-page"><div class="section-inner">
-  <div class="kicker">My Account</div>
+  <div class="kicker">我的账户</div>
   <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
