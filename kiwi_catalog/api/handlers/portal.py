@@ -396,7 +396,7 @@ function showToken(r) {
   const out = document.getElementById('result');
   card.style.display = 'block';
   out.innerHTML = '<p class="small">已批准商家</p><div class="token-box">' + escHtml(r.merchant_id)
-    + '</div><p class="small">令牌已签发并加密存储，商家可在自己的「我的账户」查看。
+    + '</div><p class="small">令牌已签发并加密存储，商家可在自己的「商家后台」查看。
       运营无需记录令牌。</p>';
 }
 function loadList() {
@@ -691,7 +691,7 @@ document.getElementById('apps').addEventListener('click', e => {
   const rej = e.target.dataset.rej;
   if (app) {
     postJson('/v1/merchants/applications/' + app + '/approve', {}, token)
-      .then(r => { if (r.ok) { document.getElementById('out').className = ''; document.getElementById('out').textContent = '已批准 ' + r.merchant_id + '——令牌已加密存储，商家在「我的账户」查看。'; loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
+      .then(r => { if (r.ok) { document.getElementById('out').className = ''; document.getElementById('out').textContent = '已批准 ' + r.merchant_id + '——令牌已加密存储，商家在「商家后台」查看。'; loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   } else if (rej) {
     const note = prompt('拒绝理由（必填，将展示给商家）：');
     if (note === null) { return; }
@@ -990,8 +990,8 @@ def portal_account() -> dict[str, Any]:
         _nav("account")
         + """
 <section class="section center-page"><div class="section-inner">
-  <div class="kicker">我的账户</div>
-  <h2>我的账户</h2>
+  <div class="kicker">商家后台</div>
+  <h2>商家后台</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
@@ -1103,7 +1103,7 @@ loadMe();
     )
     # 二级导航高亮（申请令牌 = 本页）
     body = body.replace("{sub_apply}", ' class="active"').replace("{sub_profile}", "")
-    return _account_page("我的账户", body)
+    return _account_page("商家后台", body)
 
 
 def portal_account_profile() -> dict[str, Any]:
@@ -1112,8 +1112,8 @@ def portal_account_profile() -> dict[str, Any]:
         _nav("account")
         + """
 <section class="section center-page"><div class="section-inner">
-  <div class="kicker">我的账户</div>
-  <h2>我的账户</h2>
+  <div class="kicker">商家后台</div>
+  <h2>商家后台</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
