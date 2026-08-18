@@ -713,14 +713,14 @@ class AccountsApiTest(unittest.TestCase):
     # ── 导航 ───────────────────────────────────────────────────────────────
 
     def test_portal_nav_has_my_account(self) -> None:
-        """「商家后台」页一级导航：首页 / 买家接入 / 商家接入 / 开发者 / 商家后台。
+        """「商家后台」页一级导航：首页 / 买家 / 商家 / 开发者 / 商家后台。
 
         与官网首页导航一致，链接到 kiwi.harrylabsj.com 各页（Demo 在官网首页，
         不单列）；商家后台为本地页；令牌申请收敛到页内（无独立导航链接）。
         """
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
-        for label in (">首页</a>", ">买家接入</a>", ">商家接入</a>",
+        for label in (">首页</a>", ">买家</a>", ">商家</a>",
                       ">开发者</a>", ">商家后台</a>"):
             self.assertIn(label, raw)
         self.assertNotIn(">Demo</a>", raw)
@@ -741,7 +741,7 @@ class AccountsApiTest(unittest.TestCase):
         raw = payload.get("_raw", "")
         self.assertIn(">商家后台</a>", raw)
         self.assertIn("/portal/account", raw)
-        self.assertIn(">商家接入</a>", raw)
+        self.assertIn(">商家</a>", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
 
