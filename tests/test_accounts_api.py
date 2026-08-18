@@ -713,15 +713,15 @@ class AccountsApiTest(unittest.TestCase):
     # ── 导航 ───────────────────────────────────────────────────────────────
 
     def test_portal_nav_has_my_account(self) -> None:
-        """「我的」页一级导航：首页 / 买家 / 商家 / 开发者 / 我的账户。
+        """「商家后台」页一级导航：首页 / 买家接入 / 商家接入 / 开发者 / 商家后台。
 
-        官网四项链接到 kiwi.harrylabsj.com 各页（Demo 在官网首页，不单列）；
-        我的账户为本地页；令牌申请收敛到页内（无独立导航链接）。
+        与官网首页导航一致，链接到 kiwi.harrylabsj.com 各页（Demo 在官网首页，
+        不单列）；商家后台为本地页；令牌申请收敛到页内（无独立导航链接）。
         """
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
-        for label in (">首页</a>", ">买家</a>", ">商家</a>",
-                      ">开发者</a>", ">我的账户</a>"):
+        for label in (">首页</a>", ">买家接入</a>", ">商家接入</a>",
+                      ">开发者</a>", ">商家后台</a>"):
             self.assertIn(label, raw)
         self.assertNotIn(">Demo</a>", raw)
         self.assertIn("buyers", raw)
@@ -736,12 +736,12 @@ class AccountsApiTest(unittest.TestCase):
         self.assertNotIn(">Merchant Portal<", raw)  # 导航无 Merchant Portal（title 后缀除外）
 
     def test_home_nav_points_to_my_account(self) -> None:
-        """`/portal` 一级导航指向我的账户；不再有独立令牌申请导航链接。"""
+        """`/portal` 一级导航指向商家后台；不再有独立令牌申请导航链接。"""
         _, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
-        self.assertIn(">我的账户</a>", raw)
+        self.assertIn(">商家后台</a>", raw)
         self.assertIn("/portal/account", raw)
-        self.assertIn(">商家</a>", raw)
+        self.assertIn(">商家接入</a>", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
 

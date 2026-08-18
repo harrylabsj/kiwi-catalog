@@ -240,12 +240,11 @@ _OFFICIAL_HOME = "https://kiwi.harrylabsj.com/"
 
 
 def _nav(active: str = "") -> str:
-    """商家侧一级导航：首页 / 买家 / 商家 / 开发者 / 我的账户。
+    """商家侧一级导航：首页 / 买家接入 / 商家接入 / 开发者 / 商家后台。
 
-    前四项与官网（kiwi.harrylabsj.com）导航一致，指向官网各页（Demo 已在
-    官网首页，不再单列）；我的账户为门户本地页（/portal/account）。令牌
-    申请/复制入口收敛在我的账户页内（有令牌显示复制按钮，无令牌显示
-    申请按钮）。
+    与官网（kiwi.harrylabsj.com）首页导航一致，指向官网各页（Demo 已在官网
+    首页，不再单列）；商家后台为门户本地页（/portal/account）。令牌申请/复制
+    入口收敛在商家后台页内（有令牌显示复制按钮，无令牌显示申请按钮）。
     """
     account_cls = ' class="active"' if active == "account" else ""
     return f"""
@@ -253,10 +252,10 @@ def _nav(active: str = "") -> str:
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
   <div class="nav-links">
     <a href="{_OFFICIAL_HOME}">首页</a>
-    <a href="{_OFFICIAL_HOME}buyers">买家</a>
-    <a href="{_OFFICIAL_HOME}merchants">商家</a>
+    <a href="{_OFFICIAL_HOME}buyers">买家接入</a>
+    <a href="{_OFFICIAL_HOME}merchants">商家接入</a>
     <a href="{_OFFICIAL_HOME}developers">开发者</a>
-    <a href="/portal/account"{account_cls}>我的账户</a>
+    <a href="/portal/account"{account_cls}>商家后台</a>
   </div>
 </div></nav>
 """
