@@ -31,7 +31,6 @@ from typing import Any
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
-from kiwi_catalog.api.handlers import discovery_entries as discovery_entries_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
@@ -214,12 +213,6 @@ RouteEntry(
             db_path, listing_id, payload
         ),
     ),
-# ── /v1/discovery（公开发现目录检索：买家 agent，匿名 + 限流）───────────────
-RouteEntry(
-        {"GET"},
-        "/v1/discovery/search",
-        lambda db_path, payload, query, **kw: _v1_search_discovery(db_path, query, payload),
-    ),
 # ── /v1/merchants（token 分发，docs/kiwi-catalog-token-portal-design-v0.1 §4）──
 # 顺序约束：/v1/merchants/applications 先于 /v1/merchants/{merchant_id}/rotate
 #（_match_path 顺序匹配，全路径正则无参数冲突；method 也不同）。
@@ -261,27 +254,6 @@ RouteEntry(
         "/v1/merchants/{merchant_id}/revoke",
         lambda db_path, payload, query, merchant_id: _v1_revoke_token(
             db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/merchants/{merchant_id}/discovery-entries",
-        lambda db_path, payload, query, merchant_id: _v1_merchant_discovery_entry_create(
-            db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/merchants/{merchant_id}/discovery-entries",
-        lambda db_path, payload, query, merchant_id: _v1_merchant_discovery_entries_list(
-            db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
-        {"DELETE"},
-        "/v1/merchants/{merchant_id}/discovery-entries/{entry_id}",
-        lambda db_path, payload, query, merchant_id, entry_id: _v1_merchant_discovery_entry_delete(
-            db_path, merchant_id, entry_id, payload
         ),
     ),
 RouteEntry(
@@ -414,11 +386,6 @@ RouteEntry(
         "/portal/account/profile",
         lambda db_path, payload, query, **kw: _portal_account_profile(),
     ),
-RouteEntry(
-        {"GET"},
-        "/portal/products",
-        lambda db_path, payload, query, **kw: _portal_products(),
-    ),
 )
 
 def _list_catalog_agents(db_path, payload, query):
@@ -507,16 +474,6 @@ def _v1_search_listings(db_path, payload, query):
     return listings_handlers.v1_search_listings(db_path, query or {})
 
 
-def _v1_search_discovery(db_path, query, payload=None):
-    merged = dict(query or {})
-    # fallback 栈经 payload 透传 _client_ip（限流 per-IP 分桶，审查 P3-06）；
-    # FastAPI 栈在路由层直接注入 query。
-    client_ip = str((payload or {}).get("_client_ip") or "").strip()
-    if client_ip:
-        merged["_client_ip"] = client_ip
-    return discovery_entries_handlers.search_discovery(db_path, merged)
-
-
 # ── /v1/merchants wrapper（token 分发）────────────────────────────────────
 
 
@@ -545,18 +502,6 @@ def _v1_rotate_token(db_path, merchant_id, payload):
 
 def _v1_revoke_token(db_path, merchant_id, payload):
     return merchants_handlers.revoke_token(db_path, merchant_id, payload)
-
-
-def _v1_merchant_discovery_entry_create(db_path, merchant_id, payload):
-    return discovery_entries_handlers.create_entry(db_path, merchant_id, payload)
-
-
-def _v1_merchant_discovery_entries_list(db_path, merchant_id, payload):
-    return discovery_entries_handlers.list_entries(db_path, merchant_id, payload)
-
-
-def _v1_merchant_discovery_entry_delete(db_path, merchant_id, entry_id, payload):
-    return discovery_entries_handlers.delete_entry(db_path, merchant_id, entry_id, payload)
 
 
 def _v1_merchant_self(db_path, payload, query):
@@ -666,10 +611,6 @@ def _portal_account():
 
 def _portal_account_profile():
     return portal_handlers.portal_account_profile()
-
-
-def _portal_products():
-    return portal_handlers.portal_products()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):
