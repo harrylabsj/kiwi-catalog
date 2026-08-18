@@ -39,7 +39,7 @@ release 工作流的一个**消费者**：正式版本的构建、签名与上�
 
 ### 4.1 版本号
 
-- 版本号唯一来源是 `pyproject.toml` 的 `project.version`（当前 `0.2.2`），
+- 版本号唯一来源是 `pyproject.toml` 的 `project.version`（当前候选 `0.2.4`），
   按语义化版本（SemVer）提升。
 - 只改文档/模板、不触碰业务逻辑/公共 API/依赖版本时，不得提升主版本号。
 
