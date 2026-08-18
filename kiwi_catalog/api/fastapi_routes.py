@@ -31,7 +31,6 @@ from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
-from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.route_table import (
     _claim_catalog_agent,
@@ -57,9 +56,6 @@ from kiwi_catalog.api.route_table import (
     _v1_list_agent_listings,
     _v1_list_agents,
     _v1_list_applications,
-    _v1_merchant_discovery_entries_list,
-    _v1_merchant_discovery_entry_create,
-    _v1_merchant_discovery_entry_delete,
     _v1_merchant_self,
     _v1_publish_listing,
     _v1_refresh_agent,
@@ -69,7 +65,6 @@ from kiwi_catalog.api.route_table import (
     _v1_revoke_token,
     _v1_rotate_token,
     _v1_search_agents,
-    _v1_search_discovery,
     _v1_search_listings,
     _v1_submit_application,
     _v1_verify_agent,
@@ -392,17 +387,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_search_listings(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_search_listings(db_path, {}, _query_params_from_request(request))
 
-    @app.get("/v1/discovery/search")
-    def v1_search_discovery(request: _FastAPIRequest) -> dict[str, Any]:
-        query = _query_params_from_request(request)
-        # 限流 per-IP 分桶（审查 P3-06 / C-M2）：仅可信代理（默认回环）时采信
-        # XFF，直连对端非可信代理则忽略 XFF 用直连对端；与 fallback 同键。
-        direct_peer = request.client.host if request.client is not None else None
-        client_ip = resolve_client_ip(request.headers.get("x-forwarded-for") or "", direct_peer)
-        if client_ip:
-            query["_client_ip"] = client_ip
-        return _v1_search_discovery(db_path, query)
-
     @app.get("/v1/listings/{listing_id}")
     def v1_get_listing(listing_id: str) -> dict[str, Any]:
         return _v1_get_listing(db_path, listing_id)
@@ -537,49 +521,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             payload = dict(payload)
             payload["_cookie"] = cookie
         return payload
-
-    @app.post("/v1/merchants/{merchant_id}/discovery-entries")
-    def v1_merchant_discovery_entry_create(
-        merchant_id: str,
-        request: _FastAPIRequest,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_merchant_discovery_entry_create(
-            db_path,
-            merchant_id,
-            _merchant_payload_with_session(
-                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-            ),
-        )
-
-    @app.get("/v1/merchants/{merchant_id}/discovery-entries")
-    def v1_merchant_discovery_entries_list(
-        merchant_id: str, request: _FastAPIRequest
-    ) -> dict[str, Any]:
-        return _v1_merchant_discovery_entries_list(
-            db_path,
-            merchant_id,
-            _merchant_payload_with_session(
-                request,
-                api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            ),
-        )
-
-    @app.delete("/v1/merchants/{merchant_id}/discovery-entries/{entry_id}")
-    def v1_merchant_discovery_entry_delete(
-        merchant_id: str, entry_id: str, request: _FastAPIRequest
-    ) -> dict[str, Any]:
-        return _v1_merchant_discovery_entry_delete(
-            db_path,
-            merchant_id,
-            entry_id,
-            _merchant_payload_with_session(
-                request,
-                api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            ),
-        )
 
     @app.get("/v1/merchants/self")
     def v1_merchant_self(request: _FastAPIRequest) -> dict[str, Any]:
@@ -738,7 +679,3 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/account/profile")
     def portal_account_profile_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_account_profile())
-
-    @app.get("/portal/products")
-    def portal_products_page() -> HTMLResponse:
-        return _portal_html(portal_handlers.portal_products())

@@ -985,122 +985,6 @@ document.getElementById('reset').addEventListener('click', () => {
     return _account_page("重置密码", body)
 
 
-def portal_products() -> dict[str, Any]:
-    """「我的商品」：发现条目管理（上传商品名称到 catalog 发现目录）。
-
-    - 从 /v1/accounts/me 取 merchant_id / token 状态 / agents_count（登录态）；
-    - 无有效令牌 → 引导到「令牌信息」申请；无注册 Agent → 引导先完成注册
-      （没有 Agent 的条目是死发现链接，服务端同样会拒绝）；
-    - 正常：单输入（商品名称）上传 + 列表 + 删除，全部走账号会话（cookie）。
-    """
-    body = (
-        _nav("products")
-        + """
-<section class="section"><div class="section-inner">
-  <div class="kicker">Merchant</div>
-  <h2>我的商品</h2>
-  <div class="subnav">
-    <a href="/portal/account/profile"{sub_profile}>基本信息</a>
-    <a href="/portal/products"{sub_products}>我的商品</a>
-    <a href="/portal/account"{sub_apply}>令牌信息</a>
-    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
-  </div>
-  <p class="lead">上传商品名称到 Kiwi 发现目录。买家 agent 检索到名称后，会按你注册的
-    Agent 信息跳转成交；完整商品数据（价格/库存/详情）由你自己的 agent 提供。</p>
-
-  <div class="notice" id="guide_token" style="display:none">上传商品名称到发现目录需要商家令牌——请先到
-    <a href="/portal/account">「令牌信息」</a>申请令牌，审核通过后即可上传。</div>
-  <div class="notice" id="guide_agent" style="display:none">你还没有注册 Agent——商品名称需要挂在已注册的
-    Agent 下才会被买家发现，请先完成 Agent 注册再上传。</div>
-  <div id="out"></div>
-
-  <div id="manager" style="display:none">
-    <div class="card form-card">
-      <h3>上传商品名称</h3>
-      <label for="f_name">商品名称</label>
-      <input id="f_name" maxlength="200" placeholder="如：有机猕猴桃 5kg 礼盒装">
-      <button class="btn-form" id="add_btn">上传</button>
-      <div id="add_out"></div>
-    </div>
-    <div class="card form-card" style="margin-top:16px">
-      <h3>已上传</h3>
-      <div id="list"></div>
-    </div>
-  </div>
-</div></section>
-<script>
-let MERCHANT = '';
-function esc(v) { return escHtml(v); }
-function loadEntries() {
-  const list = document.getElementById('list');
-  list.innerHTML = '';
-  getJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries').then(r => {
-    if (!r.ok) {
-      const out = document.getElementById('out');
-      out.className = 'err'; out.textContent = r.error || '加载失败'; return;
-    }
-    const entries = r.results || [];
-    if (!entries.length) { list.innerHTML = '<p class="small muted">还没有上传商品名称</p>'; return; }
-    const table = document.createElement('table');
-    table.className = 'search-table';
-    table.innerHTML = '<thead><tr><th>商品名称</th><th>上传时间</th><th></th></tr></thead>';
-    entries.forEach(e => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + esc(e.name) + '</td>'
-        + '<td class="small muted">' + esc((e.created_at || '').slice(0, 10)) + '</td>'
-        + '<td><button class="btn-mini" data-del="' + esc(e.entry_id) + '">删除</button></td>';
-      table.appendChild(tr);
-    });
-    list.appendChild(table);
-    table.addEventListener('click', ev => {
-      const entryId = ev.target.dataset.del;
-      if (!entryId) return;
-      fetch('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries/' + encodeURIComponent(entryId), {
-        method: 'DELETE',
-      }).then(res => res.json()).then(r => {
-        const out = document.getElementById('out');
-        if (r.ok) { out.className = ''; out.textContent = '已删除。'; loadEntries(); }
-        else { out.className = 'err'; out.textContent = r.error || '删除失败'; }
-      });
-    });
-  });
-}
-fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
-  if (!r.ok) { window.location.href = '/portal/login'; return; }
-  MERCHANT = r.merchant_id || '';
-  if (!(r.token && r.token.status === 'active')) {
-    document.getElementById('guide_token').style.display = 'block';
-    return;
-  }
-  if (!r.agents_count) {
-    document.getElementById('guide_agent').style.display = 'block';
-    return;
-  }
-  document.getElementById('manager').style.display = 'block';
-  loadEntries();
-});
-document.getElementById('add_btn').addEventListener('click', () => {
-  const out = document.getElementById('add_out');
-  const name = document.getElementById('f_name').value.trim();
-  if (!name) { out.className = 'err'; out.textContent = '商品名称不能为空'; return; }
-  postJson('/v1/merchants/' + encodeURIComponent(MERCHANT) + '/discovery-entries', {name: name}).then(r => {
-    if (r.ok) {
-      out.className = 'ok'; out.textContent = '已上传。';
-      document.getElementById('f_name').value = '';
-      loadEntries();
-    } else {
-      out.className = 'err'; out.textContent = r.error || '上传失败';
-    }
-  });
-});
-</script>
-"""
-        + _FOOTER
-    )
-    body = body.replace("{sub_apply}", "").replace("{sub_profile}", "").replace("{sub_products}", ' class="active"')
-    return _page("我的商品", body)
-
-
 def portal_account() -> dict[str, Any]:
     """「我的」：工单状态 / 申请 token / 查看 token（明文，登录态）/ 状态查询。"""
     body = (
@@ -1111,14 +995,13 @@ def portal_account() -> dict[str, Any]:
   <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
-    <a href="/portal/products"{sub_products}>我的商品</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
   <div id="content" style="display:none">
     <div class="card form-card">
-      <p class="small">上传商品名称到发现目录需要商家令牌——在本页申请，平台审核通过后签发；
+      <p class="small">接入发现网络需要商家令牌——在本页申请，平台审核通过后签发；
         令牌同时也是你的 Agent 接入 API 的凭据。</p>
       <div id="profile"></div>
       <div id="token_box"></div>
@@ -1180,7 +1063,7 @@ function loadMe() {
       applyBtn.disabled = true;
       document.getElementById('apply_form').style.display = 'none';
     } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。上传商品名称到发现目录需要商家令牌——点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
+      tb.innerHTML = '<p class="small muted">还没有令牌。接入发现网络需要商家令牌——点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
       copyBtn.disabled = true;  // 无令牌：复制令牌变灰
       applyBtn.disabled = false;
       document.getElementById('apply_form').style.display = 'none';
@@ -1220,7 +1103,7 @@ loadMe();
         + _FOOTER
     )
     # 二级导航高亮（申请令牌 = 本页）
-    body = body.replace("{sub_apply}", ' class="active"').replace("{sub_profile}", "").replace("{sub_products}", "")
+    body = body.replace("{sub_apply}", ' class="active"').replace("{sub_profile}", "")
     return _account_page("我的账户", body)
 
 
@@ -1234,7 +1117,6 @@ def portal_account_profile() -> dict[str, Any]:
   <h2>我的账户</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
-    <a href="/portal/products"{sub_products}>我的商品</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
@@ -1279,7 +1161,7 @@ document.getElementById('save_profile').addEventListener('click', () => {
 """
         + _FOOTER
     )
-    body = body.replace("{sub_apply}", "").replace("{sub_profile}", ' class="active"').replace("{sub_products}", "")
+    body = body.replace("{sub_apply}", "").replace("{sub_profile}", ' class="active"')
     return _account_page("基本信息", body)
 
 
