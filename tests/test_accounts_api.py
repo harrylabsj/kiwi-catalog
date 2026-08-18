@@ -755,7 +755,7 @@ class AccountsApiTest(unittest.TestCase):
         markers = {
             "/portal/register": "注册商家账号",
             "/portal/login": "商家登录",
-            "/portal/account": "我的",
+            "/portal/account": "商家后台",
         }
         for path, marker in markers.items():
             status, payload, _ = _call_http(self.app, "GET", path)
