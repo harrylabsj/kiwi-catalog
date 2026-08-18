@@ -252,8 +252,8 @@ def _nav(active: str = "") -> str:
   <a class="nav-logo" href="{_OFFICIAL_HOME}">Kiwi</a>
   <div class="nav-links">
     <a href="{_OFFICIAL_HOME}">首页</a>
-    <a href="{_OFFICIAL_HOME}buyers">买家接入</a>
-    <a href="{_OFFICIAL_HOME}merchants">商家接入</a>
+    <a href="{_OFFICIAL_HOME}buyers">买家</a>
+    <a href="{_OFFICIAL_HOME}merchants">商家</a>
     <a href="{_OFFICIAL_HOME}developers">开发者</a>
     <a href="/portal/account"{account_cls}>商家后台</a>
   </div>
