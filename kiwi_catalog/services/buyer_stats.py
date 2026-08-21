@@ -189,7 +189,8 @@ def record_buyer_keyword(
     if not keyword:
         return
     try:
-        zero_hit = 1 if int(result_count or 0) == 0 else 0
+        # result_count 为 object（int 或 str）——先归一为 str 再 int，mypy 可接受
+        zero_hit = 1 if int(str(result_count or 0)) == 0 else 0
     except (TypeError, ValueError):
         zero_hit = 0
     conn.execute(

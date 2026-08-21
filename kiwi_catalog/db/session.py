@@ -31,7 +31,7 @@ from kiwi_catalog.db.migrations import (
 )
 from kiwi_catalog.db.models import INDEXES, SCHEMA
 
-VERSION = "0.2.4"  # kiwi-catalog standalone
+VERSION = "0.2.5"  # kiwi-catalog standalone
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
