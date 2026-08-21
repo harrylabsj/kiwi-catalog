@@ -90,7 +90,8 @@ def buyer_stats_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> d
     - ``total_events``：搜索事件总量（usage_metrics，含匿名）；
     - ``unidentified_events``：未识别身份事件数（总量 − 已识别，下限 0）。
 
-    另附窗口内关键词聚合（buyer_keyword_daily，各取前 20）：
+    另附窗口内关键词聚合（buyer_keyword_daily，各取前 20；关键词跨搜索类型
+    合并为一行，agent_searches/listing_searches 分列两类计数）：
     ``top_keywords``（按搜索次数）与 ``zero_hit_keywords``（按未命中次数——
     供需缺口信号，运营招商据此）。
     """

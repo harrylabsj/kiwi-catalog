@@ -528,12 +528,11 @@ document.getElementById('load').addEventListener('click', loadSearches);
 
 
 def portal_admin_buyer_stats() -> dict[str, Any]:
-    """每日去重买家统计页——默认不对外公布（env 开关，与审核后台一致）。
+    """旧买家统计页——已并入运营 Dashboard（/portal/dashboard，2026-08-22 合并）。
 
-    KPI（今日去重买家 / 事件总量 / 未识别身份事件）+ 14 天双系列柱状图
-    （找商家 / 找商品）+ 明细表格 + 热门搜索关键词 / 未命中关键词
-    （供需缺口）两张排行表。数据来自 /v1/admin/buyer-stats
-    （buyer_search_daily 日作用域 pseudonymous hash，页面见不到原始身份）。
+    env 开关关闭时仍真实 404（与其他 admin 页一致）；开启时 302 跳转到
+    /portal/dashboard——``__redirect__`` 元键由 fallback _send_json 与
+    FastAPI _portal_html 双栈处理。API 端点 /v1/admin/buyer-stats 保留。
     """
     if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
         "1",
@@ -542,131 +541,18 @@ def portal_admin_buyer_stats() -> dict[str, Any]:
         "on",
     ):
         return {"__html__": _not_found_html(), "__status__": 404}
-    body = (
-        _ADMIN_NAV
-        + """
-<section class="section"><div class="section-inner">
-  <div class="kicker">Admin</div>
-  <h2>每日去重买家</h2>
-  <p class="lead">按天统计有多少个不同买家在用 catalog 搜索（找商家 / 找商品）。身份以日作用域匿名哈希计数，不存原始身份；未带身份的匿名搜索只计入事件总量。</p>
-  <div class="card form-card">
-    <label for="admin_token">Admin Token</label>
-    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
-    <button class="btn-form" id="load">加载统计</button>
-    <div id="out"></div>
-  </div>
-  <div id="content" style="display:none">
-    <div class="kpis" id="kpis"></div>
-    <div class="section-title">每日去重买家数（最近 14 天）</div>
-    <div id="usage"></div>
-    <div class="legend" id="legend"></div>
-    <div class="section-title">明细</div>
-    <div id="detail"></div>
-    <div class="section-title">热门搜索关键词（最近 14 天）</div>
-    <div id="top_keywords"></div>
-    <div class="section-title">未命中关键词（供需缺口）</div>
-    <p class="small muted">买家搜了但没有任何结果的关键词——运营招商据此补供给。</p>
-    <div id="zero_hit_keywords"></div>
-  </div>
-</div></section>
-<style>
-.bars2{display:flex;align-items:flex-end;gap:6px;height:120px;margin-top:18px}
-.bars2 .bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
-.bars2 .pair{display:flex;align-items:flex-end;gap:2px;width:100%;height:100px}
-.bars2 .fill{flex:1;border-radius:4px 4px 2px 2px;min-height:2px}
-.bars2 .d{font-size:0.68rem;color:var(--ink-soft);white-space:nowrap}
-</style>
-<script>
-const BSERIES = [
-  ['buyer_agent_search', '找商家', '#2e7d32'],
-  ['buyer_listing_search', '找商品', '#43a047'],
-];
-function renderBuyerKpis(today) {
-  const total = BSERIES.reduce((s, [k]) => s + (today.total_events[k] || 0), 0);
-  const unidentified = BSERIES.reduce((s, [k]) => s + (today.unidentified_events[k] || 0), 0);
-  const kpis = [
-    ['今日去重买家（找商家）', today.distinct_buyers.buyer_agent_search],
-    ['今日去重买家（找商品）', today.distinct_buyers.buyer_listing_search],
-    ['今日搜索事件总数', total],
-    ['今日未识别身份事件数', unidentified],
-  ];
-  document.getElementById('kpis').innerHTML = kpis.map(([lbl, n]) =>
-    '<div class="kpi"><div class="num">' + escHtml(n) + '</div><div class="lbl">' + escHtml(lbl) + '</div></div>'
-  ).join('');
-}
-function renderBuyerChart(series) {
-  const max = Math.max(1, ...series.flatMap(u => BSERIES.map(([k]) => u.distinct_buyers[k] || 0)));
-  document.getElementById('usage').innerHTML =
-    '<div class="bars2">' + series.map(u =>
-      '<div class="bar" title="' + escHtml(u.day) + ' 找商家 ' + escHtml(u.distinct_buyers.buyer_agent_search)
-        + ' / 找商品 ' + escHtml(u.distinct_buyers.buyer_listing_search) + '"><div class="pair">'
-        + BSERIES.map(([k, , color]) =>
-          '<div class="fill" style="background:' + color + ';height:'
-          + Math.max(2, Math.round((u.distinct_buyers[k] || 0) / max * 100)) + '%"></div>'
-        ).join('')
-        + '</div><div class="d">' + escHtml(u.day.slice(5)) + '</div></div>'
-    ).join('') + '</div>';
-  document.getElementById('legend').innerHTML = BSERIES.map(([, lbl, color]) =>
-    '<span><span class="sw" style="background:' + color + '"></span>' + lbl + '</span>'
-  ).join('');
-}
-function renderBuyerDetail(series) {
-  const rows = series.slice().reverse();
-  document.getElementById('detail').innerHTML =
-    '<table><thead><tr><th>日期</th><th>去重买家(找商家)</th><th>去重买家(找商品)</th>'
-    + '<th>事件(找商家)</th><th>事件(找商品)</th><th>未识别事件</th></tr></thead>'
-    + rows.map(u => {
-      const unid = BSERIES.reduce((s, [k]) => s + (u.unidentified_events[k] || 0), 0);
-      return '<tr><td class="mono">' + escHtml(u.day) + '</td>'
-        + '<td>' + escHtml(u.distinct_buyers.buyer_agent_search) + '</td>'
-        + '<td>' + escHtml(u.distinct_buyers.buyer_listing_search) + '</td>'
-        + '<td>' + escHtml(u.total_events.buyer_agent_search) + '</td>'
-        + '<td>' + escHtml(u.total_events.buyer_listing_search) + '</td>'
-        + '<td>' + escHtml(unid) + '</td></tr>';
-    }).join('') + '</table>';
-}
-const SEARCH_TYPE_LABELS = {agent: '找商家', listing: '找商品'};
-function renderKeywordTable(elId, rows, columns, emptyText) {
-  const el = document.getElementById(elId);
-  if (!rows.length) { el.innerHTML = '<p class="small muted">' + emptyText + '</p>'; return; }
-  el.innerHTML = '<table><thead><tr>' + columns.map(c => '<th>' + c[0] + '</th>').join('')
-    + '</tr></thead>' + rows.map(kw =>
-      '<tr>' + columns.map(([, field]) =>
-        '<td' + (field === 'keyword' ? '><strong>' : '>')
-        + escHtml(field === 'search_type' ? (SEARCH_TYPE_LABELS[kw.search_type] || kw.search_type) : kw[field])
-        + (field === 'keyword' ? '</strong>' : '') + '</td>'
-      ).join('') + '</tr>'
-    ).join('') + '</table>';
-}
-function loadBuyerStats() {
-  const token = document.getElementById('admin_token').value.trim();
-  const out = document.getElementById('out');
-  out.className = ''; out.textContent = '';
-  getJson('/v1/admin/buyer-stats?days=14', token).then(r => {
-    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
-    renderBuyerKpis(r.today);
-    renderBuyerChart(r.series || []);
-    renderBuyerDetail(r.series || []);
-    renderKeywordTable('top_keywords', r.top_keywords || [],
-      [['关键词', 'keyword'], ['类型', 'search_type'], ['搜索次数', 'searches'], ['未命中次数', 'zero_results']],
-      '暂无搜索关键词');
-    renderKeywordTable('zero_hit_keywords', (r.zero_hit_keywords || []).filter(k => (k.zero_results || 0) > 0),
-      [['关键词', 'keyword'], ['类型', 'search_type'], ['未命中次数', 'zero_results'], ['搜索总次数', 'searches']],
-      '暂无未命中关键词');
-    document.getElementById('content').style.display = 'block';
-  });
-}
-document.getElementById('load').addEventListener('click', loadBuyerStats);
-</script>
-"""
-        + _FOOTER
-    )
-    return _page("每日去重买家", body)
+    return {"__redirect__": "/portal/dashboard"}
 
 
 
 def portal_dashboard() -> dict[str, Any]:
-    """运营 Dashboard——默认不对外公布（env 开关，与审核后台一致）。"""
+    """运营 Dashboard——默认不对外公布（env 开关，与审核后台一致）。
+
+    2026-08-22 起并入买家搜索统计（原 /portal/admin/buyer-stats 独立页，
+    现 302 跳到本页）：去重买家 KPI + 14 天双系列柱状图 + 明细 +
+    热门/未命中关键词排行。同一 admin token 输入解锁全页
+    （/v1/admin/dashboard + /v1/admin/buyer-stats 等）。
+    """
     if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
         "1",
         "true",
@@ -696,6 +582,18 @@ def portal_dashboard() -> dict[str, Any]:
     <div id="apps"></div>
     <div class="section-title">商家列表</div>
     <div id="merchants"></div>
+    <div class="section-title">买家搜索统计</div>
+    <div class="kpis" id="buyer_kpis"></div>
+    <div class="section-title">每日去重买家数（最近 14 天）</div>
+    <div id="buyer_usage"></div>
+    <div class="legend" id="buyer_legend"></div>
+    <div class="section-title">买家搜索明细</div>
+    <div id="buyer_detail"></div>
+    <div class="section-title">热门搜索关键词（最近 14 天）</div>
+    <div id="top_keywords"></div>
+    <div class="section-title">未命中关键词（供需缺口）</div>
+    <p class="small muted">买家搜了但没有任何结果的关键词——运营招商据此补供给。</p>
+    <div id="zero_hit_keywords"></div>
   </div>
   <div class="card form-card" id="report_card" style="display:none">
     <h3 id="report_title">商家报告</h3>
@@ -703,6 +601,13 @@ def portal_dashboard() -> dict[str, Any]:
     <button class="btn-mini" id="report_back" style="margin-top:12px">← 返回列表</button>
   </div>
 </div></section>
+<style>
+.bars2{display:flex;align-items:flex-end;gap:6px;height:120px;margin-top:18px}
+.bars2 .bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
+.bars2 .pair{display:flex;align-items:flex-end;gap:2px;width:100%;height:100px}
+.bars2 .fill{flex:1;border-radius:4px 4px 2px 2px;min-height:2px}
+.bars2 .d{font-size:0.68rem;color:var(--ink-soft);white-space:nowrap}
+</style>
 """
         + _FOOTER
     )
@@ -747,6 +652,85 @@ function renderUsage(usage) {
   document.getElementById('legend').innerHTML = Object.entries(METRIC_LABELS).map(([k, v]) =>
     '<span><span class="sw" style="background:' + METRIC_COLORS[k] + '"></span>' + v + '</span>'
   ).join('');
+}
+
+// ── 买家搜索统计（原 /portal/admin/buyer-stats 独立页，2026-08-22 并入）──────
+const BSERIES = [
+  ['buyer_agent_search', '找商家', '#2e7d32'],
+  ['buyer_listing_search', '找商品', '#43a047'],
+];
+
+function renderBuyerKpis(today) {
+  const total = BSERIES.reduce((s, [k]) => s + (today.total_events[k] || 0), 0);
+  const unidentified = BSERIES.reduce((s, [k]) => s + (today.unidentified_events[k] || 0), 0);
+  const kpis = [
+    ['今日去重买家（找商家）', today.distinct_buyers.buyer_agent_search],
+    ['今日去重买家（找商品）', today.distinct_buyers.buyer_listing_search],
+    ['今日搜索事件总数', total],
+    ['今日未识别身份事件数', unidentified],
+  ];
+  document.getElementById('buyer_kpis').innerHTML = kpis.map(([lbl, n]) =>
+    '<div class="kpi"><div class="num">' + escHtml(n) + '</div><div class="lbl">' + escHtml(lbl) + '</div></div>'
+  ).join('');
+}
+
+function renderBuyerChart(series) {
+  const max = Math.max(1, ...series.flatMap(u => BSERIES.map(([k]) => u.distinct_buyers[k] || 0)));
+  document.getElementById('buyer_usage').innerHTML =
+    '<div class="bars2">' + series.map(u =>
+      '<div class="bar" title="' + escHtml(u.day) + ' 找商家 ' + escHtml(u.distinct_buyers.buyer_agent_search)
+        + ' / 找商品 ' + escHtml(u.distinct_buyers.buyer_listing_search) + '"><div class="pair">'
+        + BSERIES.map(([k, , color]) =>
+          '<div class="fill" style="background:' + color + ';height:'
+          + Math.max(2, Math.round((u.distinct_buyers[k] || 0) / max * 100)) + '%"></div>'
+        ).join('')
+        + '</div><div class="d">' + escHtml(u.day.slice(5)) + '</div></div>'
+    ).join('') + '</div>';
+  document.getElementById('buyer_legend').innerHTML = BSERIES.map(([, lbl, color]) =>
+    '<span><span class="sw" style="background:' + color + '"></span>' + lbl + '</span>'
+  ).join('');
+}
+
+function renderBuyerDetail(series) {
+  const rows = series.slice().reverse();
+  document.getElementById('buyer_detail').innerHTML =
+    '<table><thead><tr><th>日期</th><th>去重买家(找商家)</th><th>去重买家(找商品)</th>'
+    + '<th>事件(找商家)</th><th>事件(找商品)</th><th>未识别事件</th></tr></thead>'
+    + rows.map(u => {
+      const unid = BSERIES.reduce((s, [k]) => s + (u.unidentified_events[k] || 0), 0);
+      return '<tr><td class="mono">' + escHtml(u.day) + '</td>'
+        + '<td>' + escHtml(u.distinct_buyers.buyer_agent_search) + '</td>'
+        + '<td>' + escHtml(u.distinct_buyers.buyer_listing_search) + '</td>'
+        + '<td>' + escHtml(u.total_events.buyer_agent_search) + '</td>'
+        + '<td>' + escHtml(u.total_events.buyer_listing_search) + '</td>'
+        + '<td>' + escHtml(unid) + '</td></tr>';
+    }).join('') + '</table>';
+}
+
+function renderKeywordTable(elId, rows, cols, emptyText) {
+  // cols = [label1, field1, label2, field2]（两张表共享：关键词 + 类型分布 + 两列数值）
+  const el = document.getElementById(elId);
+  if (!rows.length) { el.innerHTML = '<p class="small muted">' + emptyText + '</p>'; return; }
+  el.innerHTML = '<table><thead><tr><th>关键词</th><th>类型分布</th><th>' + cols[0] + '</th><th>' + cols[2] + '</th></tr></thead>'
+    + rows.map(kw =>
+      '<tr><td><strong>' + escHtml(kw.keyword) + '</strong></td>'
+      + '<td class="small muted">找商家 ' + escHtml(kw.agent_searches || 0)
+      + ' · 找商品 ' + escHtml(kw.listing_searches || 0) + '</td>'
+      + '<td>' + escHtml(kw[cols[1]] || 0) + '</td>'
+      + '<td>' + escHtml(kw[cols[3]] || 0) + '</td></tr>'
+    ).join('') + '</table>';
+}
+
+function renderBuyerStats(r) {
+  renderBuyerKpis(r.today);
+  renderBuyerChart(r.series || []);
+  renderBuyerDetail(r.series || []);
+  renderKeywordTable('top_keywords', r.top_keywords || [],
+    ['搜索次数', 'searches', '未命中次数', 'zero_results'],
+    '暂无搜索关键词');
+  renderKeywordTable('zero_hit_keywords', (r.zero_hit_keywords || []).filter(k => (k.zero_results || 0) > 0),
+    ['未命中次数', 'zero_results', '搜索总次数', 'searches'],
+    '暂无未命中关键词');
 }
 
 function renderApps(token, apps) {
@@ -809,6 +793,10 @@ function loadDashboard(token) {
     });
     adminApi('/v1/merchants/applications?status=pending', token).then(ar => {
       if (ar.ok) { renderApps(token, ar.results); }
+    });
+    // 买家搜索统计（去重买家 + 关键词排行）；失败不阻断 dashboard 主内容
+    adminApi('/v1/admin/buyer-stats?days=14', token).then(br => {
+      if (br.ok) { renderBuyerStats(br); }
     });
   });
 }

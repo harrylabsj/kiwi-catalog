@@ -194,6 +194,22 @@ zero_hit_keywords（未命中 = 供需缺口信号，按未命中次数），窗
 门户页 /portal/admin/buyer-stats 新增「热门搜索关键词」「未命中关键词（供需缺口）」
 两张排行表——后者是运营招商补供给的可行动清单。
 
+门户合并（2026-08-22）：独立页 /portal/admin/buyer-stats 并入运营 Dashboard
+（/portal/dashboard）——买家搜索统计（去重买家 KPI + 14 天双系列柱状图 +
+明细 + 热门/未命中关键词排行）作为 dashboard 的「买家搜索统计」区块，同一
+admin token 输入解锁全页；旧 URL 开启时 302 跳转到 /portal/dashboard
+（fallback 栈与 FastAPI 栈均支持响应 ``__redirect__`` 元键），关闭时仍真实
+404。/v1/admin/buyer-stats API 端点保留不变。
+
+关键词去重修复（2026-08-22）：运营报告两张关键词排行同一关键词出现多行——
+两处根因均已修复：(1) top_keywords 由按 (keyword, search_type) 分组改为按
+keyword 跨类型合并（agent_searches / listing_searches 分列两类计数，
+/v1/admin/buyer-stats 的 top_keywords / zero_hit_keywords 条目形状随之变为
+{keyword, searches, zero_results, agent_searches, listing_searches}；查询期
+合并同时并掉归一化升级前的存量行）；(2) 关键词归一化增加 Unicode NFKC +
+零宽字符（U+200B/200C/200D/FEFF）删除，全角/半角与兼容字符不再落多行。
+门户表格改为「关键词 | 类型分布（找商家 N · 找商品 M）| …」一行一关键词。
+
 部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
 catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
 env / 重启 / 验证 / 回滚）见 `deploy/production.md`。
