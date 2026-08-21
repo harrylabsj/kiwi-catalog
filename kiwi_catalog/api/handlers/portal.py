@@ -147,6 +147,7 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
 .token-box { background: var(--kiwi-100); color: var(--kiwi-900); border-left: 4px solid var(--kiwi-600); border-radius: 0 var(--radius) var(--radius) 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.92rem; padding: 12px 14px; word-break: break-all; margin: 10px 0; }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.85rem; }
 .small { font-size: 0.83rem; color: var(--ink-soft); }
+.req { color: #b3261e; font-weight: 700; }
 .err { color: #b3261e; font-size: 0.9rem; margin-top: 10px; }
 .ok { color: var(--kiwi-700); font-size: 0.9rem; margin-top: 10px; }
 .app-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
@@ -297,10 +298,6 @@ def portal_home() -> dict[str, Any]:
     <input id="t_name" readonly placeholder="加载中…">
     <label for="t_domain">商家域名（如 acme.example）</label>
     <input id="t_domain" placeholder="acme.example" autocomplete="off">
-    <label for="t_agent_id">Agent ID（必填，你的 agent 标识）</label>
-    <input id="t_agent_id" placeholder="merchant-001" autocomplete="off">
-    <label for="t_purpose">用途说明（选填）</label>
-    <textarea id="t_purpose" rows="3" placeholder="想销售的商品类目 / 目标买家"></textarea>
     <button class="btn-form" id="t_submit">提交申请</button>
     <div id="t_out"></div>
   </div>
@@ -330,9 +327,6 @@ document.getElementById('t_submit').addEventListener('click', () => {
   btn.disabled = true;
   postJson('/v1/accounts/token-request', {
     domain: document.getElementById('t_domain').value.trim(),
-    agent_name: document.getElementById('t_name').value.trim(),
-    agent_id: document.getElementById('t_agent_id').value.trim(),
-    purpose: document.getElementById('t_purpose').value.trim(),
   }).then(r => {
     if (r.ok) {
       out.className = 'ok';
@@ -734,20 +728,31 @@ def _account_page(title: str, body: str) -> dict[str, Any]:
 
 
 def portal_register() -> dict[str, Any]:
-    """注册页（极简：仅邮箱 + 密码）→ 邮箱验证码 → 验证后进入「我的」。"""
+    """注册页（商家名称 + 邮箱 + 密码）→ 邮箱验证码 → 验证后进入「我的」。
+
+    注册即成为商家（admin dashboard 无需审批即可见）；商家令牌仍在「我的」
+    申请工单、经审核后签发。
+    """
     body = (
         _nav("portal")
         + """
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">Register</div>
   <h2>注册商家账号</h2>
-  <p class="lead">只需邮箱和密码。验证邮箱后，在「我的」里申请商家令牌。</p>
+  <p class="lead">填写商家名称、邮箱、密码和联系电话即可注册成为商家（无需审核）。
+    微信选填。验证邮箱后，在「我的」里申请商家令牌。</p>
   <div class="card form-card">
     <div id="step1">
+      <label for="merchant_name">商家名称 <span class="req">*</span></label>
+      <input id="merchant_name" placeholder="Acme 商贸" autocomplete="organization" required>
       <label for="email">邮箱</label>
       <input id="email" type="email" placeholder="ops@acme.example" autocomplete="email">
       <label for="password">密码（至少 8 位）</label>
       <input id="password" type="password" autocomplete="new-password">
+      <label for="phone">电话 <span class="req">*</span></label>
+      <input id="phone" type="tel" placeholder="+86 138 0000 0000" autocomplete="tel" required>
+      <label for="wechat">微信（选填）</label>
+      <input id="wechat" placeholder="微信号">
       <button class="btn-form" id="submit">注册</button>
       <div id="out1"></div>
       <p class="small" style="margin-top:16px">已有账号？<a href="/portal/login">登录</a></p>
@@ -767,10 +772,28 @@ let regEmail = '';
 document.getElementById('submit').addEventListener('click', () => {
   const btn = document.getElementById('submit');
   const out = document.getElementById('out1');
+  const nameEl = document.getElementById('merchant_name');
+  const merchantName = nameEl.value.trim();
+  const phoneEl = document.getElementById('phone');
+  if (!merchantName) {
+    out.className = 'err';
+    out.textContent = '请填写商家名称';
+    nameEl.focus();
+    return;
+  }
+  if (!phoneEl.value.trim()) {
+    out.className = 'err';
+    out.textContent = '请填写联系电话';
+    phoneEl.focus();
+    return;
+  }
   btn.disabled = true;
   postJson('/v1/accounts/register', {
+    merchant_name: merchantName,
     email: document.getElementById('email').value.trim(),
     password: document.getElementById('password').value,
+    phone: document.getElementById('phone').value.trim(),
+    wechat: document.getElementById('wechat').value.trim(),
   }).then(r => {
     if (r.ok) {
       regEmail = r.email;
@@ -1009,16 +1032,10 @@ def portal_account() -> dict[str, Any]:
         <button class="btn-mini" id="show_apply">申请令牌</button>
       </div>
       <div id="apply_form" style="display:none">
+        <label for="a_name_display">商家名称（注册时填写，只读）</label>
+        <input id="a_name_display" readonly placeholder="加载中…">
         <label for="a_domain">店铺域名（如 acme.example）</label>
         <input id="a_domain" placeholder="acme.example" autocomplete="off">
-        <label for="a_name">商家名称</label>
-        <input id="a_name" placeholder="Acme Merchant">
-        <label for="a_agent_id">Agent ID（必填，你的 agent 标识）</label>
-        <input id="a_agent_id" placeholder="merchant-001" autocomplete="off">
-        <label for="a_phone">电话联系方式（选填）</label>
-        <input id="a_phone" placeholder="+86 138 0000 0000">
-        <label for="a_purpose">用途说明（选填）</label>
-        <textarea id="a_purpose" rows="2" placeholder="想销售的商品类目"></textarea>
         <button class="btn-form" id="request_token">申请令牌</button>
       </div>
     </div>
@@ -1043,6 +1060,8 @@ function loadMe() {
         + ' · ' + esc(r.application.agent_name) + ' · ' + esc(r.application.domain) + '</p>';
     }
     p.innerHTML = html;
+    // 商家名称注册时已填写——申请表单只读自动加载，申请只需填店铺域名
+    document.getElementById('a_name_display').value = r.merchant_name || '';
     const tb = document.getElementById('token_box');
     const copyBtn = document.getElementById('copy_token');
     const applyBtn = document.getElementById('show_apply');
@@ -1082,10 +1101,6 @@ document.getElementById('request_token').addEventListener('click', () => {
   btn.disabled = true;
   postJson('/v1/accounts/token-request', {
     domain: document.getElementById('a_domain').value.trim(),
-    agent_name: document.getElementById('a_name').value.trim(),
-    agent_id: document.getElementById('a_agent_id').value.trim(),
-    phone: document.getElementById('a_phone').value.trim(),
-    purpose: document.getElementById('a_purpose').value.trim(),
   }).then(r => {
     if (r.ok) { loadMe(); } else {
       const out = document.getElementById('out');
@@ -1107,7 +1122,7 @@ loadMe();
 
 
 def portal_account_profile() -> dict[str, Any]:
-    """「基本信息」二级页：商家名称 / agent_id / 电话，可编辑。"""
+    """「基本信息」二级页：商家名称 / 电话，可编辑。"""
     body = (
         _nav("account")
         + """
@@ -1126,10 +1141,10 @@ def portal_account_profile() -> dict[str, Any]:
     <input id="p_email" disabled>
     <label for="p_name">商家名称</label>
     <input id="p_name">
-    <label for="p_agent_id">Agent ID（可修改/增添）</label>
-    <input id="p_agent_id" placeholder="merchant-001">
     <label for="p_phone">电话（选填）</label>
     <input id="p_phone">
+    <label for="p_wechat">微信（选填）</label>
+    <input id="p_wechat">
     <button class="btn-form" id="save_profile">保存基本信息</button>
     <div id="out_profile"></div>
   </div>
@@ -1140,7 +1155,7 @@ fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => 
   document.getElementById('p_email').value = r.email;
   document.getElementById('p_name').value = r.merchant_name || '';
   document.getElementById('p_phone').value = r.phone || '';
-  document.getElementById('p_agent_id').value = (r.application && r.application.agent_id) || '';
+  document.getElementById('p_wechat').value = r.wechat || '';
 });
 document.getElementById('save_profile').addEventListener('click', () => {
   const btn = document.getElementById('save_profile');
@@ -1148,7 +1163,7 @@ document.getElementById('save_profile').addEventListener('click', () => {
   postJson('/v1/accounts/profile', {
     merchant_name: document.getElementById('p_name').value.trim(),
     phone: document.getElementById('p_phone').value.trim(),
-    agent_id: document.getElementById('p_agent_id').value.trim(),
+    wechat: document.getElementById('p_wechat').value.trim(),
   }).then(r => {
     const out = document.getElementById('out_profile');
     if (r.ok) { out.className = 'ok'; out.textContent = '已保存。'; }

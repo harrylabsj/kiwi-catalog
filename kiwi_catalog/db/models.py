@@ -282,6 +282,7 @@ create table if not exists merchant_accounts (
         reset_expires_at text not null default '',
         merchant_name text not null default '',
         phone text not null default '',
+        wechat text not null default '',
         merchant_id text not null default '',
         application_id integer not null default 0,
         status text not null default 'active'

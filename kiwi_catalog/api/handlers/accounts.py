@@ -117,13 +117,18 @@ def _require_session(
 def register(
     db_path: str | Path, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """POST /v1/accounts/register（公开）——极简注册：仅邮箱 + 密码。
+    """POST /v1/accounts/register（公开）——注册商家账号：商家名称 + 邮箱 +
+    密码 + 电话（必填）+ 微信（选填）。
 
-    建账号 + 签发邮箱验证码；不自动登录（verify-email 通过后才可登录）。
+    注册即成为商家（分配 merchant_id + 影子 merchants 行，admin dashboard
+    无需审批即可见）；签发邮箱验证码；不自动登录（verify-email 通过后才可登录）。
     console 模式响应含 verification_code（开发/演示）；smtp 模式发邮件。
     """
     email = str(require_field(payload, "email")).strip()
     password = str(require_field(payload, "password"))
+    merchant_name = str(require_field(payload, "merchant_name")).strip()
+    phone = str(require_field(payload, "phone")).strip()
+    wechat = str(payload.get("wechat") or "").strip()
 
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
@@ -139,7 +144,12 @@ def register(
                 description=f"account register ({limit}/15min per email)",
             )
         registered = accounts_service.register_account(
-            conn, email=email, password=password
+            conn,
+            email=email,
+            password=password,
+            merchant_name=merchant_name,
+            phone=phone,
+            wechat=wechat,
         )
         return {
             "ok": True,
@@ -388,7 +398,7 @@ def token_request(
 
 
 def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST /v1/accounts/profile（会话）——更新账户基本信息（商家名称/电话）。"""
+    """POST /v1/accounts/profile（会话）——更新账户基本信息（商家名称/电话/微信）。"""
     _ctx, conn, account = _require_session(db_path, payload)
     try:
         view = accounts_service.update_profile(
@@ -396,6 +406,7 @@ def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             account,
             merchant_name=str(payload.get("merchant_name") or ""),
             phone=str(payload.get("phone") or ""),
+            wechat=str(payload.get("wechat") or ""),
             agent_id=str(payload.get("agent_id") or ""),
         )
         return {"ok": True, **view}

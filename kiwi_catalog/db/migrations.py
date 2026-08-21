@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25
 
 
 @dataclass(frozen=True)
@@ -824,6 +824,16 @@ def migration_024_password_reset(conn: sqlite3.Connection) -> None:
             conn.execute(f"alter table merchant_accounts add column {column}")
 
 
+def migration_025_merchant_account_wechat(conn: sqlite3.Connection) -> None:
+    """商家联系方式微信（docs/accounts.md）：merchant_accounts 幂等加 wechat 列。
+
+    注册时选填（与 phone 同属联系方式）；基本信息页可改。fresh 路径由
+    models.py SCHEMA 创建。
+    """
+    if not _column_exists(conn, "merchant_accounts", "wechat"):
+        conn.execute("alter table merchant_accounts add column wechat text not null default ''")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -849,6 +859,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(22, "discovery_entries", migration_022_discovery_entries),
     Migration(23, "drop_merchant_shopping_token", migration_023_drop_merchant_shopping_token),
     Migration(24, "password_reset", migration_024_password_reset),
+    Migration(25, "merchant_account_wechat", migration_025_merchant_account_wechat),
 )
 
 
