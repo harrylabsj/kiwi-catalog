@@ -15,10 +15,11 @@
 """商家账号体系（注册/登录/会话 + token 加密存储）。
 
 设计（docs/accounts.md）：
-- **注册即 merchant 注册**：注册完成即分配平台 merchant_id
-  （mkt_<slug>_<rand>，与审批签发同一 id 空间；存量账号会话解析时懒回填）；
-  申请 token 自动创建待审工单（dashboard 审批流复用），批准后沿用该
-  merchant_id 签发 owner token；
+- **注册即商家（无需批准）**：注册完成（商家名称 + 邮箱 + 密码）即分配
+  平台 merchant_id（mkt_<slug>_<rand>，与审批签发同一 id 空间；存量账号
+  会话解析时懒回填）并创建影子 merchants 行——admin dashboard 商家列表
+  只读 merchants 表，注册即可见；商家令牌仍需在「我的」提交申请工单、
+  经 admin 审批后签发（批准沿用该 merchant_id）；
 - **会话**：登录签发随机 session token（SHA-256 落库 + 7 天过期），
   httpOnly cookie 传递（服务端渲染的页面用 cookie，API 端到端测试用 header）；
 - **token 找回**：merchant_tokens.token_encrypted 存 Fernet 加密明文——
@@ -378,6 +379,8 @@ def ensure_merchant_id(conn: sqlite3.Connection, account_id: int, name_hint: str
 
     注册完成即调用；存量无 merchant_id 的账号在会话解析时懒回填。幂等：
     已有 id 直接返回，绝不重复分配（approve_application 亦复用此 id）。
+    分配（或确认已有）merchant_id 时同步确保影子 ``merchants`` 行存在——
+    admin dashboard 的商家列表只读 merchants 表，**注册即商家、无需审批即可见**。
     """
     row = conn.execute(
         "select merchant_id from merchant_accounts where account_id = ?",
@@ -387,30 +390,61 @@ def ensure_merchant_id(conn: sqlite3.Connection, account_id: int, name_hint: str
         return ""
     existing = str(row["merchant_id"] or "").strip()
     if existing:
-        return existing
-    merchant_id = tokens_service.new_platform_merchant_id(
-        name_hint or f"account-{account_id}"
-    )
+        merchant_id = existing
+    else:
+        merchant_id = tokens_service.new_platform_merchant_id(
+            name_hint or f"account-{account_id}"
+        )
+        conn.execute(
+            "update merchant_accounts set merchant_id = ?, updated_at = ?"
+            " where account_id = ? and merchant_id = ''",
+            (merchant_id, now_iso(), account_id),
+        )
+    # 注册即商家：确保影子 merchants 行存在。insert or ignore 幂等——首次
+    # 创建（display 名回退 email 前缀 name_hint），已存在的行（如审批路径
+    # 先前创建）不覆盖其业务字段。
+    now = now_iso()
     conn.execute(
-        "update merchant_accounts set merchant_id = ?, updated_at = ?"
-        " where account_id = ? and merchant_id = ''",
-        (merchant_id, now_iso(), account_id),
+        "insert or ignore into merchants(id, name, created_at, updated_at)"
+        " values (?, ?, ?, ?)",
+        (merchant_id, name_hint or merchant_id, now, now),
     )
     return merchant_id
 
 
 def register_account(
-    conn: sqlite3.Connection, *, email: str, password: str
+    conn: sqlite3.Connection,
+    *,
+    email: str,
+    password: str,
+    merchant_name: str = "",
+    phone: str = "",
+    wechat: str = "",
 ) -> dict[str, Any]:
-    """注册（极简：仅邮箱 + 密码）→ 建账号 + 签发邮箱验证码。
+    """注册商家账号（邮箱 + 密码 + 商家名称 + 联系方式）→ 建账号 + 分配
+    merchant_id + 影子 merchants 行 + 签发邮箱验证码。
 
-    不建商家工单——商家基本信息在「我的账户」申请令牌时填写
-    （request_token 带 domain/agent_name 建工单）。发送验证码失败 →
-    RuntimeError → 注册事务回滚（fail-closed）。
+    电话必填、微信选填（联系方式，注册即记、基本信息页可改）。注册即成为
+    商家（admin dashboard 无需审批即可见）；商家令牌仍需在「我的账户」提交
+    申请工单并经 admin 审批签发。发送验证码失败 → RuntimeError → 注册事务
+    回滚（fail-closed）。
     """
     email = str(email or "").strip().lower()
+    merchant_name = str(merchant_name or "").strip()
+    phone = str(phone or "").strip()
+    wechat = str(wechat or "").strip()
     if not _EMAIL_RE.match(email):
         raise ValidationError("email must be a valid email address")
+    if not merchant_name:
+        raise ValidationError("merchant_name is required")
+    if len(merchant_name) > 200:
+        raise ValidationError("merchant_name too long")
+    if not phone:
+        raise ValidationError("phone is required")
+    if len(phone) > 40:
+        raise ValidationError("phone too long")
+    if wechat and len(wechat) > 200:
+        raise ValidationError("wechat too long")
     if len(password) < 8:
         raise ValidationError("password must be at least 8 characters")
     if len(password) > 200:
@@ -424,13 +458,16 @@ def register_account(
 
     now = now_iso()
     cursor = conn.execute(
-        "insert into merchant_accounts(email, password_hash, status, created_at, updated_at)"
-        " values (?, ?, 'active', ?, ?)",
-        (email, hash_password(password), now, now),
+        "insert into merchant_accounts"
+        " (email, password_hash, status, merchant_name, phone, wechat, created_at, updated_at)"
+        " values (?, ?, 'active', ?, ?, ?, ?, ?)",
+        (email, hash_password(password), merchant_name, phone, wechat, now, now),
     )
     account_id = int(cursor.lastrowid or 0)
-    # 注册完成即分配平台 merchant_id（免费通道与审批商家同一身份空间）
-    merchant_id = ensure_merchant_id(conn, account_id, email.split("@", 1)[0])
+    # 注册完成即分配平台 merchant_id（免费通道与审批商家同一身份空间），
+    # 影子 merchants 行由 ensure_merchant_id 同步创建——注册即商家，admin
+    # dashboard 无需审批即可见。
+    merchant_id = ensure_merchant_id(conn, account_id, merchant_name)
     # 审查 C-H2：注册即种入 revoked 占位行，使 require_merchant_token 的 HMAC
     # fallback 对新商户立即关闭——否则「已注册未签发」商户的凭证是对
     # merchant_id 确定的 HMAC，secret 泄露即可派生且无法吊销。approve 的
@@ -447,7 +484,7 @@ def register_account(
         "account_id": account_id,
         "email": email,
         "merchant_id": merchant_id,
-        "status": "pending_review",
+        "status": "active",  # 注册即商家；令牌状态单独看 token
         "email_verified": False,
         "verification_code": verification_code,  # console 模式才有值
     }
@@ -510,13 +547,14 @@ def resolve_session(
     if account is None:
         return None
     account = dict(account)
-    if not str(account.get("merchant_id") or "").strip():
-        # 存量账号懒回填：注册即分配 merchant_id 之前的历史行首次使用时补齐
-        account["merchant_id"] = ensure_merchant_id(
-            conn,
-            int(account["account_id"]),
-            str(account.get("email") or "").split("@", 1)[0],
-        )
+    # 注册即商家：会话解析时确保 merchant_id + 影子 merchants 行存在——存量
+    # 账号懒回填（含已分配 merchant_id 但缺影子行的，admin dashboard 无需
+    # 审批即可见）；ensure_merchant_id 幂等，已有 id 直接返回、只补影子行。
+    account["merchant_id"] = ensure_merchant_id(
+        conn,
+        int(account["account_id"]),
+        str(account.get("email") or "").split("@", 1)[0],
+    )
     return account
 
 
@@ -586,6 +624,7 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
         "email": account["email"],
         "merchant_name": account.get("merchant_name") or "",
         "phone": account.get("phone") or "",
+        "wechat": account.get("wechat") or "",
         "created_at": account.get("created_at") or "",
         "merchant_id": merchant_id,
         "application": application,
@@ -607,8 +646,8 @@ def request_token(
 ) -> dict[str, Any]:
     """"我的"里申请 token：已有 active → 返回现状；已有 pending 工单 →
     提示等待；被拒后可重新申请（新建 pending 工单，原被拒工单保留为
-    审计记录）；否则用本次填写的商家基本信息建工单（注册极简，基本信息
-    在此一步补齐），并回填账户基本信息（商家名称/电话）。"""
+    审计记录）；否则用商家信息建工单——商家名称/电话从账号（注册时填写）
+    自动带出，页面只需填店铺域名。"""
     # fail-closed 纵深防御（2026-08-12 关闭匿名申请通道）：申请必须绑定已
     # 分配 merchant_id 的账号；正常路径 resolve_session 已懒回填，为空说明
     # 账号未完成注册，直接拒绝。
@@ -622,13 +661,16 @@ def request_token(
     from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
 
     domain = normalize_canonical_domain(domain)
-    agent_name = str(agent_name or "").strip()
     agent_id = str(agent_id or "").strip()
-    if not agent_name:
+    # 商家名称/电话从账号（注册时填写）自动带出；agent_name/phone 参数仅
+    # 历史 API 调用方兼容（页面已不再收集）。
+    merchant_name = (
+        str(account.get("merchant_name") or "").strip() or str(agent_name or "").strip()
+    )
+    phone = str(account.get("phone") or "").strip() or str(phone or "").strip()
+    if not merchant_name:
         raise ValidationError("agent_name is required to apply for a token")
-    if not agent_id:
-        raise ValidationError("agent_id is required to apply for a token")
-    phone = str(phone or "").strip()
+    # agent_id 仅作展示/归档，无系统逻辑消费——不再必填（历史 API 调用方可带）。
     now = now_iso()
     cursor = conn.execute(
         """
@@ -636,18 +678,18 @@ def request_token(
             (status, domain, agent_name, agent_id, contact_email, purpose, phone, account_id, created_at)
         values ('pending', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (domain, agent_name, agent_id, account["email"], str(purpose or "").strip(), phone, account["account_id"], now),
+        (domain, merchant_name, agent_id, account["email"], str(purpose or "").strip(), phone, account["account_id"], now),
     )
     application_id = int(cursor.lastrowid or 0)
     conn.execute(
         "update merchant_accounts set application_id = ?, updated_at = ? where account_id = ?",
         (application_id, now, account["account_id"]),
     )
-    # 回填账户基本信息（v16：商家名称/电话）
+    # 回填账户基本信息（幂等：注册已有值则保持，缺省补齐）
     conn.execute(
         "update merchant_accounts set merchant_name = ?, phone = ?, updated_at = ?"
         " where account_id = ?",
-        (agent_name, phone, now, account["account_id"]),
+        (merchant_name, phone, now, account["account_id"]),
     )
     return {"status": "pending", "message": "application submitted", "application_id": application_id}
 
@@ -658,16 +700,20 @@ def update_profile(
     *,
     merchant_name: str = "",
     phone: str = "",
+    wechat: str = "",
     agent_id: str = "",
 ) -> dict[str, Any]:
-    """更新账户基本信息（商家名称/电话/agent_id，均非空才覆盖）。"""
+    """更新账户基本信息（商家名称/电话/微信/agent_id，均非空才覆盖）。"""
     merchant_name = str(merchant_name or "").strip()
     phone = str(phone or "").strip()
+    wechat = str(wechat or "").strip()
     agent_id = str(agent_id or "").strip()
     if merchant_name and len(merchant_name) > 200:
         raise ValidationError("merchant_name too long")
     if phone and len(phone) > 40:
         raise ValidationError("phone too long")
+    if wechat and len(wechat) > 200:
+        raise ValidationError("wechat too long")
     if agent_id and len(agent_id) > 200:
         raise ValidationError("agent_id too long")
     if merchant_name:
@@ -681,6 +727,12 @@ def update_profile(
             "update merchant_accounts set phone = ?, updated_at = ?"
             " where account_id = ?",
             (phone, now_iso(), account["account_id"]),
+        )
+    if wechat:
+        conn.execute(
+            "update merchant_accounts set wechat = ?, updated_at = ?"
+            " where account_id = ?",
+            (wechat, now_iso(), account["account_id"]),
         )
     if agent_id:
         # agent_id 落在该账号名下的最新申请工单（商家可自行修改/增添自己的 agent ID）

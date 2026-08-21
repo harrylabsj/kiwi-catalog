@@ -82,8 +82,11 @@ DDL 同时进 `db/models.py::SCHEMA`（fresh 路径）与 `db/migrations.py` v12
 > `accounts_service.request_token` 建工单，contact_email 取账号邮箱；
 > payload 多余字段（contact_email 等）自然忽略。
 
-- body：`domain`（店铺规范域名，bare hostname 校验复用 normalize_canonical_domain）、
-  `agent_name`、`agent_id`、`purpose`（可选）；contact_email 取会话账号邮箱。
+- body：**只需 `domain`**（店铺规范域名，bare hostname 校验复用
+  normalize_canonical_domain）；`agent_name`/`phone` 从账号（注册时填写）
+  自动带出，`purpose` 已从申请面移除（保留列与参数仅历史兼容）。contact_email
+  取会话账号邮箱。`agent_id` 已从申请面移除——仅归档/展示用，无系统逻辑消费，
+  不再要求用户填写（历史 API 调用方仍可携带，服务端接受为可选）。
 - 限流：按账号固定窗口（复用登录限流 env，`services/rate_limit.py`）。
 - 响应：`{"application_id": N, "status": "pending"}`，不含任何凭证。
 - 审计：不落 audit_events；DB 行即工单。

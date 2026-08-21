@@ -53,12 +53,17 @@ def new_platform_merchant_id(agent_name: str) -> str:
 
 
 def application_row(row: sqlite3.Row) -> dict[str, Any]:
-    """merchant_applications 行的 public 投影（wire 形状，handler/CLI 共用）。"""
+    """merchant_applications 行的 public 投影（wire 形状，handler/CLI 共用）。
+
+    含 ``agent_id``（商家自指定的 agent 标识）——商家「基本信息」页要回显，
+    admin 申请列表也展示；缺失会造成 profile 页加载时该字段恒为空。
+    """
     return {
         "application_id": row["application_id"],
         "status": row["status"],
         "domain": row["domain"],
         "agent_name": row["agent_name"],
+        "agent_id": row["agent_id"],
         "contact_email": row["contact_email"],
         "purpose": row["purpose"],
         "phone": row["phone"],

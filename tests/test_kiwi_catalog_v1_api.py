@@ -559,7 +559,7 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/register",
-            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
         )
         self.assertEqual(status, 200, registered)
         status, _ = _call_http(

@@ -142,7 +142,7 @@ class MerchantsApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/register",
-            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
         )
         self.assertEqual(status, 200, payload)
         code = payload["verification_code"]
@@ -249,10 +249,38 @@ class MerchantsApiTest(unittest.TestCase):
         session = self._new_session()
         status, payload = self._apply(session, {"domain": "not a hostname"})
         self.assertEqual(status, 400, payload)
-        status, payload = self._apply(session, {"agent_name": ""})
-        self.assertEqual(status, 400, payload)
+
+    def test_apply_agent_id_now_optional(self) -> None:
+        """agent_id 仅归档/展示，无系统逻辑消费——申请不再要求填写（存空串）。"""
+        from kiwi_catalog.db.session import db_session
+
+        session = self._new_session()
         status, payload = self._apply(session, {"agent_id": ""})
-        self.assertEqual(status, 400, payload)
+        self.assertEqual(status, 200, payload)
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select agent_id from merchant_applications where application_id = ?",
+                (payload["application_id"],),
+            ).fetchone()
+        self.assertEqual(row["agent_id"], "")
+
+    def test_apply_auto_loads_merchant_name_and_phone_from_account(self) -> None:
+        """申请只需填域名：商家名称/电话自动从账号（注册时填写）带出。"""
+        from kiwi_catalog.db.session import db_session
+
+        session = self._new_session()
+        status, payload = self._apply(
+            session, {"agent_name": "", "agent_id": "", "phone": "", "purpose": ""}
+        )
+        self.assertEqual(status, 200, payload)
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select agent_name, phone from merchant_applications"
+                " where application_id = ?",
+                (payload["application_id"],),
+            ).fetchone()
+        self.assertEqual(row["agent_name"], "Acme 商贸")
+        self.assertEqual(row["phone"], "+86 138 0000 0000")
 
     def test_apply_rate_limited_per_account(self) -> None:
         """会话限流：token-request 复用登录限流 env，按账号维度计数。"""

@@ -20,7 +20,8 @@
   digest、fresh_until TTL、owner token 双路径认证）
 - **商家接入（v0.5+）**：`/v1/merchants/*` token 申请/审批/恢复
   （Fernet 加密存储）+ `/v1/accounts/*` 与 `/portal` 商家门户（账号注册/
-  登录/Token 管理）
+  登录/Token 管理；**注册即商家**——商家名称 + 邮箱 + 密码注册即分配
+  merchant_id、admin dashboard 无需审批即可见，令牌仍单独申请/审批）
 - 治理（suspend/reinstate——owned Listings 联动置 SUSPENDED、双维度限流、
   审计、§24 runtime metrics）
 

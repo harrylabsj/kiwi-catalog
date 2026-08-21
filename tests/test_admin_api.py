@@ -126,7 +126,7 @@ class AdminApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/register",
-            json.dumps({"email": email, "password": "strong-pw-123"}).encode(),
+            json.dumps({"merchant_name": "Acme Merchant", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
         )
         self.assertEqual(status, 200, registered)
         status, verified = _call_http(
@@ -276,6 +276,41 @@ class AdminApiTest(unittest.TestCase):
         self.assertEqual(row["agents_count"], 1)
         self.assertEqual(row["listings_count"], 1)
         self.assertEqual(row["token_status"], "active")
+
+    def test_registered_merchant_visible_without_approval(self) -> None:
+        """注册即商家（无需批准）：仅注册 + 验证邮箱即出现在 admin 商家列表。
+
+        token_status 应为 none（注册种入的 revoked 占位行不算已签发），
+        签发时间不显示占位行；令牌仍待申请/审批。
+        """
+        email = "newmerchant@example.com"
+        status, registered = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"merchant_name": "新晋商家", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
+        )
+        self.assertEqual(status, 200, registered)
+        status, verified = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": email, "code": registered["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200, verified)
+        status, payload = _call_http(
+            self.app, "GET", "/v1/admin/merchants",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 200, payload)
+        rows = [r for r in payload["results"] if r["merchant_id"].startswith("mkt_")]
+        self.assertEqual(len(rows), 1, payload)
+        row = rows[0]
+        self.assertEqual(row["name"], "新晋商家")
+        self.assertEqual(row["token_status"], "none")
+        self.assertEqual(row["token_issued_at"], "")
+        self.assertEqual(row["agents_count"], 0)
+        self.assertEqual(row["listings_count"], 0)
 
     # ── 商家报告 ───────────────────────────────────────────────────────────
 

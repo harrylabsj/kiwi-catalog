@@ -79,7 +79,13 @@ def dashboard_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> dic
 
 
 def merchant_list(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
-    """全部商家：id / 名称 / agent 数 / listing 数 / token 状态 / 最近活动。"""
+    """全部商家：id / 名称 / agent 数 / listing 数 / token 状态 / 最近活动。
+
+    token_status 语义（注册即商家，无需审批即可出现在本列表）：
+    ``active`` = 有有效令牌；``revoked`` = 曾签发后被吊销（真实 token 行）；
+    ``none`` = 未申请/未签发令牌——注册时种入的 revoked 占位行（空 hash）
+    不算已签发，显示 none 而非 revoked。
+    """
     limit = max(1, min(int(limit or 100), 500))
     rows = conn.execute(
         """
@@ -87,8 +93,15 @@ def merchant_list(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, 
                m.updated_at,
                (select count(*) from catalog_agents ca where ca.merchant_id = m.id) as agents,
                (select count(*) from commerce_listings cl where cl.merchant_id = m.id) as listings,
-               (select status from merchant_tokens mt where mt.merchant_id = m.id) as token_status,
-               (select issued_at from merchant_tokens mt2 where mt2.merchant_id = m.id) as token_issued_at,
+               (select case
+                   when count(*) = 0 then 'none'
+                   when max(case when status = 'active' then 1 else 0 end) = 1 then 'active'
+                   when max(length(token_hash)) > 0 then 'revoked'
+                   else 'none'
+                 end from merchant_tokens mt where mt.merchant_id = m.id) as token_status,
+               (select issued_at from merchant_tokens mt2
+                 where mt2.merchant_id = m.id and mt2.token_hash <> ''
+                 order by issued_at desc limit 1) as token_issued_at,
                (select count(*) from audit_events ae where ae.details_json like '%' || m.id || '%') as audit_events
         from merchants m
         order by m.updated_at desc

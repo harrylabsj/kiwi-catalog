@@ -49,8 +49,10 @@ ADMIN_TOKEN = "admin-tok-123"
 OWNER_SECRET = "test-owner-secret"
 
 REGISTER_BODY = {
+    "merchant_name": "Acme 商贸",
     "email": "ops@acme.example",
     "password": "strong-pw-123",
+    "phone": "+86 138 0000 0000",
 }
 
 
@@ -181,7 +183,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── 注册 ───────────────────────────────────────────────────────────────
 
     def test_register_creates_account_no_application_yet(self) -> None:
-        """极简注册：建账号即分配 merchant_id，商家工单在申请令牌时才创建。"""
+        """注册即商家：建账号即分配 merchant_id + 影子 merchants 行，商家工单在申请令牌时才创建。"""
         session, _ = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
@@ -192,6 +194,57 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIsNone(payload["token"])
         # 注册完成即分配平台 merchant_id（与审批签发同一格式 mkt_<slug>_<rand>）
         self.assertRegex(payload["merchant_id"], r"^mkt_[a-z0-9-]+_.+")
+        # 注册即商家：影子 merchants 行已创建（admin dashboard 无需审批即可见）
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "select id, name from merchants where id = ?",
+                (payload["merchant_id"],),
+            ).fetchone()
+            self.assertIsNotNone(row, "注册即应创建影子 merchants 行")
+            self.assertEqual(row["name"], "Acme 商贸")
+        finally:
+            conn.close()
+
+    def test_register_requires_merchant_name(self) -> None:
+        """注册必须提供商家名称（页面体现 + API 校验，注册即商家的数据基础）。"""
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({**REGISTER_BODY, "merchant_name": ""}).encode(),
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("merchant_name", payload.get("error", ""))
+        # 缺失字段同样拒绝（require_field）
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({"email": "x@example.com", "password": "strong-pw-123"}).encode(),
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("merchant_name", payload.get("error", ""))
+
+    def test_register_requires_phone_wechat_optional(self) -> None:
+        """注册联系电话必填（微信选填）。"""
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({**REGISTER_BODY, "phone": ""}).encode(),
+        )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("phone", payload.get("error", ""))
+        # 微信缺省不影响注册
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({**REGISTER_BODY, "email": "wx-ok@example.com", "wechat": ""}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
 
     def test_register_seeds_revoked_row_and_closes_hmac_fallback(self) -> None:
         """审查 C-H2：注册即种 revoked 占位行，HMAC fallback 对新商户立即关闭。"""
@@ -496,6 +549,24 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "active")
 
+    def test_me_roundtrips_agent_id_from_application(self) -> None:
+        """「基本信息」页的 Agent ID 来自申请工单，/me 需回显（投影含 agent_id）。"""
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "my-shop-agent-001"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        status, payload, _ = _call_http(
+            self.app, "GET", "/v1/accounts/me", cookie=cookie
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["application"]["agent_id"], "my-shop-agent-001")
+
     def test_token_request_after_rejection_allowed(self) -> None:
         """被拒绝后可重新申请：新建 pending 工单，原被拒工单保留为审计记录。"""
         session, _ = self._register()
@@ -636,7 +707,7 @@ class AccountsApiTest(unittest.TestCase):
             cookie=cookie,
         )
         self.assertEqual(status, 200, payload)
-        # 工单带电话
+        # 工单带电话：注册时填写的账号电话优先（申请无需再填）
         from kiwi_catalog.db.session import db_session
 
         with db_session(self.db_path) as conn:
@@ -644,7 +715,7 @@ class AccountsApiTest(unittest.TestCase):
                 "select phone from merchant_applications where account_id = ("
                 "select account_id from merchant_accounts where email = 'ops@acme.example')"
             ).fetchone()
-        self.assertEqual(row["phone"], "+86 139")
+        self.assertEqual(row["phone"], "+86 138 0000 0000")
 
     # ── 无账号工单（存量匿名通道数据）→ 审批 → 账号关联 ─────────────────────
 
@@ -793,7 +864,7 @@ class PasswordResetApiTest(unittest.TestCase):
             self.app,
             "POST",
             "/v1/accounts/register",
-            json.dumps({"email": email, "password": password}).encode(),
+            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": password, "phone": "+86 138 0000 0000"}).encode(),
         )
         self.assertEqual(status, 200, payload)
 
