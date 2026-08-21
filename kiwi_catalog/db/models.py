@@ -435,6 +435,36 @@ create index if not exists idx_discovery_entries_name_lower
         on discovery_entries(lower(name))
 
     """,
+    # v26 — 每日去重买家统计（运营 dashboard 数据源）：day × metric ×
+    # buyer_hash（日作用域 HMAC 截断，pseudonymous，不存原始身份——隐私设计
+    # 见 services/buyer_stats.py）；count 为该买家当日该指标的搜索事件数。
+    # DDL 与迁移链 migration_026 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists buyer_search_daily (
+        day text not null,
+        metric text not null,
+        buyer_hash text not null,
+        count integer not null default 1,
+        updated_at text not null,
+        primary key (day, metric, buyer_hash)
+    )
+    """,
+    # v27 — 每日买家搜索关键词统计（运营 dashboard 数据源）：day ×
+    # search_type（agent/listing，与 buyer_search_events 词表一致）× keyword
+    #（归一化 query）；searches 搜索次数、zero_results 未命中次数（供需缺口
+    # 信号）。日聚合、无界——区别于 buyer_search_events 的有界原始事件流。
+    # DDL 与迁移链 migration_027 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists buyer_keyword_daily (
+        day text not null,
+        search_type text not null,
+        keyword text not null,
+        searches integer not null default 0,
+        zero_results integer not null default 0,
+        updated_at text not null,
+        primary key (day, search_type, keyword)
+    )
+    """,
 ]
 
 

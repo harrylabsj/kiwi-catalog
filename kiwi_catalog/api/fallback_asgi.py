@@ -143,6 +143,11 @@ class MarketplaceASGIApp:
         cookie = headers.get("cookie", "")
         if cookie:
             payload["_cookie"] = cookie
+        # 买家身份头（每日去重买家统计，services/buyer_stats.py）：buyer agent
+        # 自选标识；只以日作用域 HMAC hash 落库，原始值不出传输层。
+        buyer_id = headers.get("x-buyer-id", "")
+        if buyer_id:
+            payload["_buyer_id"] = buyer_id
         # 客户端 IP（/v1/discovery/search 限流 per-IP 分桶，审查 P3-06 / C-M2）：
         # 仅可信代理（默认回环）时采信 XFF；直连对端非可信代理则忽略 XFF，
         # 用直连对端——直连客户端伪造 XFF 无法轮换 IP 绕过限流。

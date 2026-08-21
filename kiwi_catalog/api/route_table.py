@@ -335,6 +335,11 @@ RouteEntry(
         "/v1/admin/searches",
         lambda db_path, payload, query, **kw: _v1_admin_searches(db_path, payload, query),
     ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/buyer-stats",
+        lambda db_path, payload, query, **kw: _v1_admin_buyer_stats(db_path, payload, query),
+    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -355,6 +360,11 @@ RouteEntry(
         {"GET"},
         "/portal/admin/searches",
         lambda db_path, payload, query, **kw: _portal_admin_searches(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/admin/buyer-stats",
+        lambda db_path, payload, query, **kw: _portal_admin_buyer_stats(),
     ),
 RouteEntry(
         {"GET"},
@@ -393,7 +403,7 @@ def _list_catalog_agents(db_path, payload, query):
 
 
 def _search_agent_catalog(db_path, payload, query):
-    return agent_catalog_handlers.search_agent_catalog(db_path, query)
+    return agent_catalog_handlers.search_agent_catalog(db_path, query, auth_payload=payload or {})
 
 
 def _get_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
@@ -444,7 +454,7 @@ def _v1_list_agents(db_path, payload, query):
 
 
 def _v1_search_agents(db_path, payload, query):
-    return agent_catalog_handlers.v1_search_agents(db_path, query)
+    return agent_catalog_handlers.v1_search_agents(db_path, query, auth_payload=payload or {})
 
 
 def _v1_get_agent(db_path, catalog_agent_id, payload=None, query=None):
@@ -471,7 +481,7 @@ def _v1_claim_agent(db_path, catalog_agent_id, payload=None, query=None):
 
 
 def _v1_search_listings(db_path, payload, query):
-    return listings_handlers.v1_search_listings(db_path, query or {})
+    return listings_handlers.v1_search_listings(db_path, query or {}, auth_payload=payload or {})
 
 
 # ── /v1/merchants wrapper（token 分发）────────────────────────────────────
@@ -570,6 +580,10 @@ def _v1_admin_searches(db_path, payload, query):
     return admin_handlers.search_events(db_path, payload, query or {})
 
 
+def _v1_admin_buyer_stats(db_path, payload, query):
+    return admin_handlers.buyer_stats(db_path, payload, query or {})
+
+
 # ── /portal wrapper（门户页面）────────────────────────────────────────────
 
 
@@ -587,6 +601,10 @@ def _portal_admin():
 
 def _portal_admin_searches():
     return portal_handlers.portal_admin_searches()
+
+
+def _portal_admin_buyer_stats():
+    return portal_handlers.portal_admin_buyer_stats()
 
 
 def _portal_dashboard():

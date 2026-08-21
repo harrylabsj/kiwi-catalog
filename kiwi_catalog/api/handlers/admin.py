@@ -14,9 +14,10 @@
 
 """运营 Dashboard API（admin token 保护，fail-closed）。
 
-3 条路由：dashboard 总览 / merchant 列表 / 单商家报告。全部只读聚合，
-数据来自 services/admin_reports.py；页面（/portal/dashboard）与 CLI 之外
-的唯一数据入口。GET 无 body，admin token 经 query string（审查 P2 惯例）。
+5 条路由：dashboard 总览 / merchant 列表 / 单商家报告 / 买家搜索事件 /
+每日去重买家统计。全部只读聚合，数据来自 services/admin_reports.py 等；
+页面（/portal/dashboard、/portal/admin/*）与 CLI 之外的唯一数据入口。
+GET 无 body，admin token 经 query string（审查 P2 惯例）。
 """
 
 from __future__ import annotations
@@ -92,3 +93,19 @@ def search_events(
             "ok": True,
             "results": buyer_search_events.list_recent_search_events(conn, limit=limit),
         }
+
+
+def buyer_stats(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/admin/buyer-stats?days=14（admin）——每日去重买家统计 + 关键词排行。
+
+    每天按买家搜索两个指标给出：distinct_buyers（去重买家数）/
+    identified_events（已识别事件）/ total_events（事件总量）/
+    unidentified_events（未识别 = 总量 − 已识别）；``today`` 为当日同形状。
+    另附窗口内 top_keywords（热门）与 zero_hit_keywords（未命中 = 供需缺口）。
+    """
+    api_auth.require_admin_token(payload)
+    days = _parse_int_query(query.get("days"), admin_reports.DEFAULT_DAYS, "days")
+    with db_session(db_path) as conn:
+        return {"ok": True, **admin_reports.buyer_stats_summary(conn, days=days)}
