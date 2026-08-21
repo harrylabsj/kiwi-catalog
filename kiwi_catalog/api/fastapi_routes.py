@@ -45,6 +45,7 @@ from kiwi_catalog.api.route_table import (
     _reinstate_catalog_agent,
     _search_agent_catalog,
     _suspend_catalog_agent,
+    _v1_admin_buyer_stats,
     _v1_admin_dashboard,
     _v1_admin_merchant_report,
     _v1_admin_merchants,
@@ -231,6 +232,21 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         logger_name=__name__,
     )
 
+    def _buyer_payload(request: _FastAPIRequest) -> dict[str, Any]:
+        """买家搜索 GET 路由的 payload：合并 Bearer / X-Buyer-Id 身份头。
+
+        与 fallback_asgi 的头合并对齐（_auth_token 经 payload_with_auth，
+        _buyer_id 显式透传）；身份只用于每日去重买家统计
+        （services/buyer_stats.py，不落原始值）。
+        """
+        payload = api_auth.payload_with_auth(
+            {}, request.headers.get("authorization", ""), ""
+        )
+        buyer_id = request.headers.get("x-buyer-id", "")
+        if buyer_id:
+            payload["_buyer_id"] = buyer_id
+        return payload
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         return _health(db_path)
@@ -241,7 +257,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agent-catalog/agents/search")
     def search_agent_catalog(request: _FastAPIRequest) -> dict[str, Any]:
-        return _search_agent_catalog(db_path, {}, _query_params_from_request(request))
+        return _search_agent_catalog(
+            db_path, _buyer_payload(request), _query_params_from_request(request)
+        )
 
     @app.get("/v1/agent-catalog/agents/{catalog_agent_id}")
     def get_catalog_agent(catalog_agent_id: str) -> dict[str, Any]:
@@ -326,7 +344,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agents/search")
     def v1_search_agents(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_search_agents(db_path, {}, _query_params_from_request(request))
+        return _v1_search_agents(
+            db_path, _buyer_payload(request), _query_params_from_request(request)
+        )
 
     @app.get("/v1/agents/{catalog_agent_id}")
     def v1_get_agent(catalog_agent_id: str) -> dict[str, Any]:
@@ -385,7 +405,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/listings/search")
     def v1_search_listings(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_search_listings(db_path, {}, _query_params_from_request(request))
+        return _v1_search_listings(
+            db_path, _buyer_payload(request), _query_params_from_request(request)
+        )
 
     @app.get("/v1/listings/{listing_id}")
     def v1_get_listing(listing_id: str) -> dict[str, Any]:
@@ -626,6 +648,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             _query_params_from_request(request),
         )
 
+    @app.get("/v1/admin/buyer-stats")
+    def v1_admin_buyer_stats(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_buyer_stats(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
     from fastapi.responses import HTMLResponse
 
@@ -655,6 +685,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/admin/searches")
     def portal_admin_searches_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_admin_searches())
+
+    @app.get("/portal/admin/buyer-stats")
+    def portal_admin_buyer_stats_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_admin_buyer_stats())
 
     @app.get("/portal/dashboard")
     def portal_dashboard_page() -> HTMLResponse:

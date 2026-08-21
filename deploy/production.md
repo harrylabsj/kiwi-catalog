@@ -41,6 +41,8 @@ KIWI_CATALOG_EMAIL_VERIFICATION_MODE=smtp  # 生产必须 smtp；未配置会 fa
 # KIWI_CATALOG_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM
 # 已移除：KIWI_CATALOG_APPLY_RATE_LIMIT_PER_HOUR（2026-08-12 匿名申请通道关闭，限流并入登录限流 env）
 # 可选：KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE=60（默认 60 次/分，公开发现目录检索）
+# 可选：KIWI_CATALOG_STATS_SALT=<强随机值>（每日去重买家统计的 HMAC salt；默认 dev 值，
+# 轮换会使存量 buyer_hash 失效——只影响历史去重口径，不丢事件数）
 ```
 
 > 若线上已有 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 且 merchant 在用 HMAC token，

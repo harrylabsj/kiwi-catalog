@@ -44,7 +44,7 @@ from kiwi_catalog.listings.serialization import (
     merchant_projection,
 )
 from kiwi_catalog.listings.service import owner_agent_merchant_id
-from kiwi_catalog.services import buyer_search_events, usage_metrics
+from kiwi_catalog.services import buyer_search_events, buyer_stats, usage_metrics
 
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
@@ -127,15 +127,30 @@ def _record_listing_search_event(
             for r in (results or [])[:buyer_search_events.SUMMARY_CAP]
         ],
     )
+    # 关键词日聚合（v27）：空 q（filter-only 搜索）由服务层归一化跳过。
+    buyer_stats.record_buyer_keyword(conn, "listing", query.get("q"), len(results))
 
 
-def v1_search_listings(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    """GET /v1/listings/search —— 结构化过滤 + 确定性排序 + cursor。"""
+def v1_search_listings(
+    db_path: str | Path,
+    query: dict[str, Any],
+    auth_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GET /v1/listings/search —— 结构化过滤 + 确定性排序 + cursor。
+
+    auth_payload：transport 合并后的身份头（Bearer / X-Buyer-Id），仅用于
+    每日去重买家统计（services/buyer_stats.py，不落原始身份）。
+    """
     limit = result_limit(query.get("limit"), default=20)
     normalized = dict(query or {})
     normalized["limit"] = limit
     with db_session(db_path) as conn:
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_LISTING_SEARCH)
+        buyer_stats.record_buyer_search(
+            conn,
+            usage_metrics.METRIC_BUYER_LISTING_SEARCH,
+            buyer_stats.buyer_identity_from_payload(auth_payload),
+        )
         try:
             rows, next_cursor = _search_listings(conn, normalized)
         except SearchQueryError as exc:

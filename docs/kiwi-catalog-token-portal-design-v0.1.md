@@ -176,6 +176,24 @@ CLI（`catalog merchant applications list/approve/reject`、`token rotate/revoke
 
 Dashboard（2026-08-08）：运营后台 /portal/dashboard（admin token，env KIWI_CATALOG_PORTAL_ADMIN_ENABLED 默认关）——待审申请审批 + KPI 统计 + 14 天使用趋势（usage_metrics 埋点：buyer 搜索/listing 搜索/商家自查/商品发布）+ 商家列表与报告。生产已开启并验证。
 
+每日去重买家（2026-08-21）：schema v26 buyer_search_daily——搜索 handler 从
+Authorization Bearer / X-Buyer-Id 头取买家身份，落库仅日作用域 HMAC 截断 hash
+（services/buyer_stats.py，跨天不可关联、不存原始身份；匿名搜索只计入 usage_metrics
+总量）。`GET /v1/admin/buyer-stats?days=14`（admin）返回 distinct_buyers /
+identified_events / total_events / unidentified_events 日序列 + today；门户页
+/portal/admin/buyer-stats（同一 env 开关，默认 404）展示 KPI + 14 天双系列柱状图
++ 明细表。
+
+搜索关键词统计（2026-08-21）：schema v27 buyer_keyword_daily——三个搜索 handler
+（/v1/agents/search、legacy /v1/agent-catalog/agents/search、/v1/listings/search）
+把归一化 query（trim/折叠空白/小写/80 字符截断；空 query 的 filter-only 搜索不记）
+按 day × search_type × keyword 日聚合：searches + 1，零结果时 zero_results + 1
+（无保留上限，区别于 buyer_search_events 的 5000 条有界事件流）。
+/v1/admin/buyer-stats 响应新增 top_keywords（热门，按搜索次数）与
+zero_hit_keywords（未命中 = 供需缺口信号，按未命中次数），窗口同 days、各取前 20；
+门户页 /portal/admin/buyer-stats 新增「热门搜索关键词」「未命中关键词（供需缺口）」
+两张排行表——后者是运营招商补供给的可行动清单。
+
 部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
 catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
 env / 重启 / 验证 / 回滚）见 `deploy/production.md`。

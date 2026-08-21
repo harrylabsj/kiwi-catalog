@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 27
 
 
 @dataclass(frozen=True)
@@ -834,6 +834,57 @@ def migration_025_merchant_account_wechat(conn: sqlite3.Connection) -> None:
         conn.execute("alter table merchant_accounts add column wechat text not null default ''")
 
 
+_BUYER_SEARCH_DAILY_DDL = [
+    """
+create table if not exists buyer_search_daily (
+        day text not null,
+        metric text not null,
+        buyer_hash text not null,
+        count integer not null default 1,
+        updated_at text not null,
+        primary key (day, metric, buyer_hash)
+    )
+    """,
+]
+
+
+def migration_026_buyer_search_daily(conn: sqlite3.Connection) -> None:
+    """每日去重买家统计（运营 dashboard 数据源，services/buyer_stats.py）。
+
+    day × metric × buyer_hash（日作用域 HMAC 截断，pseudonymous，不存原始
+    身份）。DDL 与 db/models.py 的 SCHEMA 逐字一致（test_shadow_tables 守护）。
+    """
+    for statement in _BUYER_SEARCH_DAILY_DDL:
+        conn.execute(statement)
+
+
+_BUYER_KEYWORD_DAILY_DDL = [
+    """
+create table if not exists buyer_keyword_daily (
+        day text not null,
+        search_type text not null,
+        keyword text not null,
+        searches integer not null default 0,
+        zero_results integer not null default 0,
+        updated_at text not null,
+        primary key (day, search_type, keyword)
+    )
+    """,
+]
+
+
+def migration_027_buyer_keyword_daily(conn: sqlite3.Connection) -> None:
+    """每日买家搜索关键词统计（运营 dashboard 数据源，services/buyer_stats.py）。
+
+    day × search_type × keyword（归一化 query，非身份数据）；searches 为搜索
+    次数、zero_results 为未命中次数（供需缺口信号）。与 buyer_search_events
+    的原始事件流不同：本表是日聚合、无保留上限裁剪。DDL 与 db/models.py 的
+    SCHEMA 逐字一致（test_shadow_tables 守护）。
+    """
+    for statement in _BUYER_KEYWORD_DAILY_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -860,6 +911,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(23, "drop_merchant_shopping_token", migration_023_drop_merchant_shopping_token),
     Migration(24, "password_reset", migration_024_password_reset),
     Migration(25, "merchant_account_wechat", migration_025_merchant_account_wechat),
+    Migration(26, "buyer_search_daily", migration_026_buyer_search_daily),
+    Migration(27, "buyer_keyword_daily", migration_027_buyer_keyword_daily),
 )
 
 

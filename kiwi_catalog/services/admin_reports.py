@@ -18,7 +18,9 @@
 - ``dashboard_summary``：KPI 计数 + 最近 N 天使用趋势 + 最近申请；
 - ``merchant_list``：全部商家（影子表 + agent/listing/token 聚合）；
 - ``merchant_report``：单商家报告（资料 / agents / listings / token
-  生命周期 / 审计事件）。
+  生命周期 / 审计事件）；
+- ``buyer_stats_summary``：每日去重买家（buyer_stats）× 事件总量
+  （usage_metrics）合并视图——含未识别身份事件数（总量 − 已识别）。
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import sqlite3
 from typing import Any
 
 from kiwi_catalog.core.errors import NotFoundError
-from kiwi_catalog.services import usage_metrics
+from kiwi_catalog.services import buyer_stats, usage_metrics
 
 DEFAULT_DAYS = 14
 MAX_DAYS = 90
@@ -75,6 +77,58 @@ def dashboard_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> dic
         },
         "usage": usage_metrics.usage_series(conn, days=days),
         "recent_applications": [application_row(r) for r in recent],
+    }
+
+
+def buyer_stats_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> dict[str, Any]:
+    """每日去重买家统计 + 关键词排行（admin）。
+
+    每天按买家搜索两个指标（buyer_agent_search / buyer_listing_search）给出：
+    - ``distinct_buyers``：去重买家数（buyer_search_daily 行数，日作用域
+      pseudonymous hash——隐私设计见 services/buyer_stats.py）；
+    - ``identified_events``：已识别身份的搜索事件数（count 求和）；
+    - ``total_events``：搜索事件总量（usage_metrics，含匿名）；
+    - ``unidentified_events``：未识别身份事件数（总量 − 已识别，下限 0）。
+
+    另附窗口内关键词聚合（buyer_keyword_daily，各取前 20）：
+    ``top_keywords``（按搜索次数）与 ``zero_hit_keywords``（按未命中次数——
+    供需缺口信号，运营招商据此）。
+    """
+    days = max(1, min(int(days or DEFAULT_DAYS), MAX_DAYS))
+    buyer_series = buyer_stats.buyer_daily_series(conn, days=days)
+    usage_by_day = {
+        str(item["day"]): item["counts"]
+        for item in usage_metrics.usage_series(conn, days=days)
+    }
+    series = []
+    for item in buyer_series:
+        day = str(item["day"])
+        usage_counts = usage_by_day.get(day, {})
+        identified = item["identified_events"]
+        total_events = {
+            metric: int(usage_counts.get(metric, 0) or 0)
+            for metric in buyer_stats.BUYER_METRICS
+        }
+        series.append(
+            {
+                "day": day,
+                "distinct_buyers": item["distinct_buyers"],
+                "identified_events": identified,
+                "total_events": total_events,
+                "unidentified_events": {
+                    metric: max(0, total_events[metric] - identified[metric])
+                    for metric in buyer_stats.BUYER_METRICS
+                },
+            }
+        )
+    return {
+        "days": days,
+        "series": series,
+        "today": series[-1],
+        "top_keywords": buyer_stats.top_keywords(conn, days=days, limit=20),
+        "zero_hit_keywords": buyer_stats.top_keywords(
+            conn, days=days, limit=20, sort="zero_results"
+        ),
     }
 
 

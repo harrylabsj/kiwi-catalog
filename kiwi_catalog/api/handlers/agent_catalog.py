@@ -72,7 +72,7 @@ from kiwi_catalog.core.errors import (
 )
 from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
-from kiwi_catalog.services import agent_catalog_writes, buyer_search_events, usage_metrics
+from kiwi_catalog.services import agent_catalog_writes, buyer_search_events, buyer_stats, usage_metrics
 from kiwi_catalog.services.agent_catalog import (
     search_catalog_agents as _search_catalog_agents_service,
 )
@@ -182,13 +182,28 @@ def _record_agent_search_event(
             for r in (results or [])[:buyer_search_events.SUMMARY_CAP]
         ],
     )
+    # 关键词日聚合（v27）：空 q（filter-only 搜索）由服务层归一化跳过。
+    buyer_stats.record_buyer_keyword(conn, "agent", query.get("q"), len(results))
 
 
-def search_agent_catalog(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    """GET /v1/agent-catalog/agents/search — filtered search (§8.2)."""
+def search_agent_catalog(
+    db_path: str | Path,
+    query: dict[str, Any],
+    auth_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GET /v1/agent-catalog/agents/search — filtered search (§8.2).
+
+    auth_payload：transport 合并后的身份头（Bearer / X-Buyer-Id），仅用于
+    每日去重买家统计（services/buyer_stats.py，不落原始身份）。
+    """
     limit = result_limit(query.get("limit"), default=20)
     with db_session(db_path) as conn:
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
+        buyer_stats.record_buyer_search(
+            conn,
+            usage_metrics.METRIC_BUYER_AGENT_SEARCH,
+            buyer_stats.buyer_identity_from_payload(auth_payload),
+        )
         result = _search_catalog_agents_service(
             conn=conn,
             q=str(query.get("q") or ""),
@@ -899,8 +914,16 @@ def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]
         return {"ok": True, "results": results, "next_cursor": next_cursor}
 
 
-def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
-    """GET /v1/agents/search — 三态域 + handoff 词表搜索（v0.3 §8）。"""
+def v1_search_agents(
+    db_path: str | Path,
+    query: dict[str, Any],
+    auth_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GET /v1/agents/search — 三态域 + handoff 词表搜索（v0.3 §8）。
+
+    auth_payload：transport 合并后的身份头（Bearer / X-Buyer-Id），仅用于
+    每日去重买家统计（services/buyer_stats.py，不落原始身份）。
+    """
     limit = result_limit(query.get("limit"), default=20)
     # canonical hosting_mode（direct_only/hosted_only）归一化为 legacy 存储值。
     hosting_mode = agent_catalog_writes.normalize_hosting_mode(
@@ -908,6 +931,11 @@ def v1_search_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, An
     )
     with db_session(db_path) as conn:
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
+        buyer_stats.record_buyer_search(
+            conn,
+            usage_metrics.METRIC_BUYER_AGENT_SEARCH,
+            buyer_stats.buyer_identity_from_payload(auth_payload),
+        )
         rows, next_cursor = _repo_search_catalog_agents(
             conn,
             q=str(query.get("q") or ""),
