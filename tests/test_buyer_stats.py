@@ -23,7 +23,8 @@
 - 关键词统计（v27，buyer_keyword_daily）：归一化、upsert 累加、
   zero_results 计数、空 query 跳过、top_keywords 排序/窗口/limit、
   端点 top_keywords/zero_hit_keywords 字段、搜索 handler 关键词埋点；
-- portal 页：portal_admin_buyer_stats 开关开启时返回 HTML。
+- portal 页（2026-08-22 合并）：旧 /portal/admin/buyer-stats 独立页 302
+  跳转到 /portal/dashboard（双栈）；dashboard 渲染并入的买家搜索统计区块。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from unittest import mock
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
-from kiwi_catalog.api.handlers.portal import portal_admin_buyer_stats
+from kiwi_catalog.api.handlers.portal import portal_admin_buyer_stats, portal_dashboard
 from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.db.session import now_iso, open_connection
 from kiwi_catalog.services import buyer_stats, usage_metrics
@@ -267,7 +268,9 @@ class BuyerStatsHttpTest(unittest.TestCase):
         self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
-    def _get(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict]:
+    def _get(
+        self, path: str, headers: dict[str, str] | None = None
+    ) -> tuple[int, dict, dict[str, str]]:
         path_only = path.split("?", 1)[0]
         query_bytes = path.split("?", 1)[1].encode() if "?" in path else b""
         scope_headers: list[tuple[bytes, bytes]] = []
@@ -297,19 +300,23 @@ class BuyerStatsHttpTest(unittest.TestCase):
             payload = json.loads(chunks.decode())
         except json.JSONDecodeError:
             payload = {"_raw": chunks.decode()}
-        return start.get("status", 500), payload
+        headers = {
+            k.decode("latin1").lower(): v.decode("latin1")
+            for k, v in start.get("headers", [])
+        }
+        return start.get("status", 500), payload, headers
 
     def test_search_with_buyer_id_header_then_admin_stats(self) -> None:
         # 买家 b1（X-Buyer-Id）搜 agent ×2、搜 listing ×1；匿名搜 listing ×1
         for _ in range(2):
-            status, _ = self._get("/v1/agents/search?q=x", headers={"X-Buyer-Id": "b1"})
+            status, _, _ = self._get("/v1/agents/search?q=x", headers={"X-Buyer-Id": "b1"})
             self.assertEqual(status, 200)
         self._get("/v1/listings/search?q=x", headers={"X-Buyer-Id": "b1"})
         self._get("/v1/listings/search?q=y")
         # legacy 搜索面同样埋点
         self._get("/v1/agent-catalog/agents/search?q=z", headers={"X-Buyer-Id": "b2"})
 
-        status, res = self._get(
+        status, res, _ = self._get(
             "/v1/admin/buyer-stats?days=1",
             headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
@@ -327,12 +334,12 @@ class BuyerStatsHttpTest(unittest.TestCase):
         self.assertEqual(today["unidentified_events"][LISTING], 1)
 
     def test_admin_buyer_stats_requires_token_over_http(self) -> None:
-        status, payload = self._get("/v1/admin/buyer-stats")
+        status, payload, _ = self._get("/v1/admin/buyer-stats")
         self.assertEqual(status, 403, payload)
 
     def test_bearer_token_counts_as_identity(self) -> None:
         self._get("/v1/agents/search?q=x", headers={"Authorization": "Bearer buyer-tok-9"})
-        status, res = self._get(
+        status, res, _ = self._get(
             "/v1/admin/buyer-stats?days=1",
             headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
@@ -345,12 +352,33 @@ class BuyerStatsHttpTest(unittest.TestCase):
 
         self.app = MarketplaceASGIApp(self.db_path)
         self._get("/v1/listings/search?q=x", headers={"X-Buyer-Id": "fb-buyer"})
-        status, res = self._get(
+        status, res, _ = self._get(
             "/v1/admin/buyer-stats?days=1",
             headers={"Authorization": "Bearer " + ADMIN_TOKEN},
         )
         self.assertEqual(status, 200, res)
         self.assertEqual(res["today"]["distinct_buyers"][LISTING], 1)
+
+    def test_old_buyer_stats_page_redirects_to_dashboard(self) -> None:
+        """/portal/admin/buyer-stats 已并入 dashboard：开启时双栈 302 + Location。"""
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+        ):
+            # FastAPI 栈（create_catalog_app 默认）
+            status, _, headers = self._get("/portal/admin/buyer-stats")
+            self.assertEqual(status, 302)
+            self.assertEqual(headers.get("location"), "/portal/dashboard")
+            # fallback 栈
+            self.app = MarketplaceASGIApp(self.db_path)
+            status, _, headers = self._get("/portal/admin/buyer-stats")
+            self.assertEqual(status, 302)
+            self.assertEqual(headers.get("location"), "/portal/dashboard")
+
+    def test_old_buyer_stats_page_hidden_by_default_over_http(self) -> None:
+        status, _, _ = self._get("/portal/admin/buyer-stats")
+        self.assertEqual(status, 404)
 
 
 class BuyerStatsPortalTest(unittest.TestCase):
@@ -360,30 +388,78 @@ class BuyerStatsPortalTest(unittest.TestCase):
             page = portal_admin_buyer_stats()
             self.assertEqual(page.get("__status__"), 404)
 
-    def test_page_enabled_via_env(self) -> None:
+    def test_page_enabled_redirects_to_dashboard(self) -> None:
+        """独立买家统计页已并入 /portal/dashboard（2026-08-22）：开启时 302 跳转。"""
         with mock.patch.dict(
             os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
         ):
             page = portal_admin_buyer_stats()
+            self.assertEqual(page, {"__redirect__": "/portal/dashboard"})
+
+    def test_dashboard_renders_merged_buyer_sections(self) -> None:
+        """合并后的运营 Dashboard 含买家搜索统计区块（KPI/柱状图/明细/关键词表）。"""
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+        ):
+            page = portal_dashboard()
             html = page["__html__"]
-            self.assertIn("每日去重买家", html)
-            self.assertIn("admin_token", html)
-            self.assertIn("/v1/admin/buyer-stats", html)
-            # 关键词排行两个新区块（v27）
+            self.assertIn("运营 Dashboard", html)
+            self.assertIn("买家搜索统计", html)
             self.assertIn("热门搜索关键词", html)
             self.assertIn("未命中关键词", html)
             self.assertIn("供需缺口", html)
+            self.assertIn("/v1/admin/buyer-stats", html)
+            self.assertIn("buyer_kpis", html)
+            # 关键词表：每关键词一行 + 类型分布窄列（找商家 N · 找商品 M）
+            self.assertIn("类型分布", html)
+            self.assertIn("找商家", html)
+            self.assertIn("找商品", html)
+            # 同一 token 输入解锁全页（buyer-stats 不再有独立 token 表单）
+            self.assertEqual(html.count('id="admin_token"'), 1)
 
 
 class BuyerKeywordServiceTest(unittest.TestCase):
     def test_keyword_normalization(self) -> None:
-        """trim + 折叠内部空白 + 小写 + 80 字符截断；空/非字符串 → 空串。"""
+        """NFKC + 去零宽字符 + trim + 折叠内部空白 + 小写 + 80 字符截断。"""
         self.assertEqual(buyer_stats._normalize_keyword("  保温  Cup\t\nSTANLEY "), "保温 cup stanley")
         self.assertEqual(buyer_stats._normalize_keyword(""), "")
         self.assertEqual(buyer_stats._normalize_keyword("   \t "), "")
         self.assertEqual(buyer_stats._normalize_keyword(None), "")
         self.assertEqual(buyer_stats._normalize_keyword(123), "")
         self.assertEqual(len(buyer_stats._normalize_keyword("x" * 200)), 80)
+
+    def test_normalization_nfkc_and_zero_width(self) -> None:
+        """全角/半角与兼容字符折到同一形式；零宽字符删除（2026-08-22 重复行修复）。"""
+        self.assertEqual(buyer_stats._normalize_keyword("ＡＢＣ"), "abc")
+        self.assertEqual(buyer_stats._normalize_keyword("ＡＢＣ"), buyer_stats._normalize_keyword("ABC"))
+        # 全角空格 → 普通空格（参与折叠）
+        self.assertEqual(buyer_stats._normalize_keyword("血压仪　家用"), "血压仪 家用")
+        # 零宽字符（ZWSP/ZWNJ/ZWJ/BOM）删除
+        self.assertEqual(buyer_stats._normalize_keyword("\u8840\u538b\u200b\u4eea\u200c\u5bb6\u200d\u7528\ufeff"), "血压仪家用")
+        # 兼容字符（如全角数字/带圈数字）折到标准形式
+        self.assertEqual(buyer_stats._normalize_keyword("２０２６"), "2026")
+        # 归一化后为空（纯零宽）→ 跳过
+        self.assertEqual(buyer_stats._normalize_keyword("\u200b\u200c\u200d\ufeff"), "")
+
+    def test_nfkc_variants_record_as_one_keyword(self) -> None:
+        """全角与零宽变体落库为同一行（record 期归一化）。"""
+        db = _make_db()
+        conn = open_connection(db)
+        buyer_stats.record_buyer_keyword(conn, "agent", "血压仪", 1)
+        buyer_stats.record_buyer_keyword(conn, "agent", "\u8840\u538b\u200b\u4eea", 1)
+        buyer_stats.record_buyer_keyword(conn, "agent", "ＡＢＣ", 0)
+        buyer_stats.record_buyer_keyword(conn, "agent", "abc", 0)
+        conn.commit()
+        rows = conn.execute(
+            "select keyword, searches, zero_results from buyer_keyword_daily order by keyword"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["keyword"], "abc")
+        self.assertEqual(int(rows[0]["searches"]), 2)
+        self.assertEqual(int(rows[0]["zero_results"]), 2)
+        self.assertEqual(rows[1]["keyword"], "血压仪")
+        self.assertEqual(int(rows[1]["searches"]), 2)
+        conn.close()
 
     def test_record_upsert_and_zero_results(self) -> None:
         """同关键词（归一化后相同）累加 searches；result_count==0 累加 zero_results。"""
@@ -461,11 +537,36 @@ class BuyerKeywordServiceTest(unittest.TestCase):
         self.assertEqual([k["keyword"] for k in zero_hits], ["b", "a", "c"])
         self.assertEqual(zero_hits[0]["zero_results"], 2)
 
-        only_agent = buyer_stats.top_keywords(conn, days=14, search_type="agent")
-        self.assertEqual([k["keyword"] for k in only_agent], ["a", "b"])
-
         limited = buyer_stats.top_keywords(conn, days=14, limit=2)
         self.assertEqual(len(limited), 2)
+        conn.close()
+
+    def test_top_keywords_merges_across_search_types(self) -> None:
+        """同一关键词跨 agent/listing 搜索合并为一行，分列两类计数
+        （2026-08-22 修复：此前按 (keyword, search_type) 分组 → 重复行）。"""
+        db = _make_db()
+        conn = open_connection(db)
+        buyer_stats.record_buyer_keyword(conn, "agent", "血压仪", 0)
+        buyer_stats.record_buyer_keyword(conn, "agent", "血压仪", 1)
+        buyer_stats.record_buyer_keyword(conn, "listing", "血压仪", 0)
+        buyer_stats.record_buyer_keyword(conn, "listing", "咖啡机", 1)
+        conn.commit()
+        top = buyer_stats.top_keywords(conn, days=14)
+        keywords = [k["keyword"] for k in top]
+        self.assertEqual(keywords, ["血压仪", "咖啡机"])  # 每关键词一行
+        merged = top[0]
+        self.assertEqual(
+            merged,
+            {
+                "keyword": "血压仪",
+                "searches": 3,
+                "zero_results": 2,
+                "agent_searches": 2,
+                "listing_searches": 1,
+            },
+        )
+        zero_hits = buyer_stats.top_keywords(conn, days=14, sort="zero_results")
+        self.assertEqual([k["keyword"] for k in zero_hits], ["血压仪", "咖啡机"])
         conn.close()
 
 
@@ -501,6 +602,21 @@ class BuyerKeywordHandlersTest(unittest.TestCase):
         conn.close()
         self.assertEqual(n, 0)
 
+    def test_same_keyword_across_agent_and_listing_search_merges(self) -> None:
+        """找商家 + 找商品搜同一关键词 → 排行里一行，带两类计数。"""
+        db = _make_db()
+        agent_handlers.v1_search_agents(db, {"q": "血压仪"})
+        listings_handlers.v1_search_listings(db, {"q": "血压仪"})
+        conn = open_connection(db)
+        top = buyer_stats.top_keywords(conn, days=14)
+        conn.close()
+        self.assertEqual(len(top), 1)
+        self.assertEqual(top[0]["keyword"], "血压仪")
+        self.assertEqual(top[0]["searches"], 2)
+        self.assertEqual(top[0]["zero_results"], 2)
+        self.assertEqual(top[0]["agent_searches"], 1)
+        self.assertEqual(top[0]["listing_searches"], 1)
+
 
 class BuyerKeywordAdminTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -521,8 +637,20 @@ class BuyerKeywordAdminTest(unittest.TestCase):
         self.assertEqual(
             top,
             [
-                {"keyword": "保温杯", "search_type": "agent", "searches": 2, "zero_results": 1},
-                {"keyword": "咖啡机", "search_type": "listing", "searches": 1, "zero_results": 1},
+                {
+                    "keyword": "保温杯",
+                    "searches": 2,
+                    "zero_results": 1,
+                    "agent_searches": 2,
+                    "listing_searches": 0,
+                },
+                {
+                    "keyword": "咖啡机",
+                    "searches": 1,
+                    "zero_results": 1,
+                    "agent_searches": 0,
+                    "listing_searches": 1,
+                },
             ],
         )
         zero_hits = res["zero_hit_keywords"]

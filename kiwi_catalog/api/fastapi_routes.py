@@ -657,13 +657,19 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
 
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, RedirectResponse
 
     _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
 
     def _portal_html(result: dict[str, Any]) -> HTMLResponse:
-        """门户 handler 结果 → HTMLResponse；__status__ 键覆盖状态码
+        """门户 handler 结果 → HTMLResponse；``__redirect__`` 键发 302 +
+        Location（门户旧路径合并跳转），``__status__`` 键覆盖状态码
         （与 fallback _send_json 语义一致）。"""
+        redirect_to = result.get("__redirect__")
+        if redirect_to:
+            return RedirectResponse(
+                str(redirect_to), status_code=302, headers=_PORTAL_HTML_HEADERS
+            )
         return HTMLResponse(
             result["__html__"],
             status_code=int(result.get("__status__") or 200),

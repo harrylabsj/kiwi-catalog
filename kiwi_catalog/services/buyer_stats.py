@@ -44,6 +44,7 @@ import hashlib
 import hmac
 import os
 import sqlite3
+import unicodedata
 from typing import Any
 
 from kiwi_catalog.db.session import now_iso
@@ -67,6 +68,9 @@ _HASH_HEX_LEN = 16
 SEARCH_TYPES = ("agent", "listing")
 
 _KEYWORD_CAP = 80
+
+# 零宽字符（zero-width space / non-joiner / joiner / BOM）——归一化时删除
+_ZERO_WIDTH_STRIP = {ord(c): None for c in ("\u200b", "\u200c", "\u200d", "\ufeff")}
 
 
 def buyer_identity_from_payload(payload: dict[str, Any] | None) -> str:
@@ -162,14 +166,19 @@ def buyer_daily_series(conn: sqlite3.Connection, days: int = 14) -> list[dict[st
 
 
 def _normalize_keyword(query: object) -> str:
-    """关键词归一化：trim + 折叠内部空白 + 小写 + 截断 80 字符。
+    """关键词归一化：Unicode NFKC + 去零宽字符 + trim + 折叠内部空白 +
+    小写 + 截断 80 字符。
 
-    归一化后为空（空串/纯空白/非字符串）→ 返回空串（调用方跳过——
-    filter-only 搜索不算关键词）。
+    NFKC 把全角/半角与兼容字符折到同一形式（ＡＢＣ → abc），零宽字符
+    （U+200B/200C/200D/FEFF）直接删除——否则视觉相同的关键词会落多行
+    （2026-08-22 修复重复行报告）。归一化后为空（空串/纯空白/非字符串）
+    → 返回空串（调用方跳过——filter-only 搜索不算关键词）。
     """
     if not isinstance(query, str):
         return ""
-    return " ".join(query.split()).lower()[:_KEYWORD_CAP]
+    text = unicodedata.normalize("NFKC", query)
+    text = text.translate(_ZERO_WIDTH_STRIP)
+    return " ".join(text.split()).lower()[:_KEYWORD_CAP]
 
 
 def record_buyer_keyword(
@@ -208,14 +217,17 @@ def top_keywords(
     conn: sqlite3.Connection,
     days: int = 14,
     limit: int = 20,
-    search_type: str | None = None,
     sort: str = "searches",
 ) -> list[dict[str, Any]]:
-    """最近 *days* 天关键词聚合排行。
+    """最近 *days* 天关键词聚合排行（跨搜索类型合并——每关键词一行）。
+
+    同一关键词在找商家（agent）与找商品（listing）两类搜索下的计数合并，
+    分列返回 ``agent_searches`` / ``listing_searches``（2026-08-22 修复：
+    此前按 (keyword, search_type) 分组，同关键词在两张排行表里出现重复行；
+    查询期合并同时把归一化升级前的历史存量行也并掉）。
 
     sort="searches"（默认，热门关键词）按搜索次数降序；sort="zero_results"
-    （未命中关键词——供需缺口信号）按未命中次数降序。search_type 可收窄到
-    agent/listing 单一类型；缺省合并两类（同关键词分行，不跨类合并）。
+    （未命中关键词——供需缺口信号）按未命中次数降序。
     """
     import datetime as _dt
 
@@ -223,27 +235,23 @@ def top_keywords(
     limit = max(1, min(int(limit or 20), 100))
     order_column = "zero_results" if sort == "zero_results" else "searches"
     start = _dt.datetime.now(_dt.UTC).date() - _dt.timedelta(days=days - 1)
-    sql = (
-        "select keyword, search_type, sum(searches) as searches,"
-        " sum(zero_results) as zero_results"
+    rows = conn.execute(
+        "select keyword, sum(searches) as searches,"
+        " sum(zero_results) as zero_results,"
+        " sum(case when search_type = 'agent' then searches else 0 end) as agent_searches,"
+        " sum(case when search_type = 'listing' then searches else 0 end) as listing_searches"
         " from buyer_keyword_daily where day >= ?"
-    )
-    params: list[Any] = [start.isoformat()]
-    if search_type in SEARCH_TYPES:
-        sql += " and search_type = ?"
-        params.append(search_type)
-    sql += (
-        " group by keyword, search_type"
-        f" order by {order_column} desc, searches desc, keyword asc limit ?"
-    )
-    params.append(limit)
-    rows = conn.execute(sql, params).fetchall()
+        " group by keyword"
+        f" order by {order_column} desc, searches desc, keyword asc limit ?",
+        (start.isoformat(), limit),
+    ).fetchall()
     return [
         {
             "keyword": str(row["keyword"]),
-            "search_type": str(row["search_type"]),
             "searches": int(row["searches"]),
             "zero_results": int(row["zero_results"]),
+            "agent_searches": int(row["agent_searches"]),
+            "listing_searches": int(row["listing_searches"]),
         }
         for row in rows
     ]
