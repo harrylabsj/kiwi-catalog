@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 27
+CURRENT_SCHEMA_VERSION = 28
 
 
 @dataclass(frozen=True)
@@ -885,6 +885,54 @@ def migration_027_buyer_keyword_daily(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_ACCESS_LOG_DDL = [
+    """
+create table if not exists access_log (
+        id integer primary key autoincrement,
+        occurred_at text not null,
+        method text not null,
+        path text not null,
+        surface text not null,
+        actor_kind text not null,
+        actor_key text not null,
+        ip_prefix text not null,
+        user_agent text not null,
+        query_summary text not null,
+        target_id text not null,
+        status integer,
+        result_count integer,
+        latency_ms integer
+    )
+    """,
+    """
+create index if not exists idx_access_log_occurred
+        on access_log(occurred_at)
+    """,
+    """
+create index if not exists idx_access_log_surface_occurred
+        on access_log(surface, occurred_at)
+    """,
+    """
+create index if not exists idx_access_log_target
+        on access_log(target_id)
+    """,
+]
+
+
+def migration_028_access_log(conn: sqlite3.Connection) -> None:
+    """个体访问日志（运营质量 + 安全审计数据源，services/access_log.py）。
+
+    运营原则修订（2026-08-22）：从「只记次数不记个体日志」改为「记录个体
+    访问日志用于运营质量与安全审计」——最小必要仍适用：绝不记录凭据本体、
+    身份一律派生（actor_key = SHA-256 截断）、IP 只存截断前缀、日志有保留期
+    （env KIWI_CATALOG_ACCESS_LOG_RETENTION_DAYS，默认 90 天）。与
+    usage_metrics（只记次数）互补。DDL 与 db/models.py 的 SCHEMA 逐字一致
+    （test_shadow_tables 守护）。
+    """
+    for statement in _ACCESS_LOG_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -913,6 +961,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(25, "merchant_account_wechat", migration_025_merchant_account_wechat),
     Migration(26, "buyer_search_daily", migration_026_buyer_search_daily),
     Migration(27, "buyer_keyword_daily", migration_027_buyer_keyword_daily),
+    Migration(28, "access_log", migration_028_access_log),
 )
 
 

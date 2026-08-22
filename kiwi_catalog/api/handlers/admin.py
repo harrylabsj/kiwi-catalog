@@ -14,9 +14,10 @@
 
 """运营 Dashboard API（admin token 保护，fail-closed）。
 
-5 条路由：dashboard 总览 / merchant 列表 / 单商家报告 / 买家搜索事件 /
-每日去重买家统计。全部只读聚合，数据来自 services/admin_reports.py 等；
-页面（/portal/dashboard、/portal/admin/*）与 CLI 之外的唯一数据入口。
+6 条路由：dashboard 总览 / merchant 列表 / 单商家报告 / 买家搜索事件 /
+每日去重买家统计 / 个体访问日志。全部只读聚合，数据来自
+services/admin_reports.py、services/access_log.py 等；页面
+（/portal/dashboard、/portal/admin/*）与 CLI 之外的唯一数据入口。
 GET 无 body，admin token 经 query string（审查 P2 惯例）。
 """
 
@@ -28,6 +29,7 @@ from typing import Any
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.db.session import db_session
+from kiwi_catalog.services import access_log as access_log_service
 from kiwi_catalog.services import admin_reports, buyer_search_events
 
 
@@ -109,3 +111,40 @@ def buyer_stats(
     days = _parse_int_query(query.get("days"), admin_reports.DEFAULT_DAYS, "days")
     with db_session(db_path) as conn:
         return {"ok": True, **admin_reports.buyer_stats_summary(conn, days=days)}
+
+
+def access_log(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/admin/access-log?surface=&days=&limit=（admin）——个体访问日志。
+
+    按时间倒序返回 access_log 行（不含任何凭据——库里本就不存凭据本体）。
+    surface 可选过滤（buyer_search/buyer_detail/merchant_write/account_portal/
+    admin）；days 默认 7 上限 90，limit 默认 100 上限 500（服务层钳制兜底）。
+    """
+    api_auth.require_admin_token(payload)
+    surface = str(query.get("surface") or "").strip()
+    days = _parse_int_query(query.get("days"), 7, "days")
+    limit = _parse_int_query(query.get("limit"), 100, "limit")
+    with db_session(db_path) as conn:
+        return {
+            "ok": True,
+            "results": access_log_service.list_access_log(
+                conn, surface=surface, days=days, limit=limit
+            ),
+        }
+
+
+def access_insights(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/admin/access-insights?days=14（admin）——访问洞察聚合视图。
+
+    搜→看漏斗（每日 buyer_search/buyer_detail + 转化率）+ 详情热度榜
+    （被查看商家/商品 Top 10）+ 登录失败信号（今日失败数 + IP 前缀 Top）。
+    数据来自 access_log（v28）。
+    """
+    api_auth.require_admin_token(payload)
+    days = _parse_int_query(query.get("days"), admin_reports.DEFAULT_DAYS, "days")
+    with db_session(db_path) as conn:
+        return {"ok": True, **admin_reports.access_insights(conn, days=days)}

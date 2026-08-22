@@ -14,13 +14,14 @@
 
 """运营 Dashboard 数据聚合（admin 专用，docs §dashboard）。
 
-三个查询面（只读，所有调用方必须先过 admin token）：
+四个查询面（只读，所有调用方必须先过 admin token）：
 - ``dashboard_summary``：KPI 计数 + 最近 N 天使用趋势 + 最近申请；
 - ``merchant_list``：全部商家（影子表 + agent/listing/token 聚合）；
 - ``merchant_report``：单商家报告（资料 / agents / listings / token
   生命周期 / 审计事件）；
 - ``buyer_stats_summary``：每日去重买家（buyer_stats）× 事件总量
-  （usage_metrics）合并视图——含未识别身份事件数（总量 − 已识别）。
+  （usage_metrics）合并视图——含未识别身份事件数（总量 − 已识别）；
+- ``access_insights``：搜→看漏斗 + 详情热度榜 + 登录失败信号（access_log）。
 """
 
 from __future__ import annotations
@@ -130,6 +131,124 @@ def buyer_stats_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> d
         "zero_hit_keywords": buyer_stats.top_keywords(
             conn, days=days, limit=20, sort="zero_results"
         ),
+    }
+
+
+def access_insights(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> dict[str, Any]:
+    """访问洞察（admin）：基于 access_log(v28 个体访问日志)的运营视图。
+
+    三个查询面：
+    - ``funnel``：搜→看转化。窗口内每日 buyer_search / buyer_detail 事件数,
+      外加窗口合计与转化率(详情查看 ÷ 搜索,下限/上限防护);
+    - ``top_viewed_agents`` / ``top_viewed_listings``：详情面按 target_id
+      聚合的被查看热度榜(各前 10),join catalog_agents / commerce_listings
+      补名称;views 为总查看数,viewers 为带身份去重查看者数(匿名不计);
+    - ``login_failures``：登录安全信号。今日 /v1/accounts/login 失败(4xx)
+      次数 + 窗口内按 IP 前缀的失败 Top(防爆破监测;只存 /24 前缀)。
+    """
+    import datetime as _dt
+
+    days = max(1, min(int(days or DEFAULT_DAYS), MAX_DAYS))
+    today = _dt.datetime.now(_dt.UTC).date()
+    start = today - _dt.timedelta(days=days - 1)
+    cutoff = start.isoformat()
+
+    # ── funnel:每日分面事件数(buyer_search / buyer_detail)─────────────────
+    rows = conn.execute(
+        "select substr(occurred_at, 1, 10) as day, surface, count(*) as n"
+        " from access_log"
+        " where occurred_at >= ? and surface in ('buyer_search', 'buyer_detail')"
+        " group by day, surface",
+        (cutoff,),
+    ).fetchall()
+    by_day: dict[str, dict[str, int]] = {}
+    for row in rows:
+        by_day.setdefault(str(row["day"]), {})[str(row["surface"])] = int(row["n"])
+    daily: list[dict[str, Any]] = []
+    for offset in range(days):
+        day = (start + _dt.timedelta(days=offset)).isoformat()
+        bucket = by_day.get(day, {})
+        searches = bucket.get("buyer_search", 0)
+        views = bucket.get("buyer_detail", 0)
+        daily.append(
+            {
+                "day": day,
+                "searches": searches,
+                "detail_views": views,
+                "conversion": round(views / searches, 4) if searches > 0 else None,
+            }
+        )
+    total_searches = sum(item["searches"] for item in daily)
+    total_views = sum(item["detail_views"] for item in daily)
+    funnel = {
+        "daily": daily,
+        "total_searches": total_searches,
+        "total_detail_views": total_views,
+        "conversion": round(total_views / total_searches, 4) if total_searches > 0 else None,
+    }
+
+    # ── 详情热度榜:按 target_id 聚合,join 名称;viewers = 带身份去重 ────────
+    def _top_viewed(path_prefixes: tuple[str, ...], name_sql: str) -> list[dict[str, Any]]:
+        likes = " or ".join(["path like ?"] * len(path_prefixes))
+        params: list[Any] = [cutoff, *[p + "%" for p in path_prefixes]]
+        viewed = conn.execute(
+            "select target_id, count(*) as views,"
+            " count(distinct nullif(actor_key, '')) as viewers"
+            " from access_log"
+            " where occurred_at >= ? and surface = 'buyer_detail'"
+            " and target_id <> '' and (" + likes + ")"
+            " group by target_id order by views desc, target_id limit 10",
+            params,
+        ).fetchall()
+        out = []
+        for v in viewed:
+            name_row = conn.execute(name_sql, (str(v["target_id"]),)).fetchone()
+            out.append(
+                {
+                    "target_id": str(v["target_id"]),
+                    "name": str(name_row[0]) if name_row is not None and name_row[0] else "",
+                    "views": int(v["views"]),
+                    "viewers": int(v["viewers"]),
+                }
+            )
+        return out
+
+    top_viewed_agents = _top_viewed(
+        ("/v1/agents/", "/v1/agent-catalog/agents/", "/v1/hosted/agents/"),
+        "select display_name from catalog_agents where catalog_agent_id = ?",
+    )
+    top_viewed_listings = _top_viewed(
+        ("/v1/listings/",),
+        "select title from commerce_listings where listing_id = ?",
+    )
+
+    # ── 登录失败:今日失败数 + 窗口内 IP 前缀 Top(防爆破信号)──────────────
+    login_today = conn.execute(
+        "select count(*) as n from access_log"
+        " where path = '/v1/accounts/login' and status >= 400"
+        " and substr(occurred_at, 1, 10) = ?",
+        (today.isoformat(),),
+    ).fetchone()
+    login_by_ip = conn.execute(
+        "select ip_prefix, count(*) as n from access_log"
+        " where path = '/v1/accounts/login' and status >= 400"
+        " and occurred_at >= ? and ip_prefix <> ''"
+        " group by ip_prefix order by n desc, ip_prefix limit 10",
+        (cutoff,),
+    ).fetchall()
+
+    return {
+        "days": days,
+        "funnel": funnel,
+        "top_viewed_agents": top_viewed_agents,
+        "top_viewed_listings": top_viewed_listings,
+        "login_failures": {
+            "today": int(login_today["n"]) if login_today is not None else 0,
+            "by_ip_prefix": [
+                {"ip_prefix": str(r["ip_prefix"]), "failures": int(r["n"])}
+                for r in login_by_ip
+            ],
+        },
     }
 
 

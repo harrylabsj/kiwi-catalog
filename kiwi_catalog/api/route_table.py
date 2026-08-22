@@ -340,6 +340,16 @@ RouteEntry(
         "/v1/admin/buyer-stats",
         lambda db_path, payload, query, **kw: _v1_admin_buyer_stats(db_path, payload, query),
     ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/access-log",
+        lambda db_path, payload, query, **kw: _v1_admin_access_log(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/admin/access-insights",
+        lambda db_path, payload, query, **kw: _v1_admin_access_insights(db_path, payload, query),
+    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -582,6 +592,14 @@ def _v1_admin_searches(db_path, payload, query):
 
 def _v1_admin_buyer_stats(db_path, payload, query):
     return admin_handlers.buyer_stats(db_path, payload, query or {})
+
+
+def _v1_admin_access_log(db_path, payload, query):
+    return admin_handlers.access_log(db_path, payload, query or {})
+
+
+def _v1_admin_access_insights(db_path, payload, query):
+    return admin_handlers.access_insights(db_path, payload, query or {})
 
 
 # ── /portal wrapper（门户页面）────────────────────────────────────────────
