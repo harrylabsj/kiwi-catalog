@@ -91,3 +91,67 @@ def usage_series(
             }
         )
     return series
+
+
+# ── usage_metrics 从 access_log 派生（Phase 3 Step B：对账/告警用）────────────
+
+
+# path → metric 映射（与写入端同一推导；agent 两路径、其余单路径）
+_PATH_METRIC: tuple[tuple[str, str], ...] = (
+    ("/v1/agents/search", METRIC_BUYER_AGENT_SEARCH),
+    ("/v1/agent-catalog/agents/search", METRIC_BUYER_AGENT_SEARCH),
+    ("/v1/listings/search", METRIC_BUYER_LISTING_SEARCH),
+    ("/v1/merchants/self", METRIC_MERCHANT_SELF_CHECK),
+    ("/v1/listings/publish", METRIC_LISTING_PUBLISH),
+)
+
+
+def usage_series_from_access_log(
+    conn: sqlite3.Connection, days: int = 14
+) -> list[dict[str, Any]]:
+    """从 access_log 派生每日计数——与 ``usage_series`` 同形状，**仅供对账/告警**。
+
+    path → metric 映射（见 ``_PATH_METRIC``），按 UTC 日分组计数、0 补齐连续日期。
+    非 ``usage_series`` 的默认数据源——**口径差异**（有意保留，作为旁路）：
+
+    1. **请求级 vs 事件级**：access_log 记录到达中间件的每个请求（含被限流/
+       404/405/413 拦截的），usage_metrics 仅在 handler 成功执行时 +1 → 派生值
+       可能**高于**事件计数；
+    2. **merchant_self_check**：access_log 记所有 ``/v1/merchants/self``（含带
+       merchant_id 的 admin 查询路径），usage_metrics 只计 token 身份路径 →
+       派生值**多算** admin 查询；
+    3. **保留期**：access_log 默认 90 天，超窗历史不可重建（usage_metrics 无上限）。
+    """
+    import datetime as _dt
+
+    days = max(1, min(int(days or 14), 90))
+    today = _dt.datetime.now(_dt.UTC).date()
+    start = today - _dt.timedelta(days=days - 1)
+    rows = conn.execute(
+        "select substr(occurred_at, 1, 10) as day, path from access_log"
+        " where occurred_at >= ?",
+        (start.isoformat(),),
+    ).fetchall()
+    by_day: dict[str, dict[str, int]] = {}
+    for row in rows:
+        metric = _metric_from_path(str(row["path"]))
+        if metric is None:
+            continue
+        day = str(row["day"])
+        bucket = by_day.setdefault(day, {})
+        bucket[metric] = bucket.get(metric, 0) + 1
+    series = []
+    for offset in range(days):
+        day = (start + _dt.timedelta(days=offset)).isoformat()
+        counts = {metric: by_day.get(day, {}).get(metric, 0) for metric in ALL_METRICS}
+        series.append({"day": day, "counts": counts, "total": sum(counts.values())})
+    return series
+
+
+def _metric_from_path(path: str) -> str | None:
+    """路径 → metric；非埋点路径 → None（/health、账户、admin 等不计入）。"""
+    path = str(path or "").split("?", 1)[0]
+    for candidate, metric in _PATH_METRIC:
+        if path == candidate:
+            return metric
+    return None

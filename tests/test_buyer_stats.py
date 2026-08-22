@@ -253,6 +253,81 @@ class BuyerStatsServiceTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_KEYWORD_SOURCE": ""}, clear=False):
             self.assertEqual(buyer_stats.keyword_source(), buyer_stats._KEYWORD_SOURCE_ACCESS_LOG)
 
+    def test_usage_derived_matches_table_double_write(self) -> None:
+        """Phase 3 Step B：access_log 派生每日计数与 usage_metrics 旧表一致（双写对账）。"""
+        from kiwi_catalog.services import access_log as access_log_service
+
+        db = _make_db()
+        # 模拟生产：各自独立连接 + 及时提交（避免跨连接持锁伪并发）
+        for path, n in [
+            ("/v1/agents/search", 3),
+            ("/v1/listings/search", 2),
+            ("/v1/merchants/self", 1),
+            ("/v1/listings/publish", 4),
+        ]:
+            for _ in range(n):
+                with open_connection(db) as c:
+                    usage_metrics.record_usage(
+                        c, usage_metrics._metric_from_path(path) or ""
+                    )
+                access_log_service.record_http_access(
+                    db,
+                    method="GET",
+                    path=path,
+                    query={},
+                    headers={},
+                    client_ip="203.0.113.7",
+                    status=200,
+                    latency_ms=1,
+                )
+        conn = open_connection(db)
+        table = usage_metrics.usage_series(conn, days=1)
+        derived = usage_metrics.usage_series_from_access_log(conn, days=1)
+        self.assertEqual(derived, table)
+        counts = derived[0]["counts"]
+        self.assertEqual(counts["buyer_agent_search"], 3)
+        self.assertEqual(counts["buyer_listing_search"], 2)
+        self.assertEqual(counts["merchant_self_check"], 1)
+        self.assertEqual(counts["listing_publish"], 4)
+        self.assertEqual(derived[0]["total"], 10)
+        conn.close()
+
+    def test_usage_derived_captures_reconcilable_differences(self) -> None:
+        """Step B 对账价值：派生能发现旧表埋点遗漏的请求（admin 查询路径 / 被限流请求）。"""
+        from kiwi_catalog.services import access_log as access_log_service
+
+        db = _make_db()
+        # 2 次 token 路径的 merchant_self_check → 双写
+        for _ in range(2):
+            with open_connection(db) as c:
+                usage_metrics.record_usage(c, "merchant_self_check")
+            access_log_service.record_http_access(
+                db, method="GET", path="/v1/merchants/self", query={},
+                headers={"authorization": "Bearer mkt-tok"},
+                client_ip="203.0.113.7", status=200, latency_ms=1,
+            )
+        # 1 次 admin 查询路径（带 merchant_id）→ 只进 access_log，usage 不计
+        access_log_service.record_http_access(
+            db, method="GET", path="/v1/merchants/self", query={"merchant_id": "m1"},
+            headers={"authorization": "Bearer admin-tok"},
+            client_ip="203.0.113.7", status=200, latency_ms=1,
+        )
+        # 2 次被限流的搜索请求（429）→ 只进 access_log，usage 不计
+        for _ in range(2):
+            access_log_service.record_http_access(
+                db, method="GET", path="/v1/agents/search", query={"q": "x"},
+                headers={}, client_ip="203.0.113.7", status=429, latency_ms=1,
+            )
+        conn = open_connection(db)
+        table = usage_metrics.usage_series(conn, days=1)[0]["counts"]
+        derived = usage_metrics.usage_series_from_access_log(conn, days=1)[0]["counts"]
+        # 派生多算 admin 路径（2→3）与被限流请求（0→2）
+        self.assertEqual(table["merchant_self_check"], 2)
+        self.assertEqual(derived["merchant_self_check"], 3)
+        self.assertEqual(table["buyer_agent_search"], 0)
+        self.assertEqual(derived["buyer_agent_search"], 2)
+        conn.close()
+
 
 class BuyerStatsHandlersTest(unittest.TestCase):
     def test_v1_agents_search_records_distinct_buyer(self) -> None:
