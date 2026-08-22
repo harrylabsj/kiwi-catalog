@@ -208,6 +208,12 @@ zero_hit_keywords）默认改从 access_log 派生（`buyer_stats.top_keywords_f
 `_keyword_ranking` 分派；env `KIWI_CATALOG_KEYWORD_SOURCE=buyer_keyword_daily`
 回退旧聚合表。买搜索事件仍保留双写（旧表 service 继续，access_log 是新增原始层）。
 
+usage_metrics 派生对账（2026-08-22，Phase 3 Step B）：`usage_metrics.usage_series_from_access_log()`
+按 path → metric 映射从 access_log 派生每日计数（与 `usage_series` 同形状），
+**不作默认数据源**（口径差异：请求级 vs 事件级、merchant_self_check 多算 admin 查询
+路径、90 天保留上限），只作对账/告警——派生值可发现旧表埋点遗漏的请求
+（被限流 429 的搜索、admin 查询路径的商家自查）。
+
 关键词去重修复（2026-08-22）：运营报告两张关键词排行同一关键词出现多行——
 两处根因均已修复：(1) top_keywords 由按 (keyword, search_type) 分组改为按
 keyword 跨类型合并（agent_searches / listing_searches 分列两类计数，

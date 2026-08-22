@@ -84,9 +84,9 @@
 - `/v1/admin/buyer-stats` 的 `top_keywords`/`zero_hit_keywords` 经 `admin_reports._keyword_ranking` 分派数据源，默认 access_log 版，env `KIWI_CATALOG_KEYWORD_SOURCE=buyer_keyword_daily` 回退旧表。
 - 验证：双源对账一致（写路径归一化与派生归一化同一 `_normalize_keyword` 函数），测试 `test_keyword_derived_matches_table_double_write` 锁定。
 
-### Step B（可选，谨慎）：`usage_metrics` 增加 access_log 派生视图
-- `usage_series_from_access_log()`，按 §2.1 映射。
-- 不作为默认数据源（口径偏差存在），只作对账/告警用。
+### Step B（✅ 2026-08-22 已实现）：`usage_metrics` 增加 access_log 派生视图
+- `usage_series_from_access_log()`（usage_metrics.py）按 §2.1 映射，与 `usage_series` 同形状（0 填充连续日期）。
+- **不作为默认数据源**（口径偏差存在），只作对账/告警用——派生值可发现旧表埋点遗漏的请求（admin 查询路径的 merchant_self_check、被限流 429 的搜索请求），对账测试 `test_usage_derived_captures_reconcilable_differences` 锁定。
 
 ### Step C（不做）：`buyer_search_daily` / `buyer_search_events` 退役
 - **明确不建议退役**。前者是隐私设计的硬指标（口径不可替代），后者是唯一「买家看到什么」来源。
