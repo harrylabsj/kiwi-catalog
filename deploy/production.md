@@ -43,6 +43,8 @@ KIWI_CATALOG_EMAIL_VERIFICATION_MODE=smtp  # 生产必须 smtp；未配置会 fa
 # 可选：KIWI_CATALOG_DISCOVERY_SEARCH_RATE_LIMIT_PER_MINUTE=60（默认 60 次/分，公开发现目录检索）
 # 可选：KIWI_CATALOG_STATS_SALT=<强随机值>（每日去重买家统计的 HMAC salt；默认 dev 值，
 # 轮换会使存量 buyer_hash 失效——只影响历史去重口径，不丢事件数）
+# 可选：KIWI_CATALOG_ACCESS_LOG_RETENTION_DAYS=90（个体访问日志保留天数；默认 90，
+# 写路径每 N 条概率触发清理超期行）
 ```
 
 > 若线上已有 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 且 merchant 在用 HMAC token，

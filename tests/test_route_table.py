@@ -77,6 +77,8 @@ def test_route_table_covers_expected_route_groups() -> None:
         "/v1/accounts/me",
         "/v1/admin/dashboard",
         "/v1/admin/merchants/{merchant_id}/report",
+        "/v1/admin/access-log",
+        "/v1/admin/access-insights",
         "/portal",
         "/portal/apply",
         "/portal/account",

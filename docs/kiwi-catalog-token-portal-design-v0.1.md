@@ -210,6 +210,20 @@ keyword 跨类型合并（agent_searches / listing_searches 分列两类计数�
 零宽字符（U+200B/200C/200D/FEFF）删除，全角/半角与兼容字符不再落多行。
 门户表格改为「关键词 | 类型分布（找商家 N · 找商品 M）| …」一行一关键词。
 
+访问日志（2026-08-22）：schema v28 access_log——运营原则从「只记次数不记
+个体日志」修订为「记录个体访问日志用于运营质量与安全审计；最小必要仍适用
+——绝不记录凭据本体，身份一律派生，日志有保留期」。ASGI 中间件在双栈
+（fallback / FastAPI）各挂一处共用 `services/access_log.py`：记录每个请求
+的 method/path/surface（buyer_search / buyer_detail / merchant_write /
+account_portal / admin）/actor（buyer/merchant/admin/anonymous，身份原文
+SHA-256 截断 12 hex，绝不存 token 明文）/IP 前缀（IPv4 /24、IPv6 前 4 段，
+不存完整 IP）/user-agent/搜索 query 摘要（q + 筛选键值 JSON，凭据参数
+owner_token/token/key/password/code 一律剔除）/target_id（路径里的
+listing_id/catalog_agent_id/merchant_id）/status/result_count/latency_ms。
+`/health` 不记录；保留期 env `KIWI_CATALOG_ACCESS_LOG_RETENTION_DAYS`
+默认 90 天，写路径每 N 条概率触发清理。`GET /v1/admin/access-log?surface=
+&days=&limit=`（admin，days 上限 90、limit 上限 500）按时间倒序返回。
+
 部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
 catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
 env / 重启 / 验证 / 回滚）见 `deploy/production.md`。

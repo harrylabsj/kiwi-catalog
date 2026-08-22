@@ -15,8 +15,11 @@
 """运营埋点（dashboard 数据源）。
 
 usage_metrics 表：metric × UTC 日期（YYYY-MM-DD）每日计数，原子
-INSERT ON CONFLICT +1。埋点只记「发生了多少次」，不记调用方身份
-（隐私最小化：catalog 不存 buyer/merchant 的个体访问日志）。
+INSERT ON CONFLICT +1。埋点只记「发生了多少次」——个体访问日志由
+access_log 承担（v28，2026-08-22 原则修订：记录个体访问日志用于运营质量
+与安全审计；最小必要仍适用——绝不记录凭据本体、身份一律派生、日志有保留期）。
+历史说明：2026-08-22 之前按「不记调用方身份（隐私最小化：catalog 不存
+buyer/merchant 的个体访问日志）」运行。
 
 指标词表（dashboard 消费方以此为单一来源）：
 - ``buyer_agent_search``    /v1/agents/search（含 legacy 搜索）

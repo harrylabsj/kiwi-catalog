@@ -26,12 +26,14 @@ stacks continue to share the wrappers in ``api.route_table``.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
+from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.route_table import (
     _claim_catalog_agent,
     _get_catalog_agent,
@@ -45,6 +47,8 @@ from kiwi_catalog.api.route_table import (
     _reinstate_catalog_agent,
     _search_agent_catalog,
     _suspend_catalog_agent,
+    _v1_admin_access_insights,
+    _v1_admin_access_log,
     _v1_admin_buyer_stats,
     _v1_admin_dashboard,
     _v1_admin_merchant_report,
@@ -74,6 +78,7 @@ from kiwi_catalog.api.route_table import (
     resolve_route,
 )
 from kiwi_catalog.core.errors import PayloadTooLargeError, ValidationError
+from kiwi_catalog.services import access_log as access_log_service
 
 # ── FastAPI dual-stack (phase 3 follow-up) ─────────────────────────────────
 # FastAPI 可用时 create_catalog_app 返回 FastAPI app（13 条 catalog 路由，
@@ -126,77 +131,124 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         - 空 body 视为 {}（与 fallback ``json.loads(... or "{}")`` 一致）；
         - GET 200 响应带 etag，显式 If-None-Match 匹配 → 304（fallback §18）。
         """
-        # Match fallback routing order: unknown paths and disallowed methods
-        # must resolve to 404/405 before attempting to parse an untrusted body.
-        # Otherwise a malformed body can mask the route error on only one stack.
-        path_known, method_allowed = resolve_route(request.method, request.url.path)
-        if request.method in ("POST", "PUT", "PATCH") and path_known and method_allowed:
-            maximum = max_request_body_bytes()
-            content_length = request.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > maximum:
+        started = time.perf_counter()
+        final_status: int | None = None
+        final_result_count: int | None = None
+
+        def _record_access() -> None:
+            """访问日志（v28）：与 fallback 栈共用 record_http_access（失败不抛错）。
+
+            统一在 ``finally`` 触发——每个退出路径（含 413/400 早退、404/405、
+            304/200/500）都记录，与 fallback 栈 ``finally: _record_access_log()``
+            行为对齐（审查发现：早退分支此前不记录，双栈不对称）。GET 200 分支
+            在读取响应体后提取 result_count；其余响应不读 body（result_count 仅
+            搜索面有意义，而搜索是 GET 200）。
+            """
+            headers = {key.lower(): value for key, value in request.headers.items()}
+            query = {key: value for key, value in request.query_params.multi_items()}
+            # 与 fallback 栈同一 IP 语义：仅可信代理(默认回环)采信 XFF——
+            # 生产在 Caddy 同机反代后,直连对端恒为 127.0.0.1,不解析 XFF
+            # 会让 ip_prefix 全部退化为 127.0.0.0。
+            client = getattr(request, "client", None)
+            direct_peer = str(client.host or "") if client is not None else None
+            client_ip = resolve_client_ip(
+                request.headers.get("x-forwarded-for", ""), direct_peer
+            )
+            access_log_service.record_http_access(
+                db_path,
+                method=request.method,
+                path=request.url.path,
+                query=query,
+                headers=headers,
+                client_ip=client_ip,
+                status=final_status if final_status is not None else 500,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                result_count=final_result_count,
+            )
+
+        try:
+            # Match fallback routing order: unknown paths and disallowed methods
+            # must resolve to 404/405 before attempting to parse an untrusted body.
+            # Otherwise a malformed body can mask the route error on only one stack.
+            path_known, method_allowed = resolve_route(request.method, request.url.path)
+            if request.method in ("POST", "PUT", "PATCH") and path_known and method_allowed:
+                maximum = max_request_body_bytes()
+                content_length = request.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > maximum:
+                            final_status = 413
+                            return JSONResponse(
+                                {"ok": False, "error": "request body is too large"},
+                                status_code=413,
+                            )
+                    except ValueError:
+                        pass
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > maximum:
+                        final_status = 413
                         return JSONResponse(
                             {"ok": False, "error": "request body is too large"},
                             status_code=413,
                         )
-                except ValueError:
-                    pass
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in request.stream():
-                total += len(chunk)
-                if total > maximum:
+                    chunks.append(chunk)
+                body = b"".join(chunks) or b"{}"
+                try:
+                    parsed = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    final_status = 400
                     return JSONResponse(
-                        {"ok": False, "error": "request body is too large"},
-                        status_code=413,
+                        {"ok": False, "error": "invalid JSON request body"}, status_code=400
                     )
-                chunks.append(chunk)
-            body = b"".join(chunks) or b"{}"
-            try:
-                parsed = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return JSONResponse(
-                    {"ok": False, "error": "invalid JSON request body"}, status_code=400
+                if not isinstance(parsed, dict):
+                    final_status = 400
+                    return JSONResponse(
+                        {"ok": False, "error": "JSON request body must be an object"},
+                        status_code=400,
+                    )
+                try:
+                    validate_payload(parsed)
+                except PayloadTooLargeError as exc:
+                    final_status = 413
+                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
+                except ValidationError as exc:
+                    final_status = 400
+                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+                # stream() 已消费——把缓存 body 塞回 receive，让 FastAPI 依赖正常解析
+                async def _receive() -> dict[str, Any]:
+                    return {"type": "http.request", "body": body, "more_body": False}
+
+                request._receive = _receive  # type: ignore[attr-defined]
+                request._stream_consumed = False  # type: ignore[attr-defined]
+
+            response = await call_next(request)
+            final_status = response.status_code
+
+            # 安全响应头（KC-SEC-01 硬化，与 fallback _send_json 对齐）
+            response.headers["x-content-type-options"] = "nosniff"
+            response.headers["referrer-policy"] = "no-referrer"
+            response.headers["content-security-policy"] = "frame-ancestors 'none'"
+
+            # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
+            if request.method == "GET" and response.status_code == 200:
+                body = b"".join([chunk async for chunk in response.body_iterator])
+                etag = compute_etag(body)
+                headers = dict(response.headers)
+                headers["etag"] = etag
+                if_none_match = request.headers.get("if-none-match", "")
+                if if_none_match and etag_matches(if_none_match, etag):
+                    final_status = 304
+                    return Response(status_code=304, headers=headers)
+                final_result_count = access_log_service.result_count_from_body(body)
+                return Response(
+                    content=body, status_code=200, headers=headers, media_type=response.media_type
                 )
-            if not isinstance(parsed, dict):
-                return JSONResponse(
-                    {"ok": False, "error": "JSON request body must be an object"},
-                    status_code=400,
-                )
-            try:
-                validate_payload(parsed)
-            except PayloadTooLargeError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
-            except ValidationError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-            # stream() 已消费——把缓存 body 塞回 receive，让 FastAPI 依赖正常解析
-            async def _receive() -> dict[str, Any]:
-                return {"type": "http.request", "body": body, "more_body": False}
-
-            request._receive = _receive  # type: ignore[attr-defined]
-            request._stream_consumed = False  # type: ignore[attr-defined]
-
-        response = await call_next(request)
-
-        # 安全响应头（KC-SEC-01 硬化，与 fallback _send_json 对齐）
-        response.headers["x-content-type-options"] = "nosniff"
-        response.headers["referrer-policy"] = "no-referrer"
-        response.headers["content-security-policy"] = "frame-ancestors 'none'"
-
-        # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
-        if request.method == "GET" and response.status_code == 200:
-            body = b"".join([chunk async for chunk in response.body_iterator])
-            etag = compute_etag(body)
-            headers = dict(response.headers)
-            headers["etag"] = etag
-            if_none_match = request.headers.get("if-none-match", "")
-            if if_none_match and etag_matches(if_none_match, etag):
-                return Response(status_code=304, headers=headers)
-            return Response(
-                content=body, status_code=200, headers=headers, media_type=response.media_type
-            )
-        return response
+            return response
+        finally:
+            _record_access()
 
     def _query_params_from_request(request: _FastAPIRequest) -> dict[str, str]:
         """Mirror fallback parse_qs(keep_blank_values=True) + last-value-wins.
@@ -651,6 +703,22 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/admin/buyer-stats")
     def v1_admin_buyer_stats(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_admin_buyer_stats(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
+    @app.get("/v1/admin/access-log")
+    def v1_admin_access_log(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_access_log(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
+    @app.get("/v1/admin/access-insights")
+    def v1_admin_access_insights(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_access_insights(
             db_path,
             api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
             _query_params_from_request(request),

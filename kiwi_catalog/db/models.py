@@ -465,6 +465,44 @@ create table if not exists buyer_keyword_daily (
         primary key (day, search_type, keyword)
     )
     """,
+    # v28 — 个体访问日志（运营质量 + 安全审计数据源）。运营原则修订
+    #（2026-08-22）：从「只记次数不记个体日志」改为「记录个体访问日志用于
+    # 运营质量与安全审计」——最小必要仍适用：绝不记录凭据本体、身份一律派生
+    #（actor_key = SHA-256 截断 12 hex）、IP 只存截断前缀（IPv4 /24、IPv6
+    # 前 4 段）、日志有保留期（env KIWI_CATALOG_ACCESS_LOG_RETENTION_DAYS
+    # 默认 90 天，写路径每 N 条概率触发清理）。字段提取在
+    # services/access_log.py；DDL 与迁移链 migration_028 逐字一致
+    #（test_shadow_tables 守护）。
+    """
+create table if not exists access_log (
+        id integer primary key autoincrement,
+        occurred_at text not null,
+        method text not null,
+        path text not null,
+        surface text not null,
+        actor_kind text not null,
+        actor_key text not null,
+        ip_prefix text not null,
+        user_agent text not null,
+        query_summary text not null,
+        target_id text not null,
+        status integer,
+        result_count integer,
+        latency_ms integer
+    )
+    """,
+    """
+create index if not exists idx_access_log_occurred
+        on access_log(occurred_at)
+    """,
+    """
+create index if not exists idx_access_log_surface_occurred
+        on access_log(surface, occurred_at)
+    """,
+    """
+create index if not exists idx_access_log_target
+        on access_log(target_id)
+    """,
 ]
 
 
