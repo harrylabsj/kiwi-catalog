@@ -127,11 +127,30 @@ def buyer_stats_summary(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> d
         "days": days,
         "series": series,
         "today": series[-1],
-        "top_keywords": buyer_stats.top_keywords(conn, days=days, limit=20),
-        "zero_hit_keywords": buyer_stats.top_keywords(
+        "top_keywords": _keyword_ranking(conn, days=days, limit=20),
+        "zero_hit_keywords": _keyword_ranking(
             conn, days=days, limit=20, sort="zero_results"
         ),
     }
+
+
+def _keyword_ranking(
+    conn: sqlite3.Connection,
+    days: int = DEFAULT_DAYS,
+    limit: int = 20,
+    sort: str = "searches",
+) -> list[dict[str, Any]]:
+    """关键词排行数据源分派（Phase 3 Step A）。
+
+    默认从 access_log 派生（``top_keywords_from_access_log``——单一事实源）；
+    env ``KIWI_CATALOG_KEYWORD_SOURCE=buyer_keyword_daily`` 回退旧聚合表
+    （``top_keywords``）。
+    """
+    if buyer_stats.keyword_source() == buyer_stats._KEYWORD_SOURCE_ACCESS_LOG:
+        return buyer_stats.top_keywords_from_access_log(
+            conn, days=days, limit=limit, sort=sort
+        )
+    return buyer_stats.top_keywords(conn, days=days, limit=limit, sort=sort)
 
 
 def access_insights(conn: sqlite3.Connection, days: int = DEFAULT_DAYS) -> dict[str, Any]:

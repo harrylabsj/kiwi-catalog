@@ -201,6 +201,13 @@ admin token 输入解锁全页；旧 URL 开启时 302 跳转到 /portal/dashboa
 （fallback 栈与 FastAPI 栈均支持响应 ``__redirect__`` 元键），关闭时仍真实
 404。/v1/admin/buyer-stats API 端点保留不变。
 
+关键词数据源统一（2026-08-22，Phase 3 Step A）：关键词排行（top_keywords /
+zero_hit_keywords）默认改从 access_log 派生（`buyer_stats.top_keywords_from_access_log`
+——逐行复刻 `_normalize_keyword` 归一化 + path 派生 search_type + result_count 判
+未命中，与旧聚合表逐字段对账一致），`/v1/admin/buyer-stats` 端点经
+`_keyword_ranking` 分派；env `KIWI_CATALOG_KEYWORD_SOURCE=buyer_keyword_daily`
+回退旧聚合表。买搜索事件仍保留双写（旧表 service 继续，access_log 是新增原始层）。
+
 关键词去重修复（2026-08-22）：运营报告两张关键词排行同一关键词出现多行——
 两处根因均已修复：(1) top_keywords 由按 (keyword, search_type) 分组改为按
 keyword 跨类型合并（agent_searches / listing_searches 分列两类计数，

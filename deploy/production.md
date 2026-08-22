@@ -45,6 +45,8 @@ KIWI_CATALOG_EMAIL_VERIFICATION_MODE=smtp  # 生产必须 smtp；未配置会 fa
 # 轮换会使存量 buyer_hash 失效——只影响历史去重口径，不丢事件数）
 # 可选：KIWI_CATALOG_ACCESS_LOG_RETENTION_DAYS=90（个体访问日志保留天数；默认 90，
 # 写路径每 N 条概率触发清理超期行）
+# 可选：KIWI_CATALOG_KEYWORD_SOURCE=access_log（关键词排行数据源；默认 access_log
+# 派生，Phase 3 单一事实源；回退旧聚合表设 buyer_keyword_daily）
 ```
 
 > 若线上已有 `KIWI_CATALOG_OWNER_TOKEN_SECRET` 且 merchant 在用 HMAC token，
