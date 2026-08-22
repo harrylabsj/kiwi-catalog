@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import sqlite3
 import unicodedata
@@ -68,6 +69,20 @@ _HASH_HEX_LEN = 16
 SEARCH_TYPES = ("agent", "listing")
 
 _KEYWORD_CAP = 80
+
+
+# 关键词排行数据源（Phase 3 Step A）：默认从 access_log 派生（单一事实源），
+# env KIWI_CATALOG_KEYWORD_SOURCE=buyer_keyword_daily 回退旧聚合表。
+_KEYWORD_SOURCE_ENV = "KIWI_CATALOG_KEYWORD_SOURCE"
+_KEYWORD_SOURCE_ACCESS_LOG = "access_log"
+_KEYWORD_SOURCE_TABLE = "buyer_keyword_daily"
+
+# 搜索路径 → search_type（与写入端同一推导：agent 两路径、listing 一路径）
+_SEARCH_PATH_TYPE = (
+    ("/v1/agents/search", "agent"),
+    ("/v1/agent-catalog/agents/search", "agent"),
+    ("/v1/listings/search", "listing"),
+)
 
 # 零宽字符（zero-width space / non-joiner / joiner / BOM）——归一化时删除
 _ZERO_WIDTH_STRIP = {ord(c): None for c in ("\u200b", "\u200c", "\u200d", "\ufeff")}
@@ -255,3 +270,94 @@ def top_keywords(
         }
         for row in rows
     ]
+
+
+# ── 关键词排行：从 access_log 派生（Phase 3 Step A，单一事实源）──────────────
+
+
+def keyword_source() -> str:
+    """关键词排行数据源：默认 ``access_log``（派生），env 回退 ``buyer_keyword_daily``。"""
+    return str(os.environ.get(_KEYWORD_SOURCE_ENV) or "").strip() or _KEYWORD_SOURCE_ACCESS_LOG
+
+
+def _search_type_from_path(path: object) -> str | None:
+    """搜索路径 → search_type（agent/listing）；非搜索路径 → None。"""
+    path = str(path or "").split("?", 1)[0]
+    for candidate, search_type in _SEARCH_PATH_TYPE:
+        if path == candidate:
+            return search_type
+    return None
+
+
+def top_keywords_from_access_log(
+    conn: sqlite3.Connection,
+    days: int = 14,
+    limit: int = 20,
+    sort: str = "searches",
+) -> list[dict[str, Any]]:
+    """从 access_log 派生关键词排行——与 ``top_keywords`` 同形状。
+
+    逐行读取 access_log 的 buyer_search 面：解析 query_summary 的 ``q``，
+    重放 ``_normalize_keyword``（与写入端同一归一化 → 同口径），path 推导
+    search_type，按 (day, search_type, keyword) 聚合：searches +1、
+    result_count==0 时 zero_results +1；再跨 search_type 合并排行。
+
+    归一化后为空（filter-only 搜索 / 空 q）的行跳过——与旧表
+    ``record_buyer_keyword`` 的空关键词跳过语义一致。
+    """
+    import datetime as _dt
+
+    days = max(1, min(int(days or 14), 90))
+    limit = max(1, min(int(limit or 20), 100))
+    start = _dt.datetime.now(_dt.UTC).date() - _dt.timedelta(days=days - 1)
+    rows = conn.execute(
+        "select substr(occurred_at, 1, 10) as day, path, query_summary, result_count"
+        " from access_log"
+        " where surface = 'buyer_search' and occurred_at >= ?",
+        (start.isoformat(),),
+    ).fetchall()
+    # (keyword, search_type) → [searches, zero_results]
+    agg: dict[tuple[str, str], list[int]] = {}
+    for row in rows:
+        search_type = _search_type_from_path(row["path"])
+        if search_type is None:
+            continue
+        try:
+            summary = json.loads(str(row["query_summary"] or "") or "{}")
+        except (TypeError, ValueError):
+            continue
+        keyword = _normalize_keyword(summary.get("q") if isinstance(summary, dict) else "")
+        if not keyword:
+            continue  # filter-only / 空 q → 跳过（与旧表语义一致）
+        zero_hit = 1 if int(row["result_count"] or 0) == 0 else 0
+        bucket = agg.setdefault((keyword, search_type), [0, 0])
+        bucket[0] += 1
+        bucket[1] += zero_hit
+    # 跨 search_type 合并（与 top_keywords 的查询期合并一致）
+    merged: dict[str, dict[str, Any]] = {}
+    for (keyword, search_type), (searches, zero_results) in agg.items():
+        item = merged.setdefault(
+            keyword,
+            {
+                "keyword": keyword,
+                "searches": 0,
+                "zero_results": 0,
+                "agent_searches": 0,
+                "listing_searches": 0,
+            },
+        )
+        item["searches"] += searches
+        item["zero_results"] += zero_results
+        item[f"{search_type}_searches"] += searches
+    # 与 SQL 版 top_keywords 排序语义一致：{order} DESC, searches DESC,
+    # keyword ASC——主键与 searches 取负模拟降序，keyword 原序（升序）。
+    order_key = sort if sort == "zero_results" else "searches"
+    ranked = sorted(
+        merged.values(),
+        key=lambda item: (
+            -item[order_key],
+            -item["searches"],
+            item["keyword"],
+        ),
+    )
+    return ranked[:limit]

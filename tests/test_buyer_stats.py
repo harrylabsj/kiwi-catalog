@@ -171,6 +171,88 @@ class BuyerStatsServiceTest(unittest.TestCase):
         self.assertEqual(today["identified_events"][LISTING], 1)
         conn.close()
 
+    def test_keyword_derived_matches_table_double_write(self) -> None:
+        """Phase 3 Step A：access_log 派生关键词排行与旧表逐字段一致（双写对账）。"""
+        from kiwi_catalog.services import access_log as access_log_service
+
+        db = _make_db()
+        for path, q, rc in [
+            ("/v1/agents/search", "match tea", 3),   # 命中
+            ("/v1/agents/search", "match tea", 0),   # 未命中
+            ("/v1/agents/search", "MATCH TEA", 5),   # 大小写折叠 → 合并
+            ("/v1/listings/search", "green tea", 5),  # listing 命中
+            ("/v1/listings/search", "", 0),           # filter-only → 跳过
+        ]:
+            access_log_service.record_http_access(
+                db,
+                method="GET",
+                path=path,
+                query={"q": q},
+                headers={"user-agent": "test"},
+                client_ip="203.0.113.7",
+                status=200,
+                latency_ms=1,
+                result_count=rc,
+            )
+        conn = open_connection(db)
+        # 旧表同步写（模拟真实双写：各自连接）
+        with open_connection(db) as c:
+            buyer_stats.record_buyer_keyword(c, "agent", "match tea", 3)
+            buyer_stats.record_buyer_keyword(c, "agent", "match tea", 0)
+            buyer_stats.record_buyer_keyword(c, "agent", "MATCH TEA", 5)
+            buyer_stats.record_buyer_keyword(c, "listing", "green tea", 5)
+            buyer_stats.record_buyer_keyword(c, "listing", "", 0)  # 空 → 跳过
+        derived = buyer_stats.top_keywords_from_access_log(conn, days=14)
+        table = buyer_stats.top_keywords(conn, days=14)
+        self.assertEqual(derived, table)
+        # match tea 合并 3 次（2 命中 + 1 未命中），green tea 1 次命中
+        by_kw = {r["keyword"]: r for r in derived}
+        self.assertEqual(by_kw["match tea"]["searches"], 3)
+        self.assertEqual(by_kw["match tea"]["zero_results"], 1)
+        self.assertEqual(by_kw["match tea"]["agent_searches"], 3)
+        self.assertEqual(by_kw["green tea"]["searches"], 1)
+        self.assertEqual(by_kw["green tea"]["zero_results"], 0)
+        self.assertEqual(by_kw["green tea"]["listing_searches"], 1)
+        conn.close()
+
+    def test_keyword_derived_skips_non_search_and_health(self) -> None:
+        """派生只取 buyer_search 面：非搜索请求（merchant_write）与 /health 不进排行。"""
+        from kiwi_catalog.services import access_log as access_log_service
+
+        db = _make_db()
+        for path, q, rc in [
+            ("/v1/agents/search", "only real", 2),
+            ("/v1/merchants/self", "not a search", 1),
+            ("/health", "no", 1),
+        ]:
+            access_log_service.record_http_access(
+                db,
+                method="GET",
+                path=path,
+                query={"q": q},
+                headers={},
+                client_ip="203.0.113.7",
+                status=200,
+                latency_ms=1,
+                result_count=rc,
+            )
+        conn = open_connection(db)
+        derived = buyer_stats.top_keywords_from_access_log(conn, days=14)
+        self.assertEqual([r["keyword"] for r in derived], ["only real"])
+        conn.close()
+
+    def test_keyword_source_env_switch(self) -> None:
+        """env KIWI_CATALOG_KEYWORD_SOURCE 控制数据源：默认 access_log，可回退旧表。"""
+        self.assertEqual(buyer_stats.keyword_source(), buyer_stats._KEYWORD_SOURCE_ACCESS_LOG)
+        with mock.patch.dict(
+            os.environ,
+            {"KIWI_CATALOG_KEYWORD_SOURCE": "buyer_keyword_daily"},
+            clear=False,
+        ):
+            self.assertEqual(buyer_stats.keyword_source(), buyer_stats._KEYWORD_SOURCE_TABLE)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_KEYWORD_SOURCE": ""}, clear=False):
+            self.assertEqual(buyer_stats.keyword_source(), buyer_stats._KEYWORD_SOURCE_ACCESS_LOG)
+
 
 class BuyerStatsHandlersTest(unittest.TestCase):
     def test_v1_agents_search_records_distinct_buyer(self) -> None:
@@ -631,7 +713,11 @@ class BuyerKeywordHandlersTest(unittest.TestCase):
 class BuyerKeywordAdminTest(unittest.TestCase):
     def setUp(self) -> None:
         os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = ADMIN_TOKEN
+        # Phase 3 Step A：本类测旧聚合表数据源（回退开关）；access_log 派生的
+        # 端点形状由 test_keyword_derived_matches_table_double_write 覆盖。
+        os.environ["KIWI_CATALOG_KEYWORD_SOURCE"] = buyer_stats._KEYWORD_SOURCE_TABLE
         self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
+        self.addCleanup(os.environ.pop, "KIWI_CATALOG_KEYWORD_SOURCE", None)
 
     def test_response_includes_keyword_rankings(self) -> None:
         db = _make_db()
