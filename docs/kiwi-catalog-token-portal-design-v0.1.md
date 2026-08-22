@@ -224,6 +224,13 @@ listing_id/catalog_agent_id/merchant_id）/status/result_count/latency_ms。
 默认 90 天，写路径每 N 条概率触发清理。`GET /v1/admin/access-log?surface=
 &days=&limit=`（admin，days 上限 90、limit 上限 500）按时间倒序返回。
 
+访问洞察（2026-08-22，Phase 2 收尾）：`GET /v1/admin/access-insights?days=
+`（admin）聚合 access_log 三个查询面——搜→看漏斗（每日 buyer_search /
+buyer_detail 事件数 + 转化率）、详情热度榜（被查看最多商家/商品 Top 10，
+带身份去重查看者）、登录失败信号（今日失败数 + IP 前缀 Top，防爆破监测）。
+`/portal/dashboard`（env 开启后）并入「访问洞察」区块，与买家搜索统计并列，
+同一 admin token 解锁；access-insights 拉取失败不阻断 dashboard 主内容。
+
 部署（2026-08-08 现状）：`catalog.kiwi.harrylabsj.com` 已指向阿里云香港节点的
 catalog（Caddy 反代 TLS → 127.0.0.1:8600）。生产部署与升级步骤（代码同步 /
 env / 重启 / 验证 / 回滚）见 `deploy/production.md`。

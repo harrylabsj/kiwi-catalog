@@ -414,6 +414,16 @@ class BuyerStatsPortalTest(unittest.TestCase):
             self.assertIn("类型分布", html)
             self.assertIn("找商家", html)
             self.assertIn("找商品", html)
+            # 访问洞察区块（access_log v28：漏斗/热度榜/登录失败）并入 dashboard
+            self.assertIn("访问洞察", html)
+            self.assertIn("搜索→查看漏斗", html)
+            self.assertIn("funnel_kpis", html)
+            self.assertIn("funnel_usage", html)
+            self.assertIn("top_viewed", html)
+            self.assertIn("login_failures", html)
+            self.assertIn("renderAccessInsights", html)
+            self.assertIn("/v1/admin/access-insights?days=14", html)
+            self.assertIn("被查看最多的商家", html)
             # 同一 token 输入解锁全页（buyer-stats 不再有独立 token 表单）
             self.assertEqual(html.count('id="admin_token"'), 1)
 

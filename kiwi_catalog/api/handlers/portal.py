@@ -594,6 +594,17 @@ def portal_dashboard() -> dict[str, Any]:
     <div class="section-title">未命中关键词（供需缺口）</div>
     <p class="small muted">买家搜了但没有任何结果的关键词——运营招商据此补供给。</p>
     <div id="zero_hit_keywords"></div>
+    <div class="section-title">访问洞察（搜索→查看漏斗）</div>
+    <p class="small muted">个体访问日志（access_log）运营视图——搜→看转化、详情热度与登录失败信号。</p>
+    <div class="kpis" id="funnel_kpis"></div>
+    <div class="section-title">每日搜索 / 详情查看（最近 14 天）</div>
+    <div id="funnel_usage"></div>
+    <div class="legend" id="funnel_legend"></div>
+    <div class="section-title">被查看最多的商家 / 商品</div>
+    <div id="top_viewed"></div>
+    <div class="section-title">登录失败信号</div>
+    <p class="small muted">登录失败数（今日）与失败来源 IP 前缀 Top——防爆破监测（仅存 /24 前缀）。</p>
+    <div id="login_failures"></div>
   </div>
   <div class="card form-card" id="report_card" style="display:none">
     <h3 id="report_title">商家报告</h3>
@@ -733,6 +744,71 @@ function renderBuyerStats(r) {
     '暂无未命中关键词');
 }
 
+// ── 访问洞察（access_log v28 个体访问日志；/v1/admin/access-insights）──────
+function renderFunnelKpis(f) {
+  const conv = f.conversion == null ? '—' : (f.conversion * 100).toFixed(1) + '%';
+  const kpis = [
+    ['搜索总数', f.total_searches],
+    ['详情查看总数', f.total_detail_views],
+    ['搜→看转化率', conv],
+  ];
+  document.getElementById('funnel_kpis').innerHTML = kpis.map(([lbl, n]) =>
+    '<div class="kpi"><div class="num">' + escHtml(n) + '</div><div class="lbl">' + escHtml(lbl) + '</div></div>'
+  ).join('');
+}
+
+function renderFunnelChart(daily) {
+  const max = Math.max(1, ...daily.map(d => Math.max(d.searches, d.detail_views)));
+  document.getElementById('funnel_usage').innerHTML =
+    '<div class="bars2">' + daily.map(d =>
+      '<div class="bar" title="' + escHtml(d.day) + ' 搜索 ' + escHtml(d.searches)
+        + ' / 详情 ' + escHtml(d.detail_views) + '"><div class="pair">'
+        + '<div class="fill" style="background:#2e7d32;height:' + Math.max(2, Math.round(d.searches / max * 100)) + '%"></div>'
+        + '<div class="fill" style="background:#ef6c00;height:' + Math.max(2, Math.round(d.detail_views / max * 100)) + '%"></div>'
+        + '</div><div class="d">' + escHtml(d.day.slice(5)) + '</div></div>'
+    ).join('') + '</div>';
+  document.getElementById('funnel_legend').innerHTML =
+    '<span><span class="sw" style="background:#2e7d32"></span>搜索</span>'
+    + '<span><span class="sw" style="background:#ef6c00"></span>详情查看</span>';
+}
+
+function renderTopViewed(agents, listings) {
+  function table(rows, title) {
+    if (!rows.length) return '<p class="small muted">暂无' + title + '</p>';
+    return '<table><tr><th>' + title + '</th><th>查看次数</th><th>带身份查看者</th></tr>'
+      + rows.map(r =>
+        '<tr><td>' + escHtml(r.name || r.target_id) + '</td><td>' + escHtml(r.views)
+        + '</td><td>' + escHtml(r.viewers) + '</td></tr>'
+      ).join('') + '</table>';
+  }
+  document.getElementById('top_viewed').innerHTML =
+    table(agents, '被查看最多的商家')
+    + '<p style="height:8px"></p>'
+    + table(listings, '被查看最多的商品');
+}
+
+function renderLoginFailures(lf) {
+  const el = document.getElementById('login_failures');
+  let html = '<div class="kpis"><div class="kpi"><div class="num">' + escHtml(lf.today)
+    + '</div><div class="lbl">今日登录失败</div></div></div>';
+  if (!lf.by_ip_prefix || !lf.by_ip_prefix.length) {
+    html += '<p class="small muted">窗口内无登录失败记录</p>';
+  } else {
+    html += '<table><tr><th>IP 前缀</th><th>失败次数</th></tr>'
+      + lf.by_ip_prefix.map(r =>
+        '<tr><td class="mono">' + escHtml(r.ip_prefix) + '</td><td>' + escHtml(r.failures) + '</td></tr>'
+      ).join('') + '</table>';
+  }
+  el.innerHTML = html;
+}
+
+function renderAccessInsights(r) {
+  renderFunnelKpis(r.funnel);
+  renderFunnelChart(r.funnel.daily || []);
+  renderTopViewed(r.top_viewed_agents || [], r.top_viewed_listings || []);
+  renderLoginFailures(r.login_failures || { today: 0, by_ip_prefix: [] });
+}
+
 function renderApps(token, apps) {
   const el = document.getElementById('apps');
   if (!apps.length) { el.innerHTML = '<p class="small muted">没有待审申请</p>'; return; }
@@ -797,6 +873,10 @@ function loadDashboard(token) {
     // 买家搜索统计（去重买家 + 关键词排行）；失败不阻断 dashboard 主内容
     adminApi('/v1/admin/buyer-stats?days=14', token).then(br => {
       if (br.ok) { renderBuyerStats(br); }
+    });
+    // 访问洞察（access_log 漏斗/热度榜/登录失败）；失败不阻断 dashboard 主内容
+    adminApi('/v1/admin/access-insights?days=14', token).then(ir => {
+      if (ir.ok) { renderAccessInsights(ir); }
     });
   });
 }
