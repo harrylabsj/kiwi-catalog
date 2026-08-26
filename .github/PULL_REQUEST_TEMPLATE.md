@@ -32,5 +32,5 @@
 
 ## Checklist
 
-- [ ] My change follows the conventions in `CLAUDE.md`.
+- [ ] My change follows the conventions in `CONTRIBUTING.md`.
 - [ ] I have not changed dependency versions or public API outside the intended scope.
