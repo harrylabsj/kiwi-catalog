@@ -112,5 +112,3 @@ owner token 双路径（`api/auth.py`）：
 - `kiwi merchant publish`（kiwi 仓）优先使用随机 token
   （`KIWI_MERCHANT_TOKEN` 直传），缺省回退 HMAC 派生（register.ts
   与 `auth.py:owner_token` 逐字节一致）；
-- 设计稿 `docs/kiwi-catalog-token-portal-design-v0.1.md` 为 Draft——
-  与本文不一致处以本文（当前实现）为准。
