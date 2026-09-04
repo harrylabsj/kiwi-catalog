@@ -223,8 +223,27 @@ class AgentCardParser:
         security = card.get("security")
         if security is None:
             return
+        if isinstance(security, list):
+            # A2A Agent Card v1.0: security 是引用 securitySchemes 的数组，
+            # 每项含 "scheme" 名称；legacy 卡的 dict 形态走下方旧分支。
+            schemes = card.get("securitySchemes")
+            if schemes is not None and not isinstance(schemes, dict):
+                raise ProfileValidationError("agent_card.securitySchemes: expected a JSON object")
+            for i, item in enumerate(security):
+                label = f"agent_card.security[{i}]"
+                if not isinstance(item, dict):
+                    raise ProfileValidationError(f"{label}: expected a JSON object")
+                scheme = require_str(item, "scheme", label)
+                if scheme not in ("none", "anonymous") and schemes is not None and scheme not in schemes:
+                    raise ProfileValidationError(
+                        f"{label}.scheme: unknown scheme {scheme!r} "
+                        "(not present in agent_card.securitySchemes)"
+                    )
+            return
         if not isinstance(security, dict):
-            raise ProfileValidationError("agent_card.security: expected a JSON object")
+            raise ProfileValidationError(
+                "agent_card.security: expected a JSON array (A2A v1.0) or object"
+            )
         authn = security.get("authentication")
         if authn is not None:
             if not isinstance(authn, dict):
