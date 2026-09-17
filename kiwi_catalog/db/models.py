@@ -598,6 +598,62 @@ create table if not exists buyer_follows (
 create index if not exists idx_buyer_follows_merchant_status
         on buyer_follows(merchant_id, status)
     """,
+    # v31 — 商家连接器（「Kiwi 商家运营」）的一次性身份授权（kiwi 仓
+    # docs/merchant-buddy/generic-merchant-connector-release-plan.md §3.1）。
+    # 商家连接器入口在服务端创建
+    # 授权请求（connector token 鉴权 + return_url 白名单），商家在门户登录/注册
+    # 并显式确认后签发一次性 code，入口以 connector token 兑换
+    # {merchant_id, merchant_name}——目录密码永不交给入口，merchant_id 只能来自
+    # 本表（由服务端会话确认并落库），不接受客户端自述值。单次消费由 status
+    # 终态 consumed 表达；过期按 expires_at 判定（惰性清理，不落 expired 状态）。
+    # DDL 与迁移链 migration_031 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists connector_identity_requests (
+        request_id text primary key,
+        client_label text not null default '',
+        return_url text not null,
+        status text not null default 'pending'
+            check(status in ('pending','approved','denied','consumed')),
+        account_id integer,
+        merchant_id text not null default '',
+        merchant_name text not null default '',
+        code_digest text not null default '',
+        created_at text not null,
+        expires_at text not null,
+        decided_at text not null default '',
+        consumed_at text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_connector_identity_requests_status_expires
+        on connector_identity_requests(status, expires_at)
+    """,
+    """
+create index if not exists idx_connector_identity_requests_code
+        on connector_identity_requests(code_digest)
+    """,
+    # v32 — 商家连接器凭据（入口代表商家调目录 API 的作用域令牌）。商家在门户
+    # 确认连接后由 exchange 一次性签发（明文只返回一次，库中只存 sha256），
+    # 绑定 account_id + merchant_id + scope，可撤销、有过期。merchant_id 仍只
+    # 来自服务端确认结果——凭据只能证明「已确认过的那个商家」，不能被客户端
+    # 自述值改写。DDL 与迁移链 migration_032 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists connector_merchant_tokens (
+        token_hash text primary key,
+        account_id integer not null,
+        merchant_id text not null,
+        scope text not null default '',
+        request_id text not null default '',
+        created_at text not null,
+        expires_at text not null,
+        revoked_at text not null default '',
+        last_used_at text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_connector_merchant_tokens_merchant
+        on connector_merchant_tokens(merchant_id, expires_at)
+    """,
 ]
 
 

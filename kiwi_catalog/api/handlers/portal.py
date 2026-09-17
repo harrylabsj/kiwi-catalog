@@ -926,6 +926,13 @@ function postJson(url, body) {
     .then(r => r.json());
 }
 function go(path) { window.location.href = path; }
+function nextTarget(fallback) {
+  // 登录/注册后的站内回跳（如 /portal/connect 的连接流程）。只接受站内相对
+  // 路径：'//evil.example' 这类协议相对 URL 会被拒绝，避免开放重定向。
+  const next = new URLSearchParams(window.location.search).get('next') || '';
+  if (next.startsWith('/') && !next.startsWith('//')) { return next; }
+  return fallback || '/portal/account';
+}
 """
 
 
@@ -1025,8 +1032,8 @@ document.getElementById('verify').addEventListener('click', () => {
   }).then(r => {
     if (r.ok) {
       out.className = 'ok';
-      out.textContent = '邮箱已验证，正在进入「我的」…';
-      setTimeout(() => go('/portal/account'), 800);
+      out.textContent = '邮箱已验证，正在继续…';
+      setTimeout(() => go(nextTarget('/portal/account')), 800);
     } else {
       out.className = 'err';
       out.textContent = r.error || '验证失败';
@@ -1075,12 +1082,15 @@ def portal_login() -> dict[str, Any]:
       <button class="btn-form" id="verify">验证并登录</button>
       <button class="btn-mini" id="resend" style="margin-top:12px">重新发送验证码</button>
     </div>
-    <p class="small" style="margin-top:16px">还没有账号？<a href="/portal/register">注册商家账号</a>
+    <p class="small" style="margin-top:16px">还没有账号？<a id="to_register" href="/portal/register">注册商家账号</a>
       　忘记密码？<a href="/portal/reset-password">重置</a></p>
   </div>
 </div></section>
 <script>
 let logEmail = '';
+// 注册入口带上 next：连接流程中「没有账号」的商家注册+验证邮箱后回到原流程。
+document.getElementById('to_register').href =
+  '/portal/register?next=' + encodeURIComponent(nextTarget('/portal/account'));
 document.getElementById('submit').addEventListener('click', () => {
   const btn = document.getElementById('submit');
   const out = document.getElementById('out');
@@ -1092,8 +1102,8 @@ document.getElementById('submit').addEventListener('click', () => {
   }).then(r => {
     if (r.ok) {
       out.className = 'ok';
-      out.textContent = '登录成功，正在进入「我的」…';
-      setTimeout(() => go('/portal/account'), 500);
+      out.textContent = '登录成功，正在继续…';
+      setTimeout(() => go(nextTarget('/portal/account')), 500);
     } else {
       out.className = 'err';
       out.textContent = r.error || '登录失败';
@@ -1112,7 +1122,7 @@ document.getElementById('verify').addEventListener('click', () => {
     email: logEmail,
     code: document.getElementById('code').value.trim(),
   }).then(r => {
-    if (r.ok) { window.location.href = '/portal/account'; }
+    if (r.ok) { window.location.href = nextTarget('/portal/account'); }
     else {
       const out = document.getElementById('out');
       out.className = 'err';
@@ -1131,6 +1141,101 @@ document.getElementById('resend').addEventListener('click', () => {
         + _FOOTER
     )
     return _account_page("商家登录", body)
+
+
+def portal_connect() -> dict[str, Any]:
+    """商家连接器（「Kiwi 商家运营」）连接确认页（第 1 版设计 §3.2）。
+
+    商家从 Buddy 经商家连接器被引导到本页：登录/注册态确认「允许以我的商家
+    身份访问目录资料」。同意 → 服务端签发一次性 code 并回跳入口；拒绝 → 回跳
+    ``error=access_denied``。页面只展示入口自报的 client_label 与请求有效期，
+    不展示也不收集任何密码（密码只在本门户的登录/注册表单里输入）。
+    """
+    body = (
+        _nav("account")
+        + """
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">Connect</div>
+  <h2>连接「Kiwi 商家运营」</h2>
+  <p class="lead">「Kiwi 商家运营」连接器请求以你的商家身份访问 Kiwi 目录资料。
+    确认前请核对下方来源；你随时可以拒绝。</p>
+  <div class="card form-card">
+    <div id="out"></div>
+    <div id="body" style="display:none">
+      <p>请求方：<strong id="c_label">—</strong></p>
+      <p>当前商家：<strong id="c_merchant">—</strong></p>
+      <p class="small">请求编号 <span class="mono" id="c_req">—</span> · 有效期至 <span id="c_exp">—</span></p>
+      <p class="small">同意后，该连接器只能在你于本门户再次确认的前提下，读写<b>你自己</b>的公开资料
+        （草稿、发布状态、撤回）。它拿不到你的目录密码，也不能代替你操作其他商家；
+        发布公开资料仍需你在本门户的「公开资料」页明确确认。</p>
+      <div class="token-actions">
+        <button class="btn-mini" id="approve">同意授权</button>
+        <button class="btn-mini" id="deny">拒绝</button>
+      </div>
+    </div>
+  </div>
+</div></section>
+<script>
+const connectParams = new URLSearchParams(window.location.search);
+const connectRequestId = connectParams.get('request_id') || '';
+const connectNext = '/portal/connect?request_id=' + encodeURIComponent(connectRequestId);
+function showConnectErr(msg) {
+  const out = document.getElementById('out');
+  out.className = 'err';
+  out.textContent = msg;
+}
+function decideConnect(decision) {
+  const approve = document.getElementById('approve');
+  const deny = document.getElementById('deny');
+  approve.disabled = true;
+  deny.disabled = true;
+  postJson('/v1/connector-identity/requests/' + encodeURIComponent(connectRequestId) + '/decision', {
+    decision: decision,
+  }).then(r => {
+    if (!r.ok) {
+      approve.disabled = false;
+      deny.disabled = false;
+      showConnectErr(r.error || '操作失败，请重试');
+      return;
+    }
+    // 回跳由服务端给出（入口回跳地址 + 一次性 code / access_denied）；
+    // 只接受绝对 http(s) 地址，避免脚本把自己送去别处。
+    const target = String(r.redirect_url || '');
+    if (!/^https?:\\/\\//.test(target)) { showConnectErr('回跳地址无效，请返回应用后重试连接'); return; }
+    window.location.href = target;
+  });
+}
+if (!connectRequestId) {
+  showConnectErr('缺少 request_id：请从 Buddy 重新发起连接');
+} else {
+  fetch('/v1/connector-identity/requests/' + encodeURIComponent(connectRequestId), {method: 'GET', credentials: 'same-origin'})
+    .then(r => r.json()).then(r => {
+      if (!r.ok) {
+        // 未登录/会话过期：先登录，登录后回到本页（登录页提供注册入口）
+        window.location.href = '/portal/login?next=' + encodeURIComponent(connectNext);
+        return;
+      }
+      const req = r.request || {};
+      document.getElementById('c_label').textContent = req.client_label || '（未标注来源）';
+      document.getElementById('c_merchant').textContent = req.merchant_name || '当前登录商家';
+      document.getElementById('c_req').textContent = req.request_id || '';
+      document.getElementById('c_exp').textContent = req.expires_at || '';
+      document.getElementById('body').style.display = 'block';
+      if (req.status !== 'pending') {
+        showConnectErr(req.status === 'approved' ? '该请求已授权，请返回应用继续。' : '该请求已结束（' + req.status + '），请从应用重新发起。');
+        document.getElementById('approve').disabled = true;
+        document.getElementById('deny').disabled = true;
+        return;
+      }
+      document.getElementById('approve').addEventListener('click', () => decideConnect('approve'));
+      document.getElementById('deny').addEventListener('click', () => decideConnect('deny'));
+    });
+}
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("连接 Kiwi 商家运营", body)
 
 
 def portal_reset_password() -> dict[str, Any]:

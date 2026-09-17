@@ -56,10 +56,14 @@ from kiwi_catalog.api.route_table import (
     _v1_admin_searches,
     _v1_approve_application,
     _v1_claim_agent,
+    _v1_create_connector_identity_request,
     _v1_create_merchant_publication,
+    _v1_decide_connector_identity_request,
+    _v1_exchange_connector_identity,
     _v1_follow_merchant,
     _v1_follow_updates,
     _v1_get_agent,
+    _v1_get_connector_identity_request,
     _v1_get_listing,
     _v1_get_merchant_publication,
     _v1_list_agent_listings,
@@ -70,6 +74,7 @@ from kiwi_catalog.api.route_table import (
     _v1_merchant_self,
     _v1_publish_listing,
     _v1_refresh_agent,
+    _v1_revoke_connector_identity,
     _v1_register_agent,
     _v1_reinstate_listing,
     _v1_reject_application,
@@ -629,6 +634,16 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             body["_cookie"] = cookie
         return body
 
+    def _merchant_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
+        """商家侧载荷：cookie 会话 + Authorization 头（商家连接器凭据 cmt_…）。
+
+        与 fallback 栈的头合并对齐——否则 FastAPI 栈下凭据类请求取不到
+        ``_auth_token``，只有浏览器会话能通过。
+        """
+        return api_auth.payload_with_auth(
+            _account_payload(request, body), request.headers.get("authorization", ""), ""
+        )
+
     @app.post("/v1/accounts/register")
     def v1_account_register(payload: dict[str, Any]) -> _JSONResponse:
         return _account_response(accounts_handlers.register(db_path, payload))
@@ -678,7 +693,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_create_merchant_publication(
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return _v1_create_merchant_publication(db_path, _account_payload(request, payload))
+        return _v1_create_merchant_publication(db_path, _merchant_payload(request, payload))
 
     @app.get("/v1/merchant-publications/search")
     def v1_search_merchant_publications(request: _FastAPIRequest) -> dict[str, Any]:
@@ -691,7 +706,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/merchant-publications/stats")
     def v1_merchant_publication_stats(request: _FastAPIRequest) -> dict[str, Any]:
         # 商家本人匿名汇总（会话鉴权；不返回任何买家身份）
-        return _v1_merchant_publication_stats(db_path, _account_payload(request, {}))
+        return _v1_merchant_publication_stats(db_path, _merchant_payload(request, {}))
 
     @app.get("/v1/merchant-publications/{publication_id}")
     def v1_get_merchant_publication(
@@ -699,7 +714,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         # 可选会话：商家本人可见自己的 draft/withdrawn（匿名仅 published）
         return _v1_get_merchant_publication(
-            db_path, publication_id, _account_payload(request, {})
+            db_path, publication_id, _merchant_payload(request, {})
         )
 
     @app.post("/v1/merchant-publications/{publication_id}/withdraw")
@@ -709,7 +724,54 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         return _v1_withdraw_merchant_publication(
-            db_path, publication_id, _account_payload(request, payload)
+            db_path, publication_id, _merchant_payload(request, payload)
+        )
+
+    # ── /v1/connector-identity（商家连接器一次性身份授权；connector token 或
+    #    商家会话，见 handlers/connector_identity.py）。静态段 /requests 与
+    #    /exchange 先于 /requests/{request_id} 注册（与 fallback 路由表同序）。
+    @app.post("/v1/connector-identity/requests")
+    def v1_create_connector_identity_request(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        # connector token 走 Authorization 头（与 fallback 栈的头合并对齐）
+        return _v1_create_connector_identity_request(
+            db_path,
+            api_auth.payload_with_auth(payload, request.headers.get("authorization", ""), ""),
+        )
+
+    @app.post("/v1/connector-identity/exchange")
+    def v1_exchange_connector_identity(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _v1_exchange_connector_identity(
+            db_path,
+            api_auth.payload_with_auth(payload, request.headers.get("authorization", ""), ""),
+        )
+
+    @app.post("/v1/connector-identity/revoke")
+    def v1_revoke_connector_identity(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _v1_revoke_connector_identity(
+            db_path,
+            api_auth.payload_with_auth(payload, request.headers.get("authorization", ""), ""),
+        )
+
+    @app.get("/v1/connector-identity/requests/{request_id}")
+    def v1_get_connector_identity_request(
+        request_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _v1_get_connector_identity_request(
+            db_path, request_id, _account_payload(request, {})
+        )
+
+    @app.post("/v1/connector-identity/requests/{request_id}/decision")
+    def v1_decide_connector_identity_request(
+        request_id: str, request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _v1_decide_connector_identity_request(
+            db_path, request_id, _account_payload(request, payload)
         )
 
     # ── /v1/me/follows（M4 买家主动订阅；会话 cookie 经 _account_payload 透传）
@@ -849,6 +911,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/login")
     def portal_login_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_login())
+
+    @app.get("/portal/connect")
+    def portal_connect_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_connect())
 
     @app.get("/portal/reset-password")
     def portal_reset_password_page() -> HTMLResponse:
