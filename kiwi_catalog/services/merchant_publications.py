@@ -38,6 +38,7 @@ from typing import Any
 
 from kiwi_catalog.core.errors import NotFoundError, ValidationError
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
+from kiwi_catalog.services import merchant_public_events as events_service
 
 SOURCE_KIND = "merchant_declared"
 STATUSES = ("draft", "published", "withdrawn")
@@ -214,6 +215,31 @@ def _find_by_merchant_title(
     return _row_to_publication(row) if row is not None else None
 
 
+def _publish_event_type(
+    existing: dict[str, Any] | None, canonical: dict[str, Any]
+) -> str:
+    """发布动作 → 事件类型：新增 product_added；仅 FAQ 变化 faq_updated；其余
+    字段变化（含无任何变化的重复发布）product_updated。"""
+    if existing is None:
+        return "product_added"
+    faq_changed = (existing.get("faq") or []) != (canonical.get("faq") or [])
+    others_changed = any(
+        str(existing.get(field) or "") != str(canonical.get(field) or "")
+        for field in (
+            "merchant_display_name",
+            "shop_platform",
+            "shop_url",
+            "title",
+            "category",
+            "summary",
+            "expires_at",
+        )
+    )
+    if faq_changed and not others_changed:
+        return "faq_updated"
+    return "product_updated"
+
+
 def upsert_publication(
     conn: sqlite3.Connection,
     *,
@@ -259,6 +285,15 @@ def upsert_publication(
         )
         row = get_publication(conn, publication_id)
         assert row is not None
+        if action == "publish":
+            # M4 公开事件：发布动态（草稿保存不产生事件）。
+            events_service.emit_public_event(
+                conn,
+                merchant_id=merchant_id,
+                publication_id=str(row["publication_id"]),
+                event_type="product_added",
+                payload=public_projection(row),
+            )
         return row, True, False
     # 幂等更新路径：版本仅在（重新）发布时递增——草稿保存不消耗版本号。
     version = int(existing["version"] or 1)
@@ -291,6 +326,14 @@ def upsert_publication(
     )
     row = get_publication(conn, str(existing["publication_id"]))
     assert row is not None
+    if action == "publish":
+        events_service.emit_public_event(
+            conn,
+            merchant_id=merchant_id,
+            publication_id=str(row["publication_id"]),
+            event_type=_publish_event_type(existing, canonical),
+            payload=public_projection(row),
+        )
     return row, False, True
 
 
@@ -313,7 +356,23 @@ def withdraw_publication(
     )
     updated = get_publication(conn, publication_id)
     assert updated is not None
+    events_service.emit_public_event(
+        conn,
+        merchant_id=merchant_id,
+        publication_id=str(updated["publication_id"]),
+        event_type="publication_withdrawn",
+        payload=public_projection(updated),
+    )
     return updated
+
+
+def record_public_view(conn: sqlite3.Connection, publication_id: str) -> None:
+    """公开详情浏览计数（非商家本人视角；商家匿名汇总数据源）。"""
+    conn.execute(
+        "update merchant_publications set view_count = view_count + 1"
+        " where publication_id = ?",
+        (str(publication_id or "").strip(),),
+    )
 
 
 # ── 公开投影（public-only 白名单）────────────────────────────────────────

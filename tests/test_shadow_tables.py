@@ -223,6 +223,9 @@ class AuditShadowTableTest(unittest.TestCase):
         self.assertIn("agent_trust_observations", migrated_tables)
         # v29：商家公开资料表两条路径一致（fresh SCHEMA 与迁移链逐字对齐）。
         self.assertIn("merchant_publications", migrated_tables)
+        # v30：买家订阅（公开事件流 + 买家关注）两条路径一致。
+        self.assertIn("merchant_public_events", migrated_tables)
+        self.assertIn("buyer_follows", migrated_tables)
         # 弱引用统一：两条路径都没有 FK 约束。
         #（sqlite3.Connection 的 with 只管事务不关连接——显式 close，审查 P3-09）
         conn = sqlite3.connect(db)

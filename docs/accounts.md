@@ -21,7 +21,7 @@ owner token 双路径（`api/auth.py`）：
 - **HMAC fallback**（legacy）：`owner_token(merchant_id) = HMAC-SHA256(
   KIWI_CATALOG_OWNER_TOKEN_SECRET, "kiwi-catalog-owner:"+merchant_id)`。
 
-## 2. 数据模型（28 张表的一部分，迁移 v13–v16 / v24–v25 / v29）
+## 2. 数据模型（30 张表的一部分，迁移 v13–v16 / v24–v25 / v29–v30）
 
 | 表 | 用途 |
 | --- | --- |
@@ -29,17 +29,21 @@ owner token 双路径（`api/auth.py`）：
 | `account_sessions` | 登录会话（随机 session token，SHA-256 存储） |
 | `merchants` | 商家影子表（admin dashboard 只读；**注册即创建**——`register_account` 经 `ensure_merchant_id` 同步 `insert or ignore`，审批/Agent 注册兜底；存量账号会话解析懒回填） |
 | `merchant_applications` | 接入申请（merchant_id、状态 pending/approved/rejected、工单字段） |
-| `merchant_application_limits` | 注册/登录/申请/公开资料发布限流（per-email / per-actor / per-merchant 15min 窗口） |
+| `merchant_application_limits` | 注册/登录/申请/公开资料发布/买家关注限流（per-email / per-actor / per-merchant / per-buyer 15min 窗口） |
 | `merchant_tokens` | 签发 token（`token_encrypted` Fernet 加密存储，active/revoked；注册种入空 hash 的 revoked 占位行） |
 | `usage_metrics` | 令牌使用量（rotated/revoked 等） |
-| `merchant_publications` | 商家公开资料（M0，§3.5：账号会话发布的 public-only 声明快照，draft/published/withdrawn） |
+| `merchant_publications` | 商家公开资料（M0，§3.5：账号会话发布的 public-only 声明快照，draft/published/withdrawn；v30 起含 view_count 浏览计数） |
+| `merchant_public_events` | 商家公开事件流（M4，§3.6：发布/更新/撤回时服务端生成的 public-only 发布动态，version 按商家单调递增） |
+| `buyer_follows` | 买家关注（M4，§3.6：buyer_subject 不透明字符串 + last_seen_at 拉取水位，active/cancelled） |
 
 - 迁移：v13（usage_metrics）、v14（accounts）、v15（邮箱验证）、
   v16（基本信息字段）、v24（忘记密码重置：merchant_accounts 加
   `reset_code_hash` / `reset_expires_at`，与邮箱验证码同机制——SHA-256
   落库 + 15 分钟过期）、v25（联系方式微信：merchant_accounts 加 `wechat`）、
-  v29（商家公开资料 merchant_publications，M0）；
-  `CURRENT_SCHEMA_VERSION = 29`。
+  v29（商家公开资料 merchant_publications，M0）、v30（买家订阅：
+  merchant_public_events + buyer_follows + merchant_publications.view_count，
+  M4）；
+  `CURRENT_SCHEMA_VERSION = 30`。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
   ——token 明文永不落盘。
 
@@ -90,7 +94,8 @@ owner token 双路径（`api/auth.py`）：
 | `/portal/register` / `/portal/login` | 商家注册（**必填商家名称**，注册即商家）/ 登录 |
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + Token 管理 |
-| `/portal/publications` | 公开资料编辑/预览/发布（M0）：发布成功回执显示 publication_id、版本、发布时间；未登录引导去 `/portal/login` |
+| `/portal/publications` | 公开资料编辑/预览/发布（M0）：发布成功回执显示 publication_id、版本、发布时间；页内显示关注/浏览匿名汇总；未登录引导去 `/portal/login` |
+| `/portal/follows` | 我的关注（M4，买家视角）：关注列表 + 按 merchant_id 关注 + 取消 + 主动拉取更新 |
 
 ### 3.5 `/v1/merchant-publications/*`（M0 商家公开资料，账号会话）
 
@@ -124,6 +129,39 @@ owner token 双路径（`api/auth.py`）：
   `_saved` / `_updated`）、撤回（`merchant_publication_withdrawn`）、私密
   字段拒绝均落 `audit_events` 影子表。
 
+### 3.6 `/v1/me/follows/*`（M4 买家主动订阅，账号会话）
+
+买家**显式关注**商家后，在主动查询时按 `last_seen_at` 水位拉取商家已批准
+公开的动态（kiwi 仓 merchant-buddy 第 0 版设计 §4/§2 买家路径 3-5）。
+**拉取式订阅**：无邮件/短信/WorkBuddy 消息/A2A 主动消息等任何推送通道；
+搜索、浏览、调用专家或发询价都不产生关注行。
+
+| 路由 | 语义 |
+| --- | --- |
+| `PUT /v1/me/follows/{merchant_id}` | 显式关注（幂等：重复关注不产生重复记录，可更新可选 body 的 `category`/`consent_version`）；首次关注水位从关注时刻起，取消后重新关注水位重置 |
+| `DELETE /v1/me/follows/{merchant_id}` | 取消关注（状态置 cancelled，幂等）；取消后不再出现在更新与关注列表里，商家汇总数字随之减一 |
+| `GET /v1/me/follows` | 我的活跃关注列表（买家管理面） |
+| `GET /v1/me/follows/updates` | 仅响应买家主动查询：按各关注的 `last_seen_at` 增量返回公开事件并推进水位（返回什么再推进，不丢不重）；`category` 非空的关注只投递该类目事件 |
+| `GET /v1/merchant-publications/stats` | 商家本人匿名汇总（仅本人 merchant_id，取自会话）：活跃关注者**总数** + 各公开资料浏览计数；**不返回任何买家身份**，无关注者列表 |
+
+- **买家身份**：任何已登录账号都可以作为买家；`buyer_subject` 一律取自
+  服务端会话（`account:{account_id}` 不透明字符串，不用邮箱等可变/私密
+  字段），客户端传值无效；未来可切换 WorkBuddy open_id。
+- **事件流**：发布（`product_added`）/更新（仅 FAQ 变化为 `faq_updated`，
+  其余为 `product_updated`）/撤回（`publication_withdrawn`）公开资料时由
+  服务端生成；version 按 merchant_id 单调递增、created_at 按商家严格递增
+  （水位不丢不重的前提）；payload 复用 M0 公开投影白名单——RFQ、内部任务
+  状态、未发布草稿一律不进入事件流；`service_notice` 为词表保留（可不绑
+  定单个资料，当前无生成点）。
+- **匿名汇总原则**：商家只能看到关注者总数与浏览计数，永远拿不到
+  buyer_subject / 关注者列表，也没有任何向关注者写消息的 API；浏览计数
+  只计非商家本人的公开详情浏览。
+- **限流与审计**：关注/取消按买家限流（env
+  `KIWI_CATALOG_FOLLOW_RATE_LIMIT_PER_15MIN`，默认 60/15min，复用
+  `merchant_application_limits` 表）；关注/取消操作落 `audit_events`
+  （`buyer_followed` / `buyer_unfollowed`，系统审计可见，不出现在任何商家
+  侧接口）。
+
 ## 4. 安全属性
 
 - 口令：PBKDF2-SHA256（每账号随机盐）；邮箱验证码 console/smtp 双模式；
@@ -138,7 +176,9 @@ owner token 双路径（`api/auth.py`）：
   account_sessions（所有会话失效），并顺带置 email_verified=1
   （能收到码即证明邮箱归属，避免未验证账号重置后仍无法登录的死角）；
 - 生产部署需配置 `KIWI_CATALOG_ADMIN_TOKEN` 与
-  `KIWI_CATALOG_OWNER_TOKEN_SECRET`（未配置时鉴权一律 fail-closed）。
+  `KIWI_CATALOG_OWNER_TOKEN_SECRET`（未配置时鉴权一律 fail-closed）；
+- 买家订阅（§3.6）：`buyer_subject` 为账号稳定标识的不透明字符串（不存
+  邮箱）；商家侧接口只输出匿名汇总数字，无任何买家身份/列表/写消息通道。
 
 ## 5. 与其它模块的关系
 

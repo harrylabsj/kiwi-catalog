@@ -57,12 +57,16 @@ from kiwi_catalog.api.route_table import (
     _v1_approve_application,
     _v1_claim_agent,
     _v1_create_merchant_publication,
+    _v1_follow_merchant,
+    _v1_follow_updates,
     _v1_get_agent,
     _v1_get_listing,
     _v1_get_merchant_publication,
     _v1_list_agent_listings,
     _v1_list_agents,
     _v1_list_applications,
+    _v1_list_my_follows,
+    _v1_merchant_publication_stats,
     _v1_merchant_self,
     _v1_publish_listing,
     _v1_refresh_agent,
@@ -75,6 +79,7 @@ from kiwi_catalog.api.route_table import (
     _v1_search_listings,
     _v1_search_merchant_publications,
     _v1_submit_application,
+    _v1_unfollow_merchant,
     _v1_verify_agent,
     _v1_withdraw_listing,
     _v1_withdraw_merchant_publication,
@@ -681,6 +686,13 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, _buyer_payload(request), _query_params_from_request(request)
         )
 
+    # /stats 静态段必须先于 /{publication_id} 注册（FastAPI 按注册顺序匹配，
+    # 与 fallback 路由表顺序约束一致）。
+    @app.get("/v1/merchant-publications/stats")
+    def v1_merchant_publication_stats(request: _FastAPIRequest) -> dict[str, Any]:
+        # 商家本人匿名汇总（会话鉴权；不返回任何买家身份）
+        return _v1_merchant_publication_stats(db_path, _account_payload(request, {}))
+
     @app.get("/v1/merchant-publications/{publication_id}")
     def v1_get_merchant_publication(
         publication_id: str, request: _FastAPIRequest
@@ -699,6 +711,32 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _v1_withdraw_merchant_publication(
             db_path, publication_id, _account_payload(request, payload)
         )
+
+    # ── /v1/me/follows（M4 买家主动订阅；会话 cookie 经 _account_payload 透传）
+    # /updates 静态段先于 /{merchant_id} 注册。
+    @app.get("/v1/me/follows")
+    def v1_list_my_follows(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_list_my_follows(db_path, _account_payload(request, {}))
+
+    @app.get("/v1/me/follows/updates")
+    def v1_follow_updates(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_follow_updates(db_path, _account_payload(request, {}))
+
+    @app.put("/v1/me/follows/{merchant_id}")
+    def v1_follow_merchant(
+        merchant_id: str,
+        request: _FastAPIRequest,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return _v1_follow_merchant(
+            db_path, merchant_id, _account_payload(request, payload or {})
+        )
+
+    @app.delete("/v1/me/follows/{merchant_id}")
+    def v1_unfollow_merchant(
+        merchant_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _v1_unfollow_merchant(db_path, merchant_id, _account_payload(request, {}))
 
     # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
     @app.get("/v1/admin/dashboard")
@@ -827,3 +865,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/publications")
     def portal_publications_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_publications())
+
+    @app.get("/portal/follows")
+    def portal_follows_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_follows())

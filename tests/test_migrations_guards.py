@@ -292,5 +292,119 @@ class Migration029MerchantPublicationsTest(unittest.TestCase):
             conn.close()
 
 
+class Migration030BuyerSubscriptionsTest(unittest.TestCase):
+    """v30 买家订阅：两新表 + view_count 幂等 ALTER + 版本唯一索引兜底。"""
+
+    def test_tables_created_and_idempotent(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import migration_030_buyer_subscriptions
+
+            # _legacy_db 已跑全链（含 v30）——此处验证表/列/索引就位
+            for table in ("merchant_public_events", "buyer_follows"):
+                row = conn.execute(
+                    "select name from sqlite_master where type='table' and name = ?",
+                    (table,),
+                ).fetchone()
+                self.assertIsNotNone(row, table)
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(merchant_public_events)").fetchall()
+            }
+            for expected in (
+                "event_id",
+                "merchant_id",
+                "publication_id",
+                "event_type",
+                "version",
+                "payload_json",
+                "created_at",
+            ):
+                self.assertIn(expected, columns)
+            follow_columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(buyer_follows)").fetchall()
+            }
+            for expected in (
+                "buyer_subject",
+                "merchant_id",
+                "category",
+                "status",
+                "consent_version",
+                "last_seen_at",
+                "created_at",
+            ):
+                self.assertIn(expected, follow_columns)
+            # 旧库 ALTER 路径：merchant_publications 有 view_count
+            publication_columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(merchant_publications)").fetchall()
+            }
+            self.assertIn("view_count", publication_columns)
+            # (merchant_id, version) 唯一索引兜底：同商家同版本第二次写入冲突
+            conn.execute(
+                "insert into merchant_public_events("
+                " event_id, merchant_id, publication_id, event_type, version,"
+                " payload_json, created_at)"
+                " values ('mev_a', 'mkt_1', 'mpub_a', 'product_added', 1, '{}', ?)",
+                (_TS,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into merchant_public_events("
+                    " event_id, merchant_id, publication_id, event_type, version,"
+                    " payload_json, created_at)"
+                    " values ('mev_b', 'mkt_1', 'mpub_a', 'product_updated', 1, '{}', ?)",
+                    (_TS,),
+                )
+            conn.rollback()
+            # 不同商家同版本不冲突
+            conn.execute(
+                "insert into merchant_public_events("
+                " event_id, merchant_id, publication_id, event_type, version,"
+                " payload_json, created_at)"
+                " values ('mev_a', 'mkt_1', 'mpub_a', 'product_added', 1, '{}', ?)",
+                (_TS,),
+            )
+            conn.execute(
+                "insert into merchant_public_events("
+                " event_id, merchant_id, publication_id, event_type, version,"
+                " payload_json, created_at)"
+                " values ('mev_c', 'mkt_2', 'mpub_b', 'product_added', 1, '{}', ?)",
+                (_TS,),
+            )
+            # event_type 词表 fail-closed
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into merchant_public_events("
+                    " event_id, merchant_id, publication_id, event_type, version,"
+                    " payload_json, created_at)"
+                    " values ('mev_d', 'mkt_1', '', 'rfq_internal', 2, '{}', ?)",
+                    (_TS,),
+                )
+            conn.rollback()
+            # buyer_follows 主键幂等：同买家同商家重复行冲突
+            conn.execute(
+                "insert into buyer_follows("
+                " buyer_subject, merchant_id, category, status, consent_version,"
+                " last_seen_at, created_at, updated_at)"
+                " values ('account:1', 'mkt_1', '', 'active', '', ?, ?, ?)",
+                (_TS, _TS, _TS),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into buyer_follows("
+                    " buyer_subject, merchant_id, category, status, consent_version,"
+                    " last_seen_at, created_at, updated_at)"
+                    " values ('account:1', 'mkt_1', '茶', 'active', '', ?, ?, ?)",
+                    (_TS, _TS, _TS),
+                )
+            conn.rollback()
+            # 幂等：再跑一次不报错（create if not exists + 列存在跳过 ALTER）
+            migration_030_buyer_subscriptions(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

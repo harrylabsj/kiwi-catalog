@@ -31,6 +31,7 @@ from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.core.errors import AuthError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import accounts as accounts_service
+from kiwi_catalog.services import buyer_follows as follows_service
 from kiwi_catalog.services import merchant_publications as publications_service
 from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
@@ -197,7 +198,54 @@ def get_publication(
             owner_merchant = str((account or {}).get("merchant_id") or "")
             if not owner_merchant or owner_merchant != str(row["merchant_id"]):
                 raise NotFoundError(f"Unknown publication: {publication_id}")
+        else:
+            # 浏览计数（M4 商家匿名汇总数据源）：只计非商家本人的公开可见
+            # 浏览——本人查看自己的资料不计入。
+            account = _optional_session_account(conn, payload or {})
+            owner_merchant = str((account or {}).get("merchant_id") or "")
+            if owner_merchant != str(row["merchant_id"]):
+                publications_service.record_public_view(conn, publication_id)
         return {"ok": True, "publication": publications_service.public_projection(row)}
+
+
+def publication_stats(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """GET /v1/merchant-publications/stats（会话）——商家本人的匿名汇总。
+
+    只读、仅本人 merchant_id（取自服务端会话）：活跃关注者**总数** + 各公开
+    资料的浏览计数。**不返回任何买家身份**（buyer_subject/关注列表永不暴露
+    给商家）；不提供向关注者写消息的通道。
+    """
+    with db_session(db_path) as conn:
+        account = _require_session_account(conn, payload)
+        merchant_id = str(account.get("merchant_id") or "").strip()
+        if not merchant_id:
+            raise AuthError("account has no merchant_id — complete registration first")
+        rows = conn.execute(
+            "select publication_id, title, status, view_count, published_at"
+            " from merchant_publications where merchant_id = ?"
+            " order by updated_at desc, publication_id desc",
+            (merchant_id,),
+        ).fetchall()
+        publications = [
+            {
+                "publication_id": str(row["publication_id"]),
+                "title": str(row["title"]),
+                "status": str(row["status"]),
+                "view_count": int(row["view_count"] or 0),
+                "published_at": str(row["published_at"] or ""),
+            }
+            for row in rows
+        ]
+        followers_total = follows_service.follower_count(conn, merchant_id)
+        return {
+            "ok": True,
+            "stats": {
+                "merchant_id": merchant_id,
+                "followers_total": followers_total,
+                "views_total": sum(item["view_count"] for item in publications),
+                "publications": publications,
+            },
+        }
 
 
 def withdraw_publication(

@@ -511,7 +511,8 @@ create index if not exists idx_access_log_target
     # 不产生 Agent Card / A2A 端点 / 实时报价标记（inquiry_available=false）。
     # (merchant_id, lower(title)) 非撤回行部分唯一索引兜底行级幂等（同一商家
     # 同名商品重复发布 = 更新既有行，不产生重复主体；弱引用无 FK 约定）。
-    # DDL 与迁移链 migration_029 逐字一致（test_shadow_tables 守护）。
+    # v30 — view_count（非商家本人的公开详情浏览计数，商家匿名汇总数据源）。
+    # DDL 与迁移链 migration_029/030 逐字一致（test_shadow_tables 守护）。
     """
 create table if not exists merchant_publications (
         publication_id text primary key,
@@ -530,6 +531,7 @@ create table if not exists merchant_publications (
         published_at text not null default '',
         expires_at text not null default '',
         version integer not null default 1,
+        view_count integer not null default 0,
         created_at text not null,
         updated_at text not null
     )
@@ -546,6 +548,55 @@ create index if not exists idx_merchant_publications_status_updated
 create unique index if not exists idx_merchant_publications_merchant_title_unique
         on merchant_publications(merchant_id, lower(title))
         where status != 'withdrawn'
+    """,
+    # v30 — 商家公开事件流 + 买家关注（M4 拉取式订阅，kiwi 仓
+    # docs/merchant-buddy/v0-ai-cs-and-pull-subscriptions-design.md §4）。
+    # merchant_public_events：发布/更新/撤回公开资料时服务端生成的 public-only
+    # 发布动态（version 按 merchant_id 单调递增，唯一索引兜底；created_at 按
+    # merchant_id 严格递增——买家 last_seen_at 水位不丢不重的前提）；payload
+    # 复用 M0 公开投影白名单，RFQ/内部任务状态一律不进入本流。buyer_follows：
+    # 买家显式关注（buyer_subject 为不透明字符串——当前取 account:{account_id}，
+    # 未来可换 WorkBuddy open_id；搜索/浏览/询价不产生订阅行）。
+    # DDL 与迁移链 migration_030 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists merchant_public_events (
+        event_id text primary key,
+        merchant_id text not null,
+        publication_id text not null default '',
+        event_type text not null
+            check(event_type in (
+                'product_added','product_updated','faq_updated','service_notice',
+                'publication_withdrawn')),
+        version integer not null,
+        payload_json text not null default '{}',
+        created_at text not null
+    )
+    """,
+    """
+create unique index if not exists idx_merchant_public_events_merchant_version
+        on merchant_public_events(merchant_id, version)
+    """,
+    """
+create index if not exists idx_merchant_public_events_merchant_created
+        on merchant_public_events(merchant_id, created_at, event_id)
+    """,
+    """
+create table if not exists buyer_follows (
+        buyer_subject text not null,
+        merchant_id text not null,
+        category text not null default '',
+        status text not null default 'active'
+            check(status in ('active','cancelled')),
+        consent_version text not null default '',
+        last_seen_at text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        primary key (buyer_subject, merchant_id)
+    )
+    """,
+    """
+create index if not exists idx_buyer_follows_merchant_status
+        on buyer_follows(merchant_id, status)
     """,
 ]
 

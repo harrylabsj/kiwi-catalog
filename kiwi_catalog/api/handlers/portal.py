@@ -1225,6 +1225,7 @@ def portal_account() -> dict[str, Any]:
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/publications">公开资料</a>
+    <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
@@ -1340,6 +1341,7 @@ def portal_account_profile() -> dict[str, Any]:
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
     <a href="/portal/publications">公开资料</a>
+    <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
@@ -1406,12 +1408,17 @@ def portal_publications() -> dict[str, Any]:
     <a href="/portal/account/profile">基本信息</a>
     <a href="/portal/account">令牌信息</a>
     <a href="/portal/publications" class="active">公开资料</a>
+    <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <p class="lead">发布商家及商品基本资料后，买家可按商品词在 Kiwi 目录搜索到你。
     公开资料是你的声明快照（仅展示，不含实时报价/库存）；请勿填写电话、邮箱等联系方式——
     含联系方式的内容会被拒绝。</p>
   <div id="out"></div>
+  <div class="card form-card" id="stats_card" style="display:none">
+    <h3>关注与浏览（匿名汇总）</h3>
+    <div id="stats_body"></div>
+  </div>
   <div id="editor" style="display:none">
     <div class="card form-card">
       <label for="m_name">公开商家名称 <span class="req">*</span></label>
@@ -1524,12 +1531,148 @@ fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => 
   if (!r.ok) { window.location.href = '/portal/login'; return; }
   document.getElementById('m_name').value = r.merchant_name || '';
   document.getElementById('editor').style.display = 'block';
+  // 匿名汇总（M4）：只有关注者总数与浏览计数——商家拿不到任何买家身份
+  fetch('/v1/merchant-publications/stats', {method: 'GET', credentials: 'same-origin'}).then(s => s.json()).then(s => {
+    if (!s.ok) return;
+    const st = s.stats || {};
+    let html = '<p>关注本商家的买家：<strong>' + escHtml(st.followers_total) + '</strong>'
+      + ' · 公开资料累计浏览：<strong>' + escHtml(st.views_total) + '</strong></p>'
+      + '<p class="small muted">汇总为匿名数字——你无法看到具体是哪些买家，也不能向他们发消息。</p>';
+    (st.publications || []).forEach(p => {
+      html += '<p class="small">' + escHtml(p.title) + '（' + escHtml(p.status) + '）：浏览 ' + escHtml(p.view_count) + ' 次</p>';
+    });
+    document.getElementById('stats_body').innerHTML = html;
+    document.getElementById('stats_card').style.display = 'block';
+  });
 });
 </script>
 """
         + _FOOTER
     )
     return _account_page("公开资料", body)
+
+
+def portal_follows() -> dict[str, Any]:
+    """「我的关注」页（M4 拉取式订阅，买家视角）。
+
+    任何已登录账号都可以作为买家关注商家：列表 + 按商家 ID 关注 + 取消 +
+    主动拉取更新（无推送通道——只有买家主动点「查看更新」才拉取）。未登录
+    引导去 /portal/login（页面 JS 检查 /v1/accounts/me，与「我的」同模式）。
+    """
+    body = (
+        _nav("account")
+        + """
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">商家后台</div>
+  <h2>我的关注</h2>
+  <div class="subnav">
+    <a href="/portal/account/profile">基本信息</a>
+    <a href="/portal/account">令牌信息</a>
+    <a href="/portal/publications">公开资料</a>
+    <a href="/portal/follows" class="active">我的关注</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
+  </div>
+  <p class="lead">关注是显式订阅：只有你主动关注商家后，才能在这里拉取它的公开更新
+    （新品、资料更新、撤回等）；搜索、浏览、询价都不会产生订阅。商家只能看到匿名关注数，
+    看不到你是谁，也不能给你发消息。</p>
+  <div id="out"></div>
+  <div id="content" style="display:none">
+    <div class="card form-card">
+      <h3>关注商家</h3>
+      <label for="f_merchant">商家 ID（merchant_id，从搜索结果或商家资料中获得）</label>
+      <input id="f_merchant" placeholder="mkt_...">
+      <label for="f_category">关注范围（选填，只接收该类目的更新）</label>
+      <input id="f_category" placeholder="留空 = 全部公开更新">
+      <button class="btn-form" id="follow">关注</button>
+    </div>
+    <div class="card form-card">
+      <h3>已关注的商家</h3>
+      <div id="follows_body"></div>
+      <button class="btn-mini" id="check_updates">查看更新</button>
+      <div id="updates_body"></div>
+    </div>
+  </div>
+</div></section>
+<script>
+function showErr(msg) {
+  const out = document.getElementById('out');
+  out.className = 'err';
+  out.textContent = msg;
+}
+function loadFollows() {
+  fetch('/v1/me/follows', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+    if (!r.ok) { showErr(r.error || '加载失败'); return; }
+    const box = document.getElementById('follows_body');
+    const follows = r.follows || [];
+    if (!follows.length) { box.innerHTML = '<p class="small muted">还没有关注任何商家。</p>'; return; }
+    let html = '';
+    follows.forEach(f => {
+      html += '<p><strong>' + escHtml(f.merchant_name || f.merchant_id) + '</strong>'
+        + ' <span class="small mono">' + escHtml(f.merchant_id) + '</span>'
+        + (f.category ? ' <span class="small">范围：' + escHtml(f.category) + '</span>' : ' <span class="small">范围：全部公开更新</span>')
+        + ' <button class="btn-mini" data-unfollow="' + escHtml(f.merchant_id) + '">取消关注</button></p>';
+    });
+    box.innerHTML = html;
+    box.querySelectorAll('button[data-unfollow]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        btn.disabled = true;
+        fetch('/v1/me/follows/' + encodeURIComponent(btn.getAttribute('data-unfollow')), {
+          method: 'DELETE', credentials: 'same-origin',
+        }).then(r => r.json()).then(r => {
+          if (!r.ok) { showErr(r.error || '取消失败'); btn.disabled = false; return; }
+          loadFollows();
+        });
+      });
+    });
+  });
+}
+document.getElementById('follow').addEventListener('click', () => {
+  const btn = document.getElementById('follow');
+  btn.disabled = true;
+  const merchantId = document.getElementById('f_merchant').value.trim();
+  fetch('/v1/me/follows/' + encodeURIComponent(merchantId), {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
+    body: JSON.stringify({category: document.getElementById('f_category').value.trim()}),
+  }).then(r => r.json()).then(r => {
+    btn.disabled = false;
+    if (!r.ok) { showErr(r.error || '关注失败'); return; }
+    document.getElementById('f_merchant').value = '';
+    loadFollows();
+  });
+});
+document.getElementById('check_updates').addEventListener('click', () => {
+  const btn = document.getElementById('check_updates');
+  btn.disabled = true;
+  fetch('/v1/me/follows/updates', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+    btn.disabled = false;
+    if (!r.ok) { showErr(r.error || '拉取失败'); return; }
+    const box = document.getElementById('updates_body');
+    const updates = r.updates || [];
+    if (!updates.length) { box.innerHTML = '<p class="small muted">暂无新更新。</p>'; return; }
+    let html = '';
+    updates.forEach(u => {
+      html += '<p><strong>' + escHtml(u.merchant_name || u.merchant_id) + '</strong></p>';
+      (u.events || []).forEach(e => {
+        const p = e.payload || {};
+        html += '<p class="small">· ' + escHtml(e.event_type) + '：' + escHtml(p.title || '')
+          + ' <span class="muted">' + escHtml((e.created_at || '').slice(0, 19)) + '</span></p>';
+      });
+    });
+    box.innerHTML = html;
+  });
+});
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+  if (!r.ok) { window.location.href = '/portal/login'; return; }
+  document.getElementById('content').style.display = 'block';
+  loadFollows();
+});
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("我的关注", body)
 
 
 def _not_found_html() -> str:

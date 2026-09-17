@@ -187,7 +187,7 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 
 ## 5. 数据模型
 
-28 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v29，
+30 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v30，
 两路径产出同一表集合，有测试锁定）：
 
 - **catalog 域**：catalog_agents（含三域列 + handoff_destination_types）、
@@ -201,6 +201,11 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 - **商家公开资料域（v29，M0）**：merchant_publications（账号会话发布的
   声明快照；draft/published/withdrawn 状态域 + source_kind=merchant_declared
   + 版本/发布时间/有效期；同名幂等 partial unique 兜底）；
+- **买家订阅域（v30，M4）**：merchant_public_events（public-only 发布动态
+  流；version 按商家单调递增 + created_at 按商家严格递增，买家
+  last_seen_at 水位不丢不重；payload 复用 M0 公开投影白名单）、
+  buyer_follows（买家显式关注；buyer_subject 不透明字符串，拉取式订阅、
+  无推送通道；商家侧只有匿名汇总数字，拿不到买家身份）；
 - **影子域**：merchants（public 字段）、audit_events、meta。
 
 要点：
@@ -233,13 +238,15 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 ## 8. 测试与已知边界
 
-- 718 passed（2026-09-17 实测；FastAPI 条件 skip 在本环境 0 skipped）；覆盖：三态域迁移与折叠、幂等/限流、
+- 735 passed（2026-09-17 实测；FastAPI 条件 skip 在本环境 0 skipped）；覆盖：三态域迁移与折叠、幂等/限流、
   SSRF fetcher（含 http 接线/深嵌套/非法端口/慢滴漏时长上限）、secret
   扫描 cap、影子表、仓库抽象防接口漂移、验证队列执行模型（超时/去重/
   ledger 失败）、迁移守卫（v7 重复检测/v8 回填守卫/v11 唯一索引/v29 建表
-  幂等）、权限 0700/0600、Listing 域（publish 契约/幂等 upsert/搜索/新鲜度
-  惰性翻转/agent 治理联动/dualstack 对齐）、M0 商家公开资料（会话归属/草稿
-  不可见/同名幂等/撤回与过期退出搜索/私密字段拒绝/双栈 parity）。
+  幂等/v30 订阅表与版本唯一索引）、权限 0700/0600、Listing 域（publish 契约
+  /幂等 upsert/搜索/新鲜度惰性翻转/agent 治理联动/dualstack 对齐）、M0 商家
+  公开资料（会话归属/草稿不可见/同名幂等/撤回与过期退出搜索/私密字段拒绝/
+  双栈 parity）、M4 买家主动订阅（事件生成与商家版本递增/关注幂等/取消后无
+  更新/水位不丢不重/买家隔离/商家匿名汇总无买家身份/限流/双栈 parity）。
 - **未实现/接缝**：PG+Redis 多实例限流（P3/P5）；验证阶梯的第三方互操作
   证据（wire 级）；`agent_trust_observations` 的写入方（表已建，消费在
   后续版本）；`reported_external_conversion` 类外部成交指标不在本服务范围；

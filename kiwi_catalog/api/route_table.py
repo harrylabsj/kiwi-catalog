@@ -31,6 +31,7 @@ from typing import Any
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
+from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
@@ -314,7 +315,7 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _v1_account_profile(db_path, payload),
     ),
     # ── /v1/merchant-publications（M0 商家公开资料，docs/accounts.md §publications）
-    # 顺序约束：/search 静态段必须先于 /{publication_id} 参数段
+    # 顺序约束：/search 与 /stats 静态段必须先于 /{publication_id} 参数段
     #（_match_path 顺序匹配；与 /v1/listings/search 先例一致）。
 RouteEntry(
         {"POST"},
@@ -328,6 +329,11 @@ RouteEntry(
     ),
 RouteEntry(
         {"GET"},
+        "/v1/merchant-publications/stats",
+        lambda db_path, payload, query, **kw: _v1_merchant_publication_stats(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
         "/v1/merchant-publications/{publication_id}",
         lambda db_path, payload, query, publication_id: _v1_get_merchant_publication(
             db_path, publication_id, payload
@@ -338,6 +344,33 @@ RouteEntry(
         "/v1/merchant-publications/{publication_id}/withdraw",
         lambda db_path, payload, query, publication_id: _v1_withdraw_merchant_publication(
             db_path, publication_id, payload
+        ),
+    ),
+    # ── /v1/me/follows（M4 买家主动订阅，docs/accounts.md §follows）──────────
+    # 顺序约束：/updates 静态段必须先于 /{merchant_id} 参数段。
+    # PUT 与 DELETE 拆成两条 RouteEntry（方法不同，与 /v1/merchants/applications 先例一致）。
+RouteEntry(
+        {"GET"},
+        "/v1/me/follows",
+        lambda db_path, payload, query, **kw: _v1_list_my_follows(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/me/follows/updates",
+        lambda db_path, payload, query, **kw: _v1_follow_updates(db_path, payload),
+    ),
+RouteEntry(
+        {"PUT"},
+        "/v1/me/follows/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _v1_follow_merchant(
+            db_path, merchant_id, payload
+        ),
+    ),
+RouteEntry(
+        {"DELETE"},
+        "/v1/me/follows/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _v1_unfollow_merchant(
+            db_path, merchant_id, payload
         ),
     ),
 # ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
@@ -438,6 +471,11 @@ RouteEntry(
         {"GET"},
         "/portal/publications",
         lambda db_path, payload, query, **kw: _portal_publications(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/follows",
+        lambda db_path, payload, query, **kw: _portal_follows(),
     ),
 )
 
@@ -621,8 +659,31 @@ def _v1_get_merchant_publication(db_path, publication_id, payload=None):
     return merchant_publications_handlers.get_publication(db_path, publication_id, payload or {})
 
 
+def _v1_merchant_publication_stats(db_path, payload):
+    return merchant_publications_handlers.publication_stats(db_path, payload)
+
+
 def _v1_withdraw_merchant_publication(db_path, publication_id, payload):
     return merchant_publications_handlers.withdraw_publication(db_path, publication_id, payload)
+
+
+# ── /v1/me/follows wrapper（M4 买家主动订阅）──────────────────────────────
+
+
+def _v1_follow_merchant(db_path, merchant_id, payload):
+    return buyer_follows_handlers.follow_merchant(db_path, merchant_id, payload)
+
+
+def _v1_unfollow_merchant(db_path, merchant_id, payload):
+    return buyer_follows_handlers.unfollow_merchant(db_path, merchant_id, payload)
+
+
+def _v1_list_my_follows(db_path, payload):
+    return buyer_follows_handlers.list_my_follows(db_path, payload)
+
+
+def _v1_follow_updates(db_path, payload):
+    return buyer_follows_handlers.follow_updates(db_path, payload)
 
 
 # ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
@@ -705,6 +766,10 @@ def _portal_account_profile():
 
 def _portal_publications():
     return portal_handlers.portal_publications()
+
+
+def _portal_follows():
+    return portal_handlers.portal_follows()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):

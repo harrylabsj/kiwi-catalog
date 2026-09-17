@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 
 
 @dataclass(frozen=True)
@@ -984,6 +984,68 @@ def migration_029_merchant_publications(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_BUYER_SUBSCRIPTION_DDL = [
+    """
+create table if not exists merchant_public_events (
+        event_id text primary key,
+        merchant_id text not null,
+        publication_id text not null default '',
+        event_type text not null
+            check(event_type in (
+                'product_added','product_updated','faq_updated','service_notice',
+                'publication_withdrawn')),
+        version integer not null,
+        payload_json text not null default '{}',
+        created_at text not null
+    )
+    """,
+    """
+create unique index if not exists idx_merchant_public_events_merchant_version
+        on merchant_public_events(merchant_id, version)
+    """,
+    """
+create index if not exists idx_merchant_public_events_merchant_created
+        on merchant_public_events(merchant_id, created_at, event_id)
+    """,
+    """
+create table if not exists buyer_follows (
+        buyer_subject text not null,
+        merchant_id text not null,
+        category text not null default '',
+        status text not null default 'active'
+            check(status in ('active','cancelled')),
+        consent_version text not null default '',
+        last_seen_at text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        primary key (buyer_subject, merchant_id)
+    )
+    """,
+    """
+create index if not exists idx_buyer_follows_merchant_status
+        on buyer_follows(merchant_id, status)
+    """,
+]
+
+
+def migration_030_buyer_subscriptions(conn: sqlite3.Connection) -> None:
+    """买家主动订阅（M4，kiwi 仓 merchant-buddy 第 0 版设计 §4/§6 第 4 步）。
+
+    - merchant_publications 加 view_count 列（幂等 ALTER，参照 v24/v25 模式；
+      非商家本人的公开详情浏览计数，商家匿名汇总数据源）；
+    - 新建 merchant_public_events（public-only 发布动态，version 按商家单调
+      递增）与 buyer_follows（买家显式关注，拉取式订阅水位 last_seen_at）。
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（tests/test_shadow_tables.py
+    锁定 fresh 路径与迁移路径等价）。
+    """
+    if not _column_exists(conn, "merchant_publications", "view_count"):
+        conn.execute(
+            "alter table merchant_publications add column view_count integer not null default 0"
+        )
+    for statement in _BUYER_SUBSCRIPTION_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1014,6 +1076,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(27, "buyer_keyword_daily", migration_027_buyer_keyword_daily),
     Migration(28, "access_log", migration_028_access_log),
     Migration(29, "merchant_publications", migration_029_merchant_publications),
+    Migration(30, "buyer_subscriptions", migration_030_buyer_subscriptions),
 )
 
 
