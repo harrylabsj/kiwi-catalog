@@ -226,6 +226,10 @@ class AuditShadowTableTest(unittest.TestCase):
         # v30：买家订阅（公开事件流 + 买家关注）两条路径一致。
         self.assertIn("merchant_public_events", migrated_tables)
         self.assertIn("buyer_follows", migrated_tables)
+        # v31：商家连接器一次性身份授权表两条路径一致。
+        self.assertIn("connector_identity_requests", migrated_tables)
+        # v32：商家连接器作用域凭据表两条路径一致。
+        self.assertIn("connector_merchant_tokens", migrated_tables)
         # 弱引用统一：两条路径都没有 FK 约束。
         #（sqlite3.Connection 的 with 只管事务不关连接——显式 close，审查 P3-09）
         conn = sqlite3.connect(db)

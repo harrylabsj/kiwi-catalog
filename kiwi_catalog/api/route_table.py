@@ -32,6 +32,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
+from kiwi_catalog.api.handlers import connector_identity as connector_identity_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
@@ -373,6 +374,40 @@ RouteEntry(
             db_path, merchant_id, payload
         ),
     ),
+    # ── /v1/connector-identity（商家连接器一次性身份授权；merchant-buddy
+    #    第 1 版设计 §3.2）。静态段 /exchange 必须先于 /{request_id} 参数段
+    #    （_match_path 顺序匹配）。
+RouteEntry(
+        {"POST"},
+        "/v1/connector-identity/requests",
+        lambda db_path, payload, query, **kw: _v1_create_connector_identity_request(
+            db_path, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/connector-identity/exchange",
+        lambda db_path, payload, query, **kw: _v1_exchange_connector_identity(db_path, payload),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/connector-identity/revoke",
+        lambda db_path, payload, query, **kw: _v1_revoke_connector_identity(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/connector-identity/requests/{request_id}",
+        lambda db_path, payload, query, request_id: _v1_get_connector_identity_request(
+            db_path, request_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/connector-identity/requests/{request_id}/decision",
+        lambda db_path, payload, query, request_id: _v1_decide_connector_identity_request(
+            db_path, request_id, payload
+        ),
+    ),
 # ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
 RouteEntry(
         {"GET"},
@@ -451,6 +486,11 @@ RouteEntry(
         {"GET"},
         "/portal/login",
         lambda db_path, payload, query, **kw: _portal_login(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/connect",
+        lambda db_path, payload, query, **kw: _portal_connect(),
     ),
 RouteEntry(
         {"GET"},
@@ -686,6 +726,29 @@ def _v1_follow_updates(db_path, payload):
     return buyer_follows_handlers.follow_updates(db_path, payload)
 
 
+# ── /v1/connector-identity wrapper（商家连接器一次性身份授权）──────────────
+
+
+def _v1_create_connector_identity_request(db_path, payload):
+    return connector_identity_handlers.create_identity_request(db_path, payload)
+
+
+def _v1_get_connector_identity_request(db_path, request_id, payload):
+    return connector_identity_handlers.get_identity_request(db_path, request_id, payload)
+
+
+def _v1_decide_connector_identity_request(db_path, request_id, payload):
+    return connector_identity_handlers.decide_identity_request(db_path, request_id, payload)
+
+
+def _v1_exchange_connector_identity(db_path, payload):
+    return connector_identity_handlers.exchange_identity_request(db_path, payload)
+
+
+def _v1_revoke_connector_identity(db_path, payload):
+    return connector_identity_handlers.revoke_identity_token(db_path, payload)
+
+
 # ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
 
 
@@ -750,6 +813,10 @@ def _portal_register():
 
 def _portal_login():
     return portal_handlers.portal_login()
+
+
+def _portal_connect():
+    return portal_handlers.portal_connect()
 
 
 def _portal_reset_password():

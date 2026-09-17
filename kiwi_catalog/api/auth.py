@@ -52,6 +52,10 @@ def _legacy_hmac_enabled() -> bool:
 
 _OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 _ADMIN_TOKEN_ENV = "KIWI_CATALOG_ADMIN_TOKEN"
+# 商家连接器（WorkBuddy 侧「Kiwi 商家运营」远程入口）的机器凭据：只用于
+# 创建/兑换一次性身份授权请求，不授予任何商家数据访问——merchant_id 仍由
+# 商家在门户确认后落库（merchant-buddy 第 1 版设计 §3.2）。
+_CONNECTOR_TOKEN_ENV = "KIWI_CATALOG_CONNECTOR_TOKEN"
 
 
 def payload_token(payload: dict[str, Any]) -> str:
@@ -87,6 +91,26 @@ def require_admin_token(payload: dict[str, Any]) -> None:
         raise AuthError("invalid admin token")
     if not token_matches(token, expected):
         raise AuthError("invalid admin token")
+
+
+def configured_connector_token() -> str:
+    return str(os.environ.get(_CONNECTOR_TOKEN_ENV) or "").strip()
+
+
+def require_connector_token(payload: dict[str, Any]) -> None:
+    """Raise AuthError unless the payload carries the configured connector token.
+
+    未配置时一律拒绝（fail-closed）且不区分「未配置/无效」——配置状态泄漏会
+    辅助枚举探测（与 require_admin_token 同一口径）。
+    """
+    expected = configured_connector_token()
+    if not expected:
+        raise AuthError("invalid connector token")
+    token = payload_token(payload)
+    if not token:
+        raise AuthError("invalid connector token")
+    if not token_matches(token, expected):
+        raise AuthError("invalid connector token")
 
 
 def _owner_secret() -> str:

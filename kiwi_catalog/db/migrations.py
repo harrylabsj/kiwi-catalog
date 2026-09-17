@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 30
+CURRENT_SCHEMA_VERSION = 32
 
 
 @dataclass(frozen=True)
@@ -1046,6 +1046,82 @@ def migration_030_buyer_subscriptions(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_CONNECTOR_IDENTITY_DDL = [
+    """
+create table if not exists connector_identity_requests (
+        request_id text primary key,
+        client_label text not null default '',
+        return_url text not null,
+        status text not null default 'pending'
+            check(status in ('pending','approved','denied','consumed')),
+        account_id integer,
+        merchant_id text not null default '',
+        merchant_name text not null default '',
+        code_digest text not null default '',
+        created_at text not null,
+        expires_at text not null,
+        decided_at text not null default '',
+        consumed_at text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_connector_identity_requests_status_expires
+        on connector_identity_requests(status, expires_at)
+    """,
+    """
+create index if not exists idx_connector_identity_requests_code
+        on connector_identity_requests(code_digest)
+    """,
+]
+
+
+def migration_031_connector_identity(conn: sqlite3.Connection) -> None:
+    """商家连接器（「Kiwi 商家运营」）的一次性身份授权（kiwi 仓 merchant-buddy
+    第 1 版设计 §3.2 / 商家连接器发布计划 §3.1）。
+
+    商家连接器入口创建授权请求 → 商家在门户登录/注册并确认 → catalog 签发一次性
+    code（只落 sha256 摘要）→ 入口以 connector token 兑换 merchant_id。
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（tests/test_shadow_tables.py
+    锁定 fresh 路径与迁移路径等价）。
+    """
+    for statement in _CONNECTOR_IDENTITY_DDL:
+        conn.execute(statement)
+
+
+_CONNECTOR_MERCHANT_TOKEN_DDL = [
+    """
+create table if not exists connector_merchant_tokens (
+        token_hash text primary key,
+        account_id integer not null,
+        merchant_id text not null,
+        scope text not null default '',
+        request_id text not null default '',
+        created_at text not null,
+        expires_at text not null,
+        revoked_at text not null default '',
+        last_used_at text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_connector_merchant_tokens_merchant
+        on connector_merchant_tokens(merchant_id, expires_at)
+    """,
+]
+
+
+def migration_032_connector_merchant_tokens(conn: sqlite3.Connection) -> None:
+    """商家连接器凭据（kiwi 仓 merchant-buddy 第 1 版设计 §3.2 / 发布计划 §3.1）。
+
+    商家在门户确认连接后，入口用一次性 code 兑换到绑定
+    ``account_id + merchant_id + scope`` 的作用域令牌，凭它代表**该商家**调用
+    目录的商家接口（公开资料草稿/发布状态/撤回）。明文只返回一次，库中存
+    sha256 摘要；可撤销、有过期（对齐入口对 WorkBuddy 的 refresh 生命周期）。
+    DDL 与 db/models.py 的 SCHEMA 逐字一致（tests/test_shadow_tables.py 守护）。
+    """
+    for statement in _CONNECTOR_MERCHANT_TOKEN_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1077,6 +1153,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(28, "access_log", migration_028_access_log),
     Migration(29, "merchant_publications", migration_029_merchant_publications),
     Migration(30, "buyer_subscriptions", migration_030_buyer_subscriptions),
+    Migration(31, "connector_identity", migration_031_connector_identity),
+    Migration(32, "connector_merchant_tokens", migration_032_connector_merchant_tokens),
 )
 
 

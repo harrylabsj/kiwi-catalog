@@ -32,6 +32,7 @@ from kiwi_catalog.core.errors import AuthError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services import buyer_follows as follows_service
+from kiwi_catalog.services import connector_identity as identity_service
 from kiwi_catalog.services import merchant_publications as publications_service
 from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
@@ -71,6 +72,43 @@ def _optional_session_account(conn: Any, payload: dict[str, Any]) -> dict[str, A
     return accounts_service.resolve_session(conn, session_token)
 
 
+def _connector_actor(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """商家连接器凭据（``Authorization: Bearer cmt_…``）→ 商家主体；不匹配返回 None。
+
+    merchant_id 只来自凭据记录（商家在门户确认连接时落库），不接受请求体自述值。
+    """
+    token = str(payload.get("_auth_token") or "")
+    if not token.startswith(identity_service.MERCHANT_TOKEN_PREFIX):
+        return None
+    identity = identity_service.verify_merchant_token(conn, token)
+    if identity is None:
+        raise AuthError("invalid or expired connector merchant token")
+    return {
+        "account_id": identity["account_id"],
+        "merchant_id": identity["merchant_id"],
+        "merchant_name": "",
+        "email_verified": 1,
+        "actor": f"connector:{identity['merchant_id']}",
+    }
+
+
+def _require_merchant_actor(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """商家写路径主体：商家连接器凭据优先，其次浏览器会话。"""
+    connector = _connector_actor(conn, payload)
+    if connector is not None:
+        return connector
+    account = _require_session_account(conn, payload)
+    return {**account, "actor": f"account:{account.get('account_id')}"}
+
+
+def _optional_merchant_actor(conn: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """可选主体（公开详情的商家本人视角）：凭据或会话都无效时返回 None。"""
+    connector = _connector_actor(conn, payload)
+    if connector is not None:
+        return connector
+    return _optional_session_account(conn, payload)
+
+
 def _enforce_write_rate_limit(conn: Any, merchant_id: str) -> None:
     """按商家限流（复用 merchant_application_limits 表，15min 窗口）。"""
     limit = _publication_rate_limit_per_15min()
@@ -97,11 +135,11 @@ def create_publication(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     更新（不产生重复主体）。响应回执含 publication_id、版本、发布时间。
     """
     with db_session(db_path) as conn:
-        account = _require_session_account(conn, payload)
+        account = _require_merchant_actor(conn, payload)
         merchant_id = str(account.get("merchant_id") or "").strip()
         if not merchant_id:
             raise AuthError("account has no merchant_id — complete registration first")
-        actor = f"account:{account.get('account_id')}"
+        actor = str(account.get("actor") or f"account:{account.get('account_id')}")
         canonical, action = publications_service.validate_payload(payload)
         # 私密字段扫描（fail-closed + 审计）：明显的邮箱/手机号模式不得进入
         # 公开字段（注册账户的联系方式绝不自动进入公开投影的写入侧防线）。
@@ -194,14 +232,14 @@ def get_publication(
         if row is None:
             raise NotFoundError(f"Unknown publication: {publication_id}")
         if not publications_service.is_publicly_visible(row, now_iso()):
-            account = _optional_session_account(conn, payload or {})
+            account = _optional_merchant_actor(conn, payload or {})
             owner_merchant = str((account or {}).get("merchant_id") or "")
             if not owner_merchant or owner_merchant != str(row["merchant_id"]):
                 raise NotFoundError(f"Unknown publication: {publication_id}")
         else:
             # 浏览计数（M4 商家匿名汇总数据源）：只计非商家本人的公开可见
             # 浏览——本人查看自己的资料不计入。
-            account = _optional_session_account(conn, payload or {})
+            account = _optional_merchant_actor(conn, payload or {})
             owner_merchant = str((account or {}).get("merchant_id") or "")
             if owner_merchant != str(row["merchant_id"]):
                 publications_service.record_public_view(conn, publication_id)
@@ -216,7 +254,7 @@ def publication_stats(db_path: str | Path, payload: dict[str, Any]) -> dict[str,
     给商家）；不提供向关注者写消息的通道。
     """
     with db_session(db_path) as conn:
-        account = _require_session_account(conn, payload)
+        account = _require_merchant_actor(conn, payload)
         merchant_id = str(account.get("merchant_id") or "").strip()
         if not merchant_id:
             raise AuthError("account has no merchant_id — complete registration first")
@@ -256,7 +294,7 @@ def withdraw_publication(
     会话归属校验：只能撤回自己 merchant_id 名下的资料（账号 A 不能改账号 B）。
     """
     with db_session(db_path) as conn:
-        account = _require_session_account(conn, payload)
+        account = _require_merchant_actor(conn, payload)
         merchant_id = str(account.get("merchant_id") or "").strip()
         if not merchant_id:
             raise AuthError("account has no merchant_id — complete registration first")
@@ -267,7 +305,7 @@ def withdraw_publication(
         append_catalog_audit(
             conn,
             str(row["publication_id"]),
-            f"account:{account.get('account_id')}",
+            str(account.get("actor") or f"account:{account.get('account_id')}"),
             "merchant_publication_withdrawn",
             {"merchant_id": merchant_id, "publication_id": row["publication_id"]},
         )
