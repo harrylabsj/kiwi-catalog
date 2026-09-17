@@ -876,10 +876,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
 
-    def _portal_html(result: dict[str, Any]) -> HTMLResponse:
-        """门户 handler 结果 → HTMLResponse；``__redirect__`` 键发 302 +
-        Location（门户旧路径合并跳转），``__status__`` 键覆盖状态码
-        （与 fallback _send_json 语义一致）。"""
+    def _portal_html(result: dict[str, Any]) -> HTMLResponse | RedirectResponse:
+        """门户 handler 结果 → HTMLResponse 或 RedirectResponse（2xx/302）；
+        ``__redirect__`` 键发 302 + Location（门户旧路径合并跳转），
+        ``__status__`` 键覆盖状态码（与 fallback _send_json 语义一致）。
+
+        返回类型注解含 RedirectResponse：此前只写 HTMLResponse，mypy 一直报
+        ``Incompatible return value type``（改动前既有的 CI 失败），本次一并修正。
+        """
         redirect_to = result.get("__redirect__")
         if redirect_to:
             return RedirectResponse(
@@ -892,57 +896,57 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
 
     @app.get("/portal")
-    def portal_home_page() -> HTMLResponse:
+    def portal_home_page() -> Response:
         return _portal_html(portal_handlers.portal_home())
 
     @app.get("/portal/apply")
-    def portal_apply_page() -> HTMLResponse:
+    def portal_apply_page() -> Response:
         return _portal_html(portal_handlers.portal_apply())
 
     @app.get("/portal/admin")
-    def portal_admin_page() -> HTMLResponse:
+    def portal_admin_page() -> Response:
         return _portal_html(portal_handlers.portal_admin())
 
     @app.get("/portal/admin/searches")
-    def portal_admin_searches_page() -> HTMLResponse:
+    def portal_admin_searches_page() -> Response:
         return _portal_html(portal_handlers.portal_admin_searches())
 
     @app.get("/portal/admin/buyer-stats")
-    def portal_admin_buyer_stats_page() -> HTMLResponse:
+    def portal_admin_buyer_stats_page() -> Response:
         return _portal_html(portal_handlers.portal_admin_buyer_stats())
 
     @app.get("/portal/dashboard")
-    def portal_dashboard_page() -> HTMLResponse:
+    def portal_dashboard_page() -> Response:
         return _portal_html(portal_handlers.portal_dashboard())
 
     @app.get("/portal/register")
-    def portal_register_page() -> HTMLResponse:
+    def portal_register_page() -> Response:
         return _portal_html(portal_handlers.portal_register())
 
     @app.get("/portal/login")
-    def portal_login_page() -> HTMLResponse:
+    def portal_login_page() -> Response:
         return _portal_html(portal_handlers.portal_login())
 
     @app.get("/portal/connect")
-    def portal_connect_page() -> HTMLResponse:
+    def portal_connect_page() -> Response:
         return _portal_html(portal_handlers.portal_connect())
 
     @app.get("/portal/reset-password")
-    def portal_reset_password_page() -> HTMLResponse:
+    def portal_reset_password_page() -> Response:
         return _portal_html(portal_handlers.portal_reset_password())
 
     @app.get("/portal/account")
-    def portal_account_page() -> HTMLResponse:
+    def portal_account_page() -> Response:
         return _portal_html(portal_handlers.portal_account())
 
     @app.get("/portal/account/profile")
-    def portal_account_profile_page() -> HTMLResponse:
+    def portal_account_profile_page() -> Response:
         return _portal_html(portal_handlers.portal_account_profile())
 
     @app.get("/portal/publications")
-    def portal_publications_page() -> HTMLResponse:
+    def portal_publications_page() -> Response:
         return _portal_html(portal_handlers.portal_publications())
 
     @app.get("/portal/follows")
-    def portal_follows_page() -> HTMLResponse:
+    def portal_follows_page() -> Response:
         return _portal_html(portal_handlers.portal_follows())
