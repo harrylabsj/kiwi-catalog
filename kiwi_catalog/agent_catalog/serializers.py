@@ -31,6 +31,7 @@ from kiwi_catalog.agent_catalog.candidate_dto import (
     CANDIDATE_CONTRACT_NAME,
     CANDIDATE_DTO_VERSION,
 )
+from kiwi_catalog.agent_catalog.freshness import effective_freshness_state
 from kiwi_catalog.db.session import decode_json
 
 # ── Fields that MUST NOT appear in any public response (§3.4) ───────────────
@@ -311,7 +312,9 @@ def catalog_agent_record(
         "canonical_domain": safe.get("canonical_domain") or "",
         "hosting_mode": safe.get("hosting_mode", "unknown"),
         "verification_level": safe.get("verification_level", "discovered"),
-        "freshness_state": safe.get("freshness_state", "fresh"),
+        # 读时按 TTL 降级（只降不升）：商家服务器离线后不再被当成"可实时询价"，
+        # 但公开资料仍可查（WP6 / 发布计划 §3.6）。
+        "freshness_state": effective_freshness_state(safe),
         "administrative_state": safe.get("administrative_state", "active"),
         "created_at": safe.get("created_at", ""),
         "updated_at": safe.get("updated_at", ""),

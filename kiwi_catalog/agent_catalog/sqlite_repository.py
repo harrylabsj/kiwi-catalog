@@ -686,6 +686,27 @@ def set_verification_status(
     )
 
 
+def touch_catalog_agent(
+    conn: sqlite3.Connection, catalog_agent_id: str, *, now: str | None = None
+) -> dict[str, Any]:
+    """心跳：刷新 last_seen_at；行政状态为 active 时把新鲜度复活为 fresh。
+
+    与 ``refresh``（会重新抓取 profile、消耗验证队列）不同，心跳是轻量的
+    "我还在线"信号：商家侧 A2A 节点周期性调用，读侧据此判定可实时询价
+    （见 agent_catalog/freshness.py）。治理状态优先：suspended/rejected 的
+    agent 不因心跳复活。
+    """
+    current = require_catalog_agent(conn, catalog_agent_id)
+    stamp = now or now_iso()
+    conn.execute(
+        "update catalog_agents set last_seen_at = ?, updated_at = ? where catalog_agent_id = ?",
+        (stamp, stamp, catalog_agent_id),
+    )
+    if current["administrative_state"] == "active" and current["freshness_state"] != "fresh":
+        set_state_domains(conn, catalog_agent_id, freshness_state="fresh")
+    return require_catalog_agent(conn, catalog_agent_id)
+
+
 def set_state_domains(
     conn: sqlite3.Connection,
     catalog_agent_id: str,

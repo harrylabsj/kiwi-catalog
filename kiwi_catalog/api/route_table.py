@@ -85,6 +85,13 @@ RouteEntry(
     ),
 RouteEntry(
         {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/heartbeat",
+        lambda db_path, payload, query, catalog_agent_id: _heartbeat_catalog_agent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
         "/v1/agent-catalog/agents/{catalog_agent_id}/refresh",
         lambda db_path, payload, query, catalog_agent_id: _refresh_catalog_agent(
             db_path, catalog_agent_id, payload
@@ -537,6 +544,10 @@ def _list_merchant_catalog_agents(db_path, merchant_id, payload=None, query=None
 
 def _register_catalog_agent(db_path, payload):
     return agent_catalog_handlers.register_catalog_agent(db_path, payload)
+
+
+def _heartbeat_catalog_agent(db_path, catalog_agent_id, payload):
+    return agent_catalog_handlers.heartbeat_catalog_agent(db_path, catalog_agent_id, payload)
 
 
 def _refresh_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):

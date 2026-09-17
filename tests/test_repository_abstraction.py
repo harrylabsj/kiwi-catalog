@@ -62,6 +62,7 @@ _CATALOG_MAPPING: dict[str, str] = {
     "count_trust_observations": "count_trust_observations",
     "trust_observation_counts_by_kind": "trust_observation_counts_by_kind",
     "search": "search_catalog_agents",
+    "touch_catalog_agent": "touch_catalog_agent",
     "append_audit": "append_catalog_audit",
     "enforce_catalog_register_domain_limit": "enforce_catalog_register_domain_limit",
 }

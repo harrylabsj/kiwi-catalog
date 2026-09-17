@@ -38,6 +38,7 @@ from kiwi_catalog.api.route_table import (
     _claim_catalog_agent,
     _get_catalog_agent,
     _health,
+    _heartbeat_catalog_agent,
     _hosted_agent_card_document,
     _hosted_ucp_profile_document,
     _list_catalog_agents,
@@ -347,6 +348,16 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _register_catalog_agent(
             db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/heartbeat")
+    def v1_heartbeat_catalog_agent(
+        request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _heartbeat_catalog_agent(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, request.headers.get("authorization", ""), ""),
         )
 
     @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/refresh")
