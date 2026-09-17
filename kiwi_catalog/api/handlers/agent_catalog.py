@@ -28,11 +28,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.agent_catalog.freshness import agent_fresh_ttl_seconds
 from kiwi_catalog.agent_catalog.serializers import (
     catalog_agent_record,
     catalog_search_result,
 )
 from kiwi_catalog.agent_catalog.sqlite_repository import (
+    touch_catalog_agent,
     _list_capabilities_by_agent,
     _list_endpoints_by_agent,
     _list_skills_by_agent,
@@ -617,6 +619,37 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
     enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
     response["task_id"] = getattr(enqueued, "task_id", "")
     return response
+
+
+def heartbeat_catalog_agent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/heartbeat —— 商家"我还在线"信号。
+
+    与 refresh 的区别：心跳**不重新抓取 profile、不消耗验证队列**，只刷新
+    last_seen_at（并在治理状态为 active 时把新鲜度复活为 fresh）。读侧据此
+    按 TTL 判定"可实时询价"（见 agent_catalog/freshness.py）。鉴权同其他
+    写端点：owner merchant / admin / verification worker。
+
+    心跳是高频幂等信号，**不写审计**（否则审计表会被心跳淹没）；下线/异常
+    由读侧 TTL 判定，不需要额外事件。
+    """
+    catalog_agent_id = str(catalog_agent_id).strip()
+    with db_session(db_path) as conn:
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        actor = _require_catalog_write_auth(conn, agent, payload)
+        api_idempotency.enforce_agent_catalog_rate_limit(
+            conn, api_idempotency.catalog_write_actor_key(payload), _catalog_write_rate_limit_per_minute()
+        )
+        updated = touch_catalog_agent(conn, catalog_agent_id)
+    return {
+        "ok": True,
+        "catalog_agent_id": catalog_agent_id,
+        "actor": actor,
+        "last_seen_at": updated["last_seen_at"],
+        "freshness_state": updated["freshness_state"],
+        "fresh_ttl_seconds": agent_fresh_ttl_seconds(),
+    }
 
 
 def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:

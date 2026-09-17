@@ -216,6 +216,14 @@ class CatalogRepository(Protocol):
         """Return trust observation counts grouped by kind."""
         ...
 
+    def touch_catalog_agent(self, catalog_agent_id: str) -> dict[str, Any]:
+        """心跳：刷新 last_seen_at；行政状态为 active 时把新鲜度复活为 fresh。
+
+        轻量"我还在线"信号（不抓取 profile、不消耗验证队列）；治理状态优先，
+        suspended/rejected 不因心跳复活。返回更新后的 catalog_agents 行。
+        """
+        ...
+
     def set_state_domains(
         self,
         catalog_agent_id: str,
