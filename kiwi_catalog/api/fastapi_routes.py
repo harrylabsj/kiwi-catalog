@@ -56,8 +56,10 @@ from kiwi_catalog.api.route_table import (
     _v1_admin_searches,
     _v1_approve_application,
     _v1_claim_agent,
+    _v1_create_merchant_publication,
     _v1_get_agent,
     _v1_get_listing,
+    _v1_get_merchant_publication,
     _v1_list_agent_listings,
     _v1_list_agents,
     _v1_list_applications,
@@ -71,9 +73,11 @@ from kiwi_catalog.api.route_table import (
     _v1_rotate_token,
     _v1_search_agents,
     _v1_search_listings,
+    _v1_search_merchant_publications,
     _v1_submit_application,
     _v1_verify_agent,
     _v1_withdraw_listing,
+    _v1_withdraw_merchant_publication,
     _verify_catalog_agent,
     resolve_route,
 )
@@ -664,6 +668,38 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return accounts_handlers.profile(db_path, _account_payload(request, payload))
 
+    # ── /v1/merchant-publications（M0 商家公开资料；会话 cookie 经 _account_payload 透传）
+    @app.post("/v1/merchant-publications")
+    def v1_create_merchant_publication(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _v1_create_merchant_publication(db_path, _account_payload(request, payload))
+
+    @app.get("/v1/merchant-publications/search")
+    def v1_search_merchant_publications(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_search_merchant_publications(
+            db_path, _buyer_payload(request), _query_params_from_request(request)
+        )
+
+    @app.get("/v1/merchant-publications/{publication_id}")
+    def v1_get_merchant_publication(
+        publication_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        # 可选会话：商家本人可见自己的 draft/withdrawn（匿名仅 published）
+        return _v1_get_merchant_publication(
+            db_path, publication_id, _account_payload(request, {})
+        )
+
+    @app.post("/v1/merchant-publications/{publication_id}/withdraw")
+    def v1_withdraw_merchant_publication(
+        publication_id: str,
+        request: _FastAPIRequest,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return _v1_withdraw_merchant_publication(
+            db_path, publication_id, _account_payload(request, payload)
+        )
+
     # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
     @app.get("/v1/admin/dashboard")
     def v1_admin_dashboard(request: _FastAPIRequest) -> dict[str, Any]:
@@ -787,3 +823,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/account/profile")
     def portal_account_profile_page() -> HTMLResponse:
         return _portal_html(portal_handlers.portal_account_profile())
+
+    @app.get("/portal/publications")
+    def portal_publications_page() -> HTMLResponse:
+        return _portal_html(portal_handlers.portal_publications())

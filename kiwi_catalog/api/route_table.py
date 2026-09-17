@@ -33,6 +33,7 @@ from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
+from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
@@ -312,6 +313,33 @@ RouteEntry(
         "/v1/accounts/profile",
         lambda db_path, payload, query, **kw: _v1_account_profile(db_path, payload),
     ),
+    # ── /v1/merchant-publications（M0 商家公开资料，docs/accounts.md §publications）
+    # 顺序约束：/search 静态段必须先于 /{publication_id} 参数段
+    #（_match_path 顺序匹配；与 /v1/listings/search 先例一致）。
+RouteEntry(
+        {"POST"},
+        "/v1/merchant-publications",
+        lambda db_path, payload, query, **kw: _v1_create_merchant_publication(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchant-publications/search",
+        lambda db_path, payload, query, **kw: _v1_search_merchant_publications(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/merchant-publications/{publication_id}",
+        lambda db_path, payload, query, publication_id: _v1_get_merchant_publication(
+            db_path, publication_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/merchant-publications/{publication_id}/withdraw",
+        lambda db_path, payload, query, publication_id: _v1_withdraw_merchant_publication(
+            db_path, publication_id, payload
+        ),
+    ),
 # ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
 RouteEntry(
         {"GET"},
@@ -405,6 +433,11 @@ RouteEntry(
         {"GET"},
         "/portal/account/profile",
         lambda db_path, payload, query, **kw: _portal_account_profile(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/publications",
+        lambda db_path, payload, query, **kw: _portal_publications(),
     ),
 )
 
@@ -571,6 +604,27 @@ def _v1_account_profile(db_path, payload):
     return accounts_handlers.profile(db_path, payload)
 
 
+# ── /v1/merchant-publications wrapper（M0 商家公开资料）──────────────────
+
+
+def _v1_create_merchant_publication(db_path, payload):
+    return merchant_publications_handlers.create_publication(db_path, payload)
+
+
+def _v1_search_merchant_publications(db_path, payload, query):
+    return merchant_publications_handlers.search_publications(
+        db_path, query or {}, auth_payload=payload or {}
+    )
+
+
+def _v1_get_merchant_publication(db_path, publication_id, payload=None):
+    return merchant_publications_handlers.get_publication(db_path, publication_id, payload or {})
+
+
+def _v1_withdraw_merchant_publication(db_path, publication_id, payload):
+    return merchant_publications_handlers.withdraw_publication(db_path, publication_id, payload)
+
+
 # ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
 
 
@@ -647,6 +701,10 @@ def _portal_account():
 
 def _portal_account_profile():
     return portal_handlers.portal_account_profile()
+
+
+def _portal_publications():
+    return portal_handlers.portal_publications()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):

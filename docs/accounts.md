@@ -21,7 +21,7 @@ owner token 双路径（`api/auth.py`）：
 - **HMAC fallback**（legacy）：`owner_token(merchant_id) = HMAC-SHA256(
   KIWI_CATALOG_OWNER_TOKEN_SECRET, "kiwi-catalog-owner:"+merchant_id)`。
 
-## 2. 数据模型（20 张表的一部分，迁移 v13–v16）
+## 2. 数据模型（28 张表的一部分，迁移 v13–v16 / v24–v25 / v29）
 
 | 表 | 用途 |
 | --- | --- |
@@ -29,15 +29,17 @@ owner token 双路径（`api/auth.py`）：
 | `account_sessions` | 登录会话（随机 session token，SHA-256 存储） |
 | `merchants` | 商家影子表（admin dashboard 只读；**注册即创建**——`register_account` 经 `ensure_merchant_id` 同步 `insert or ignore`，审批/Agent 注册兜底；存量账号会话解析懒回填） |
 | `merchant_applications` | 接入申请（merchant_id、状态 pending/approved/rejected、工单字段） |
-| `merchant_application_limits` | 注册/登录/申请限流（per-email / per-actor 15min 窗口） |
+| `merchant_application_limits` | 注册/登录/申请/公开资料发布限流（per-email / per-actor / per-merchant 15min 窗口） |
 | `merchant_tokens` | 签发 token（`token_encrypted` Fernet 加密存储，active/revoked；注册种入空 hash 的 revoked 占位行） |
 | `usage_metrics` | 令牌使用量（rotated/revoked 等） |
+| `merchant_publications` | 商家公开资料（M0，§3.5：账号会话发布的 public-only 声明快照，draft/published/withdrawn） |
 
 - 迁移：v13（usage_metrics）、v14（accounts）、v15（邮箱验证）、
   v16（基本信息字段）、v24（忘记密码重置：merchant_accounts 加
   `reset_code_hash` / `reset_expires_at`，与邮箱验证码同机制——SHA-256
-  落库 + 15 分钟过期）、v25（联系方式微信：merchant_accounts 加 `wechat`）；
-  `CURRENT_SCHEMA_VERSION = 25`。
+  落库 + 15 分钟过期）、v25（联系方式微信：merchant_accounts 加 `wechat`）、
+  v29（商家公开资料 merchant_publications，M0）；
+  `CURRENT_SCHEMA_VERSION = 29`。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
   ——token 明文永不落盘。
 
@@ -88,6 +90,39 @@ owner token 双路径（`api/auth.py`）：
 | `/portal/register` / `/portal/login` | 商家注册（**必填商家名称**，注册即商家）/ 登录 |
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + Token 管理 |
+| `/portal/publications` | 公开资料编辑/预览/发布（M0）：发布成功回执显示 publication_id、版本、发布时间；未登录引导去 `/portal/login` |
+
+### 3.5 `/v1/merchant-publications/*`（M0 商家公开资料，账号会话）
+
+没有部署 Merchant Agent 的注册商家，用**账号会话**（cookie `kiwi_session`，
+**不是 owner token**）发布 public-only 的商家/商品声明快照；买家按商品词
+公开检索（kiwi 仓 merchant-buddy 第 0 版设计 §4 / M0 工作包 A）。
+
+| 路由 | 语义 |
+| --- | --- |
+| `POST /v1/merchant-publications` | 保存草稿（`action=draft`，缺省）/ 确认发布（`action=publish`）；必填 `merchant_display_name` + `title`（商品名）；响应回执含 `publication_id`、`version`、`published_at` |
+| `GET /v1/merchant-publications/search` | 公开检索（`q`/`category`/`merchant_id`/`limit`/`cursor`）；仅 `published` 且未过期（`expires_at` 为空或在未来）；排序分页沿用 listings 搜索约定；结果恒带 `inquiry_available=false` |
+| `GET /v1/merchant-publications/{id}` | 公开详情；匿名仅 published 未过期可见，商家本人（会话归属一致）可见自己的 draft/withdrawn，其余 404 |
+| `POST /v1/merchant-publications/{id}/withdraw` | 撤回（终态）；会话归属校验——只能撤回自己 merchant_id 名下的资料 |
+
+- **状态域**：`draft`（私有草稿，不进搜索）→ `published`（公开可搜）→
+  `withdrawn`（撤回终态，退出搜索与匿名详情）；`source_kind` 恒为
+  `merchant_declared`（商家声明内容，不是 Kiwi 背书）。
+- **会话归属**：`merchant_id` 一律取自服务端会话，客户端传值无效；
+  按商家限流（env `KIWI_CATALOG_PUBLICATION_RATE_LIMIT_PER_15MIN`，默认
+  30/15min，复用 `merchant_application_limits` 表）。
+- **public-only 白名单**：公开投影只有白名单字段——注册账户的电话/邮箱/
+  凭据绝不出现；写入侧对公开字段做私密字段扫描（明显的邮箱/手机号模式
+  fail-closed 拒绝 + 审计 `merchant_publication_private_field_rejected`）。
+- **幂等**：同一商家同名商品（`merchant_id` + `lower(title)`，非撤回行）
+  重复提交 = 更新既有行（响应 `idempotent=true` + 说明文案，发布动作版本
+  递增）；`(merchant_id, lower(title))` 非撤回行部分唯一索引数据层兜底。
+- **不生成虚假能力**：公开资料不产出 Agent Card、A2A 端点或实时报价标记
+  （`inquiry_available=false`）；第 1 版商家的实时询价走既有 Agent/Listing
+  链路与 owner token 权限模型。
+- **审计**：发布/更新（`merchant_publication_published` / `_republished` /
+  `_saved` / `_updated`）、撤回（`merchant_publication_withdrawn`）、私密
+  字段拒绝均落 `audit_events` 影子表。
 
 ## 4. 安全属性
 

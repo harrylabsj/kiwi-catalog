@@ -231,5 +231,66 @@ class Migration023DropShoppingTokenTest(unittest.TestCase):
             conn.close()
 
 
+class Migration029MerchantPublicationsTest(unittest.TestCase):
+    """v29 商家公开资料表：迁移链建表 + 幂等 + 部分唯一索引兜底。"""
+
+    def test_table_created_with_indexes_and_idempotent(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import migration_029_merchant_publications
+
+            migration_029_merchant_publications(conn)
+            conn.commit()
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(merchant_publications)").fetchall()
+            }
+            for expected in (
+                "publication_id",
+                "merchant_id",
+                "status",
+                "source_kind",
+                "merchant_display_name",
+                "title",
+                "faq_json",
+                "published_at",
+                "expires_at",
+                "version",
+                "created_at",
+                "updated_at",
+            ):
+                self.assertIn(expected, columns)
+            # 部分唯一索引兜底：同一商家同名商品（非撤回行）第二次写入冲突
+            conn.execute(
+                "insert into merchant_publications("
+                " publication_id, merchant_id, status, merchant_display_name, title,"
+                " created_at, updated_at)"
+                " values ('mpub_a', 'mkt_1', 'published', 'Acme', 'Tea', ?, ?)",
+                (_TS, _TS),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into merchant_publications("
+                    " publication_id, merchant_id, status, merchant_display_name, title,"
+                    " created_at, updated_at)"
+                    " values ('mpub_b', 'mkt_1', 'draft', 'Acme', 'tea', ?, ?)",
+                    (_TS, _TS),
+                )
+            conn.rollback()
+            # 撤回行不参与唯一约束：同名可再次发布
+            conn.execute(
+                "insert into merchant_publications("
+                " publication_id, merchant_id, status, merchant_display_name, title,"
+                " created_at, updated_at)"
+                " values ('mpub_c', 'mkt_1', 'withdrawn', 'Acme', 'Tea', ?, ?)",
+                (_TS, _TS),
+            )
+            conn.commit()
+            # 幂等：再跑一次不报错（create table/index if not exists）
+            migration_029_merchant_publications(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

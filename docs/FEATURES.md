@@ -1,7 +1,8 @@
 # kiwi-catalog 功能文档
 
-> 状态：对应 `main` 分支当前实现（2026-08-08，214 passed / 9 skipped；
-> v0.4 Product-first Commerce Discovery + 商家接入/账号体系已落地）。
+> 状态：对应 `main` 分支当前实现（2026-09-17，718 passed；
+> v0.4 Product-first Commerce Discovery + 商家接入/账号体系 +
+> M0 商家公开资料已落地）。
 > 本文描述**已实现**的功能面，不含设计文档中规划但未落地的部分
 > （如 PG/Redis 多实例限流、验证阶梯的第三方互操作证据、FTS/vector 搜索）。
 
@@ -23,6 +24,7 @@ shopping-cli 抽离的独立部署目录（切割分水岭：**不含托管协�
 | 治理 | `suspend` / `reinstate` / `claim` | admin 处置、owner 认领、审计事件、双维度限流 |
 | Listing（v0.4） | `POST /v1/listings/publish` + `/v1/listings/search` | ProductListing/CapabilityListing 发布、搜索、下架、恢复（public-only discovery projection） |
 | Listing 治理联动 | agent `suspend` | owned Listings 同事务置 SUSPENDED + 搜索 join 排除（DoD #12） |
+| 商家公开资料（M0） | `POST /v1/merchant-publications` + `/v1/merchant-publications/search` | 账号会话发布的 public-only 声明快照（draft/published/withdrawn）；买家按商品词检索，`inquiry_available=false` |
 | 观测 | `GET /health` + CLI `stats` / `doctor` | §24 runtime metrics |
 
 ## 2. API 面
@@ -61,6 +63,10 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | POST | `/v1/listings/publish` | 发布/upsert Listing（owner token + 五步幂等 + digest 去重锚点） |
 | POST | `/v1/listings/{id}/withdraw` | publisher 主动下架 |
 | POST | `/v1/listings/{id}/reinstate` | SUSPENDED → ACTIVE（publisher/governance） |
+| POST | `/v1/merchant-publications` | 商家公开资料：保存草稿/确认发布（**账号会话**，非 owner token；merchant_id 取自服务端会话） |
+| GET | `/v1/merchant-publications/search` | 公开检索（仅 published 且未过期；按商品名/类目；cursor 分页；`inquiry_available=false`） |
+| GET | `/v1/merchant-publications/{id}` | 公开详情（匿名仅 published 未过期；商家本人可见自己的 draft/withdrawn） |
+| POST | `/v1/merchant-publications/{id}/withdraw` | 撤回（账号会话 + 归属校验，终态） |
 
 ### 2.3 v1 面（`/v1/agents/*`）与 legacy 面（`/v1/agent-catalog/*`）
 
@@ -71,6 +77,25 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
   `administrative_state`）+ `handoff_destination_types` 精确词表过滤，
   `hosting_mode` 接受 canonical + legacy 别名，响应经 contract schema
   （`additionalProperties: false`）校验。
+
+### 2.4 商家公开资料（M0，`/v1/merchant-publications/*`）
+
+没有部署 Merchant Agent 的注册商家，用**账号会话**（非 owner token）发布
+public-only 的商家/商品声明快照，买家按商品词公开检索：
+
+- **状态域**：`draft`（私有草稿）→ `published`（公开可搜）→ `withdrawn`
+  （撤回，终态）；`expires_at` 到期后自动退出搜索与匿名详情；
+- **public-only 白名单**：注册账户的电话/邮箱/凭据绝不进入公开投影——
+  表结构本就不存账户联系方式，写入侧另做私密字段扫描（明显的邮箱/手机号
+  模式 fail-closed + 审计 `merchant_publication_private_field_rejected`）；
+- **会话归属**：`merchant_id` 一律取自服务端会话（客户端传值无效）；
+  同一商家同名商品重复发布 = 幂等更新既有行（版本递增，不产生重复主体；
+  `(merchant_id, lower(title))` 非撤回行部分唯一索引数据层兜底）；
+- **不生成虚假能力**：公开资料不产出 Agent Card、A2A 端点或实时报价标记；
+  搜索/详情投影恒带 `inquiry_available=false`（第 1 版商家走既有
+  Agent/Listing 链路实时询价）；
+- 按商家限流（env `KIWI_CATALOG_PUBLICATION_RATE_LIMIT_PER_15MIN`，默认
+  30/15min）；发布/更新/撤回均落 `audit_events` 审计。
 
 ## 3. 验证阶梯（§6）
 
@@ -162,7 +187,7 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 
 ## 5. 数据模型
 
-20 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v16，
+28 张表（`db/models.py` 单一 SCHEMA 源 + `db/migrations.py` 迁移链 v1–v29，
 两路径产出同一表集合，有测试锁定）：
 
 - **catalog 域**：catalog_agents（含三域列 + handoff_destination_types）、
@@ -173,6 +198,9 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
   verification_queue_tasks、agent_trust_observations；
 - **listing 域（v10）**：commerce_listings（listing 类型/owner 绑定/upsert
   key 双轨/JSON 投影列/发布与新鲜度状态；partial unique 兜底行级幂等）；
+- **商家公开资料域（v29，M0）**：merchant_publications（账号会话发布的
+  声明快照；draft/published/withdrawn 状态域 + source_kind=merchant_declared
+  + 版本/发布时间/有效期；同名幂等 partial unique 兜底）；
 - **影子域**：merchants（public 字段）、audit_events、meta。
 
 要点：
@@ -205,12 +233,13 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 ## 8. 测试与已知边界
 
-- 214 passed / 9 skipped（FastAPI 条件 skip，2026-08-08 实测）；覆盖：三态域迁移与折叠、幂等/限流、
+- 718 passed（2026-09-17 实测；FastAPI 条件 skip 在本环境 0 skipped）；覆盖：三态域迁移与折叠、幂等/限流、
   SSRF fetcher（含 http 接线/深嵌套/非法端口/慢滴漏时长上限）、secret
   扫描 cap、影子表、仓库抽象防接口漂移、验证队列执行模型（超时/去重/
-  ledger 失败）、迁移守卫（v7 重复检测/v8 回填守卫/v11 唯一索引）、
-  权限 0700/0600、Listing 域（publish 契约/幂等 upsert/搜索/新鲜度惰性
-  翻转/agent 治理联动/dualstack 对齐）。
+  ledger 失败）、迁移守卫（v7 重复检测/v8 回填守卫/v11 唯一索引/v29 建表
+  幂等）、权限 0700/0600、Listing 域（publish 契约/幂等 upsert/搜索/新鲜度
+  惰性翻转/agent 治理联动/dualstack 对齐）、M0 商家公开资料（会话归属/草稿
+  不可见/同名幂等/撤回与过期退出搜索/私密字段拒绝/双栈 parity）。
 - **未实现/接缝**：PG+Redis 多实例限流（P3/P5）；验证阶梯的第三方互操作
   证据（wire 级）；`agent_trust_observations` 的写入方（表已建，消费在
   后续版本）；`reported_external_conversion` 类外部成交指标不在本服务范围；

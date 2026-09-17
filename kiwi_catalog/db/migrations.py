@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29
 
 
 @dataclass(frozen=True)
@@ -933,6 +933,57 @@ def migration_028_access_log(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_MERCHANT_PUBLICATIONS_DDL = [
+    """
+create table if not exists merchant_publications (
+        publication_id text primary key,
+        merchant_id text not null,
+        status text not null default 'draft'
+            check(status in ('draft','published','withdrawn')),
+        source_kind text not null default 'merchant_declared'
+            check(source_kind in ('merchant_declared')),
+        merchant_display_name text not null,
+        shop_platform text not null default '',
+        shop_url text not null default '',
+        title text not null,
+        category text not null default '',
+        summary text not null default '',
+        faq_json text not null default '[]',
+        published_at text not null default '',
+        expires_at text not null default '',
+        version integer not null default 1,
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create index if not exists idx_merchant_publications_merchant
+        on merchant_publications(merchant_id)
+    """,
+    """
+create index if not exists idx_merchant_publications_status_updated
+        on merchant_publications(status, updated_at, publication_id)
+    """,
+    """
+create unique index if not exists idx_merchant_publications_merchant_title_unique
+        on merchant_publications(merchant_id, lower(title))
+        where status != 'withdrawn'
+    """,
+]
+
+
+def migration_029_merchant_publications(conn: sqlite3.Connection) -> None:
+    """商家公开资料表（M0 工作包 A，kiwi 仓 merchant-buddy 第 0 版设计 §4）。
+
+    已验证商家账号会话发布的 public-only 声明快照（draft/published/withdrawn
+    状态域，source_kind=merchant_declared）；注册账户的电话/邮箱不进入本表
+    （写入侧私密字段扫描）。DDL 与 db/models.py 的 SCHEMA 逐字一致
+    （tests/test_shadow_tables.py 锁定 fresh 路径与迁移路径等价）。
+    """
+    for statement in _MERCHANT_PUBLICATIONS_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -962,6 +1013,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(26, "buyer_search_daily", migration_026_buyer_search_daily),
     Migration(27, "buyer_keyword_daily", migration_027_buyer_keyword_daily),
     Migration(28, "access_log", migration_028_access_log),
+    Migration(29, "merchant_publications", migration_029_merchant_publications),
 )
 
 

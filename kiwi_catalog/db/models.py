@@ -503,6 +503,50 @@ create index if not exists idx_access_log_surface_occurred
 create index if not exists idx_access_log_target
         on access_log(target_id)
     """,
+    # v29 — 商家公开资料（M0 工作包 A，kiwi 仓
+    # docs/merchant-buddy/v0-m0-catalog-to-expert-development-brief.md）。
+    # 已验证商家账号会话（非 owner token）发布的公开声明快照：
+    # source_kind 恒为 merchant_declared，public-only 白名单字段——注册账户的
+    # 电话/邮箱/凭据绝不进入本表（写入侧私密字段扫描 + 公开投影白名单双保险）。
+    # 不产生 Agent Card / A2A 端点 / 实时报价标记（inquiry_available=false）。
+    # (merchant_id, lower(title)) 非撤回行部分唯一索引兜底行级幂等（同一商家
+    # 同名商品重复发布 = 更新既有行，不产生重复主体；弱引用无 FK 约定）。
+    # DDL 与迁移链 migration_029 逐字一致（test_shadow_tables 守护）。
+    """
+create table if not exists merchant_publications (
+        publication_id text primary key,
+        merchant_id text not null,
+        status text not null default 'draft'
+            check(status in ('draft','published','withdrawn')),
+        source_kind text not null default 'merchant_declared'
+            check(source_kind in ('merchant_declared')),
+        merchant_display_name text not null,
+        shop_platform text not null default '',
+        shop_url text not null default '',
+        title text not null,
+        category text not null default '',
+        summary text not null default '',
+        faq_json text not null default '[]',
+        published_at text not null default '',
+        expires_at text not null default '',
+        version integer not null default 1,
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create index if not exists idx_merchant_publications_merchant
+        on merchant_publications(merchant_id)
+    """,
+    """
+create index if not exists idx_merchant_publications_status_updated
+        on merchant_publications(status, updated_at, publication_id)
+    """,
+    """
+create unique index if not exists idx_merchant_publications_merchant_title_unique
+        on merchant_publications(merchant_id, lower(title))
+        where status != 'withdrawn'
+    """,
 ]
 
 

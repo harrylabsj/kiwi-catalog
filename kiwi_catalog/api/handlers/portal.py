@@ -1224,6 +1224,7 @@ def portal_account() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="/portal/publications">公开资料</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
@@ -1338,6 +1339,7 @@ def portal_account_profile() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="/portal/publications">公开资料</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
   </div>
   <div id="out"></div>
@@ -1383,6 +1385,151 @@ document.getElementById('save_profile').addEventListener('click', () => {
     )
     body = body.replace("{sub_apply}", "").replace("{sub_profile}", ' class="active"')
     return _account_page("基本信息", body)
+
+
+def portal_publications() -> dict[str, Any]:
+    """「公开资料」页（M0）：编辑 → 预览 → 保存草稿 / 确认发布 → 发布回执。
+
+    未登录引导去 /portal/login（页面 JS 检查 /v1/accounts/me，与「我的」同
+    模式）。发布回执显示 publication_id、版本、发布时间；已发布资料可撤回。
+    公开资料是商家声明快照（source_kind=merchant_declared），不产生 Agent
+    Card / A2A 端点 / 实时报价标记；注册账户的电话/邮箱不进入公开字段
+    （服务端私密字段扫描 fail-closed）。
+    """
+    body = (
+        _nav("account")
+        + """
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">商家后台</div>
+  <h2>公开资料</h2>
+  <div class="subnav">
+    <a href="/portal/account/profile">基本信息</a>
+    <a href="/portal/account">令牌信息</a>
+    <a href="/portal/publications" class="active">公开资料</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
+  </div>
+  <p class="lead">发布商家及商品基本资料后，买家可按商品词在 Kiwi 目录搜索到你。
+    公开资料是你的声明快照（仅展示，不含实时报价/库存）；请勿填写电话、邮箱等联系方式——
+    含联系方式的内容会被拒绝。</p>
+  <div id="out"></div>
+  <div id="editor" style="display:none">
+    <div class="card form-card">
+      <label for="m_name">公开商家名称 <span class="req">*</span></label>
+      <input id="m_name" placeholder="Acme 商贸">
+      <label for="m_title">商品名 <span class="req">*</span></label>
+      <input id="m_title" placeholder="如：明前龙井 2026 新茶">
+      <label for="m_category">类目（选填）</label>
+      <input id="m_category" placeholder="如：茶叶">
+      <label for="m_platform">店铺平台（选填，如 淘宝 / 京东）</label>
+      <input id="m_platform" placeholder="淘宝">
+      <label for="m_url">公开店铺链接（选填，http/https）</label>
+      <input id="m_url" placeholder="https://shop.example.com">
+      <label for="m_summary">简介（选填，公开可见）</label>
+      <textarea id="m_summary" rows="4" placeholder="商品基本说明，公开可见"></textarea>
+      <label for="m_faq">FAQ（选填，每行一条：问题|答案）</label>
+      <textarea id="m_faq" rows="4" placeholder="保修多久？|整机保修一年"></textarea>
+      <label for="m_expires">资料有效期（选填，到期后不再出现在搜索中）</label>
+      <input id="m_expires" type="datetime-local">
+      <div class="token-actions">
+        <button class="btn-mini" id="preview">预览</button>
+        <button class="btn-mini" id="save_draft">保存草稿</button>
+        <button class="btn-mini" id="publish">确认发布</button>
+      </div>
+    </div>
+    <div class="card form-card" id="preview_card" style="display:none">
+      <h3>公开预览（买家可见内容）</h3>
+      <div id="preview_body"></div>
+    </div>
+    <div class="card form-card" id="receipt_card" style="display:none">
+      <h3 id="receipt_title">发布成功</h3>
+      <div id="receipt_body"></div>
+      <div class="token-actions">
+        <button class="btn-mini" id="withdraw" style="display:none">撤回该资料</button>
+      </div>
+    </div>
+  </div>
+</div></section>
+<script>
+let currentPublicationId = '';
+function formPayload(action) {
+  const faq = [];
+  document.getElementById('m_faq').value.split('\\n').forEach(line => {
+    const idx = line.indexOf('|');
+    if (idx > 0) faq.push({question: line.slice(0, idx).trim(), answer: line.slice(idx + 1).trim()});
+  });
+  const expires = document.getElementById('m_expires').value;
+  return {
+    action: action,
+    merchant_display_name: document.getElementById('m_name').value.trim(),
+    title: document.getElementById('m_title').value.trim(),
+    category: document.getElementById('m_category').value.trim(),
+    shop_platform: document.getElementById('m_platform').value.trim(),
+    shop_url: document.getElementById('m_url').value.trim(),
+    summary: document.getElementById('m_summary').value.trim(),
+    faq: faq,
+    expires_at: expires ? new Date(expires).toISOString() : '',
+  };
+}
+function showErr(msg) {
+  const out = document.getElementById('out');
+  out.className = 'err';
+  out.textContent = msg;
+}
+document.getElementById('preview').addEventListener('click', () => {
+  const p = formPayload('draft');
+  let html = '<p><strong>' + escHtml(p.merchant_display_name) + '</strong> · ' + escHtml(p.title) + '</p>';
+  if (p.category) html += '<p class="small">类目：' + escHtml(p.category) + '</p>';
+  if (p.shop_platform || p.shop_url) html += '<p class="small">店铺：' + escHtml(p.shop_platform) + ' ' + escHtml(p.shop_url) + '</p>';
+  if (p.summary) html += '<p>' + escHtml(p.summary) + '</p>';
+  p.faq.forEach(item => { html += '<p class="small">Q：' + escHtml(item.question) + '<br>A：' + escHtml(item.answer) + '</p>'; });
+  html += '<p class="small muted">来源：商家声明（merchant_declared）· 不可实时询价</p>';
+  document.getElementById('preview_body').innerHTML = html;
+  document.getElementById('preview_card').style.display = 'block';
+});
+function submitPublication(action) {
+  const btn = document.getElementById(action === 'publish' ? 'publish' : 'save_draft');
+  btn.disabled = true;
+  postJson('/v1/merchant-publications', formPayload(action)).then(r => {
+    btn.disabled = false;
+    if (!r.ok) { showErr(r.error || '提交失败'); return; }
+    const pub = r.publication || {};
+    currentPublicationId = pub.publication_id || '';
+    const published = pub.status === 'published';
+    document.getElementById('receipt_title').textContent = published ? '发布成功' : '草稿已保存';
+    let html = '<p class="small">资料编号（publication_id）</p>'
+      + '<div class="token-box">' + escHtml(pub.publication_id) + '</div>'
+      + '<p class="small">状态 ' + escHtml(pub.status) + ' · 版本 v' + escHtml(pub.version)
+      + (pub.published_at ? ' · 发布时间 ' + escHtml(pub.published_at) : '') + '</p>';
+    if (r.message) html += '<p class="small muted">' + escHtml(r.message) + '</p>';
+    if (published) html += '<p class="ok">买家现在可以按商品词在 Kiwi 目录搜索到该资料（仅展示，不可实时询价）。</p>';
+    document.getElementById('receipt_body').innerHTML = html;
+    document.getElementById('withdraw').style.display = published ? 'inline-block' : 'none';
+    document.getElementById('receipt_card').style.display = 'block';
+  });
+}
+document.getElementById('save_draft').addEventListener('click', () => submitPublication('draft'));
+document.getElementById('publish').addEventListener('click', () => submitPublication('publish'));
+document.getElementById('withdraw').addEventListener('click', () => {
+  const btn = document.getElementById('withdraw');
+  btn.disabled = true;
+  postJson('/v1/merchant-publications/' + encodeURIComponent(currentPublicationId) + '/withdraw', {}).then(r => {
+    btn.disabled = false;
+    if (!r.ok) { showErr(r.error || '撤回失败'); return; }
+    document.getElementById('receipt_title').textContent = '已撤回';
+    document.getElementById('receipt_body').innerHTML = '<p class="small">资料已撤回，不再出现在买家搜索中。</p>';
+    btn.style.display = 'none';
+  });
+});
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+  if (!r.ok) { window.location.href = '/portal/login'; return; }
+  document.getElementById('m_name').value = r.merchant_name || '';
+  document.getElementById('editor').style.display = 'block';
+});
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("公开资料", body)
 
 
 def _not_found_html() -> str:
