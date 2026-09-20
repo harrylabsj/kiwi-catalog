@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 32
+CURRENT_SCHEMA_VERSION = 33
 
 
 @dataclass(frozen=True)
@@ -1122,6 +1122,67 @@ def migration_032_connector_merchant_tokens(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_CLOUD_CARD_DDL = [
+    """
+create table if not exists agent_card_versions (
+        catalog_agent_id text not null,
+        card_revision integer not null,
+        wire_profile text not null,
+        canonical_bytes text not null,
+        digest text not null,
+        created_by text not null,
+        created_at text not null,
+        primary key (catalog_agent_id, card_revision)
+    )
+    """,
+    """
+create index if not exists idx_agent_card_versions_agent_digest
+        on agent_card_versions(catalog_agent_id, digest)
+    """,
+    """
+create table if not exists card_publications (
+        catalog_agent_id text primary key,
+        active_revision integer not null,
+        publication_state text not null
+            check(publication_state in ('ACTIVE','PAUSED','WITHDRAWN')),
+        etag text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create table if not exists runtime_bindings (
+        binding_id text primary key,
+        catalog_agent_id text not null,
+        merchant_id text not null,
+        runtime_origin text not null,
+        a2a_endpoint text not null,
+        key_id text not null,
+        key_thumbprint text not null,
+        key_jwk_json text not null,
+        binding_version integer not null,
+        service_epoch integer not null,
+        status text not null check(status in ('active','paused','revoked')),
+        expires_at text not null default '',
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create unique index if not exists idx_runtime_bindings_agent_version
+        on runtime_bindings(catalog_agent_id, binding_version)
+    """,
+    """
+create index if not exists idx_runtime_bindings_agent_status
+        on runtime_bindings(catalog_agent_id, status)
+    """,
+]
+
+
+def migration_033_cloud_card_store(conn: sqlite3.Connection) -> None:
+    for statement in _CLOUD_CARD_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1155,6 +1216,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(30, "buyer_subscriptions", migration_030_buyer_subscriptions),
     Migration(31, "connector_identity", migration_031_connector_identity),
     Migration(32, "connector_merchant_tokens", migration_032_connector_merchant_tokens),
+    Migration(33, "cloud_card_store", migration_033_cloud_card_store),
 )
 
 

@@ -654,6 +654,61 @@ create table if not exists connector_merchant_tokens (
 create index if not exists idx_connector_merchant_tokens_merchant
         on connector_merchant_tokens(merchant_id, expires_at)
     """,
+    # v33 — 云端名片托管与绑定（M3；设计 §11.2）。DDL 与迁移链
+    # migration_033 逐字一致（test_shadow_tables 守护）：不可变名片版本、
+    # 发布状态（ACTIVE/PAUSED/WITHDRAWN）、Runtime 绑定（含公钥 JWK 与指纹）。
+    """
+create table if not exists agent_card_versions (
+        catalog_agent_id text not null,
+        card_revision integer not null,
+        wire_profile text not null,
+        canonical_bytes text not null,
+        digest text not null,
+        created_by text not null,
+        created_at text not null,
+        primary key (catalog_agent_id, card_revision)
+    )
+    """,
+    """
+create index if not exists idx_agent_card_versions_agent_digest
+        on agent_card_versions(catalog_agent_id, digest)
+    """,
+    """
+create table if not exists card_publications (
+        catalog_agent_id text primary key,
+        active_revision integer not null,
+        publication_state text not null
+            check(publication_state in ('ACTIVE','PAUSED','WITHDRAWN')),
+        etag text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create table if not exists runtime_bindings (
+        binding_id text primary key,
+        catalog_agent_id text not null,
+        merchant_id text not null,
+        runtime_origin text not null,
+        a2a_endpoint text not null,
+        key_id text not null,
+        key_thumbprint text not null,
+        key_jwk_json text not null,
+        binding_version integer not null,
+        service_epoch integer not null,
+        status text not null check(status in ('active','paused','revoked')),
+        expires_at text not null default '',
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create unique index if not exists idx_runtime_bindings_agent_version
+        on runtime_bindings(catalog_agent_id, binding_version)
+    """,
+    """
+create index if not exists idx_runtime_bindings_agent_status
+        on runtime_bindings(catalog_agent_id, status)
+    """
 ]
 
 
