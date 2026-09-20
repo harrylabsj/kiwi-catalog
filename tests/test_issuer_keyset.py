@@ -75,7 +75,10 @@ class IssuerKeySetTest(unittest.TestCase):
                 {"kid": f"issuer-{index}", "state": state, "private_key_file": str(key_path)}
             )
         keys_path = _write_key_set(self.dir, entries)
-        return {ISSUER_KEYS_FILE_ENV: str(keys_path)}
+        return {
+            ISSUER_KEYS_FILE_ENV: str(keys_path),
+            "KIWI_CATALOG_PUBLIC_ORIGIN": "https://catalog.example",
+        }
 
     # ── 加载路径 ─────────────────────────────────────────────
     def test_single_key_env_falls_back_to_active(self) -> None:

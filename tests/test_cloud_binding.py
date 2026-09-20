@@ -39,14 +39,16 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
-from kiwi_catalog.a2a.binding_claims import jwk_thumbprint
+from kiwi_catalog.a2a.binding_claims import catalog_public_origin, jwk_thumbprint
 from kiwi_catalog.agent_catalog.sqlite_repository import new_catalog_agent_id, upsert_catalog_agent
 from kiwi_catalog.api.app import create_catalog_app
+from kiwi_catalog.core.errors import PermissionDenied
 from kiwi_catalog.db.session import db_session
 
 ADMIN_TOKEN = "admin-token-m3"
 RUNTIME_ORIGIN = "https://pilot.example.app.workbuddy.host"
 A2A_ENDPOINT = f"{RUNTIME_ORIGIN}/a2a"
+CATALOG_ORIGIN = "https://catalog.example"
 
 
 def _b64url(raw: bytes) -> str:
@@ -143,6 +145,8 @@ class CloudBindingTest(unittest.TestCase):
                 "KIWI_CATALOG_ISSUER_KEY_FILE": str(issuer_path),
                 "KIWI_CATALOG_ISSUER_KID": "catalog-issuer-test",
                 "KIWI_CATALOG_ISSUER_NAME": "catalog.kiwi.test",
+                # card_url 只从受控配置的公开 origin 派生（绝不从入站 Host 推导）
+                "KIWI_CATALOG_PUBLIC_ORIGIN": CATALOG_ORIGIN,
             },
             clear=False,
         )
@@ -357,6 +361,12 @@ class CloudBindingTest(unittest.TestCase):
         self.assertEqual(claims["scope"], "a2a-runtime")
         self.assertEqual(claims["agent_id"], self.catalog_agent_id)
         self.assertEqual(claims["key_thumbprint"], jwk_thumbprint(self.runtime_jwk))
+        # card_url 必须是**绝对 https URL**（Schema pattern `^https://`），
+        # 且与公开读地址同一份（Buyer 用它做 CARD_URL_MISMATCH 比对）。
+        self.assertEqual(
+            claims["card_url"],
+            f"{CATALOG_ORIGIN}/v1/agents/{self.catalog_agent_id}/agent-card.json",
+        )
         issued = datetime.fromisoformat(claims["issued_at"])
         expires = datetime.fromisoformat(claims["expires_at"])
         self.assertLessEqual((expires - issued).total_seconds(), 15 * 60)
@@ -411,6 +421,20 @@ class CloudBindingTest(unittest.TestCase):
             card_bytes,
             json.dumps(json.loads(card_bytes), ensure_ascii=False, sort_keys=True).encode("utf-8"),
         )
+
+    def test_missing_public_origin_refuses_claims(self) -> None:
+        """未配置公开 origin → **拒签**，绝不退化成相对路径的 card_url。
+
+        相对路径不满足 Schema 的 `^https://`，会让 TS 侧 `validateBindingClaims`
+        直接判 CLAIMS_INVALID——签发一个下游必然拒绝的声明，比拒签更糟。
+        """
+        self.assertEqual(self._create_binding()[0], 200)
+        self._publish_and_activate()
+        cleared = unittest.mock.patch.dict(os.environ, {"KIWI_CATALOG_PUBLIC_ORIGIN": ""})
+        cleared.start()
+        self.addCleanup(cleared.stop)
+        status, payload = self._read_claims()
+        self.assertEqual(status, 403, payload)
 
     def test_no_binding_or_no_active_card_refuses_claims(self) -> None:
         # 无绑定时读取 → 404
@@ -469,6 +493,37 @@ class CloudBindingTest(unittest.TestCase):
         status, payload = self._read_claims()
         # 撤销后不再有活动绑定：读声明被拒（403 治理拒绝 / 404 无活动绑定，两者都=不签发）
         self.assertIn(status, (403, 404), payload)
+
+
+class CatalogPublicOriginTest(unittest.TestCase):
+    """`card_url` 的派生源：只认受控配置的 origin，且必须是干净的 https origin。"""
+
+    def test_accepts_clean_https_origin(self) -> None:
+        self.assertEqual(
+            catalog_public_origin({"KIWI_CATALOG_PUBLIC_ORIGIN": "https://catalog.example"}),
+            "https://catalog.example",
+        )
+        # 尾斜杠归一；端口保留
+        self.assertEqual(
+            catalog_public_origin({"KIWI_CATALOG_PUBLIC_ORIGIN": "https://catalog.example:8443/"}),
+            "https://catalog.example:8443",
+        )
+
+    def test_refuses_missing_or_unsafe_origins(self) -> None:
+        for raw in (
+            "",
+            "   ",
+            "http://catalog.example",  # 非 https
+            "https://catalog.example/base",  # 带路径
+            "https://catalog.example?a=1",  # 带查询
+            "https://catalog.example#f",  # 带片段
+            "https://user:pass@catalog.example",  # 带凭据
+            "not a url",
+            "https://",
+        ):
+            with self.subTest(origin=raw):
+                with self.assertRaises(PermissionDenied):
+                    catalog_public_origin({"KIWI_CATALOG_PUBLIC_ORIGIN": raw})
 
 
 if __name__ == "__main__":  # pragma: no cover

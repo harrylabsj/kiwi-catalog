@@ -34,6 +34,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -48,6 +49,30 @@ ISSUER_KEY_FILE_ENV = "KIWI_CATALOG_ISSUER_KEY_FILE"
 ISSUER_KID_ENV = "KIWI_CATALOG_ISSUER_KID"
 ISSUER_NAME_ENV = "KIWI_CATALOG_ISSUER_NAME"
 DEFAULT_ISSUER_NAME = "catalog.kiwi"
+#: Catalog 对外公开 origin（`https://host[:port]`，无路径/查询/片段）。
+#: `card_url` 只从这里派生；未配置即拒签。
+PUBLIC_ORIGIN_ENV = "KIWI_CATALOG_PUBLIC_ORIGIN"
+
+
+def catalog_public_origin(source: Mapping[str, str]) -> str:
+    """校验并返回受控配置的公开 origin；缺失/非 https/带路径一律拒签。"""
+    raw = str(source.get(PUBLIC_ORIGIN_ENV) or "").strip()
+    if not raw:
+        raise PermissionDenied(
+            f"catalog public origin is not configured ({PUBLIC_ORIGIN_ENV});"
+            " refusing to issue claims with a relative card_url"
+        )
+    try:
+        parsed = urlsplit(raw)
+    except ValueError as exc:
+        raise PermissionDenied(f"catalog public origin is not a valid URL: {raw!r}") from exc
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise PermissionDenied(f"catalog public origin must be https: {raw!r}")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise PermissionDenied(f"catalog public origin must not include path/query/fragment: {raw!r}")
+    if parsed.username or parsed.password:
+        raise PermissionDenied("catalog public origin must not embed credentials")
+    return f"https://{parsed.netloc}"
 
 
 def jwk_thumbprint(jwk: dict[str, Any]) -> str:
@@ -134,6 +159,7 @@ def read_runtime_binding(
     now: datetime | None = None,
     ttl_seconds: int = DEFAULT_CLAIMS_TTL_SECONDS,
     env: Mapping[str, str] | None = None,
+    public_origin: str | None = None,
 ) -> dict[str, Any]:
     """签发并返回绑定声明 + 治理状态（公开读；不含平台 appId/用户 ID）。"""
     current = now or datetime.now(timezone.utc)
@@ -164,7 +190,15 @@ def read_runtime_binding(
     issuer = load_issuer_key_set(env).signing_identity()
     source = env if env is not None else os.environ
     issuer_name = str(source.get(ISSUER_NAME_ENV) or "").strip() or DEFAULT_ISSUER_NAME
-    card_url = f"/v1/agents/{catalog_agent_id}/agent-card.json"
+    # `card_url` 必须是**绝对 https URL**（Schema 的 `^https://` + 样例
+    # `https://catalog.example/v1/agents/cagt_demo/agent-card.json`）。
+    # 绝不从入站 Host 推导（Host 可被改写/伪造——Runtime 侧已因平台网关重写
+    # Host 踩过同一坑）：只认受控配置的公开 origin；未配置即拒签。
+    origin_source: Mapping[str, str] = (
+        source if public_origin is None else {PUBLIC_ORIGIN_ENV: public_origin}
+    )
+    origin = catalog_public_origin(origin_source)
+    card_url = f"{origin}/v1/agents/{catalog_agent_id}/agent-card.json"
     claims = {
         "schema_version": CLAIMS_SCHEMA_VERSION,
         "binding_id": str(binding["binding_id"]),
