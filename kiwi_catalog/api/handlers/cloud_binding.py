@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.a2a.binding_claims import jwk_thumbprint, read_runtime_binding
+from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
 from kiwi_catalog.a2a.request_signature import verify_binding_possession, verify_runtime_request
 from kiwi_catalog.agent_catalog.catalog_audit import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
@@ -61,10 +62,10 @@ def _binding_required(payload: dict[str, Any]) -> dict[str, Any]:
     key_jwk = binding.get("key_jwk")
     if not isinstance(key_jwk, dict):
         raise ValidationError("binding.key_jwk must be a JWK object")
-    if not str(binding["runtime_origin"]).startswith("https://"):
-        raise ValidationError("binding.runtime_origin must be https")
-    if not str(binding["a2a_endpoint"]).startswith("https://"):
-        raise ValidationError("binding.a2a_endpoint must be https")
+    # T035：绑定声明会被 Catalog 原样交给 Buyer（并经 Catalog 签名背书），
+    # 因此私网 / loopback / cloud metadata / 保留主机名等危险目标在这里就拒绝，
+    # 绝不进入签发链路。DNS 解析到内网的情形由连接时复查兜底（见 endpoint_policy）。
+    assert_safe_binding_targets(binding)
     if not isinstance(binding.get("generation"), int):
         raise ValidationError("binding.generation must be an integer")
     if not isinstance(binding.get("service_epoch"), int):

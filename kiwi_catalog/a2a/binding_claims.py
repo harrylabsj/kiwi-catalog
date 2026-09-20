@@ -40,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from kiwi_catalog.a2a.card_store import read_active_card
+from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
 from kiwi_catalog.core.errors import NotFoundError, PermissionDenied, ValidationError
 
 CLAIMS_SCHEMA_VERSION = "0.1.2"
@@ -184,6 +185,15 @@ def read_runtime_binding(
         raise PermissionDenied(f"agent is not publishable: {exc}") from exc
     if publication_state == "WITHDRAWN":
         raise PermissionDenied("publication withdrawn; refusing to issue claims")
+
+    # 纵深防御（T035）：即便库里存了一条不安全目标的绑定，也绝不签发给 Buyer。
+    # 创建时已拦一次；签发是第二个出口，同样 fail-closed。
+    assert_safe_binding_targets(
+        {
+            "runtime_origin": str(binding["runtime_origin"]),
+            "a2a_endpoint": str(binding["a2a_endpoint"]),
+        }
+    )
 
     # 签发走密钥集合：只有 ACTIVE 的 kid 能签；COMPROMISED/RETIRED 一律拒签（SIG-04）。
     # 未配置密钥集合时回退单密钥 env（视为 ACTIVE），行为与本函数既有调用方一致。
