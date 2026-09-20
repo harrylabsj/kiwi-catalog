@@ -303,6 +303,87 @@ class CloudCardPublicationTest(unittest.TestCase):
         start = next(m for m in received if m["type"] == "http.response.start")
         self.assertEqual(start["status"], 304)
 
+    # ── T040：Card 必须过正式 A2A 验证器（§13.1） ─────────────────
+    def test_card_must_pass_the_formal_a2a_validator(self) -> None:
+        """外层发布 Schema 不是完整 A2A Schema——正式解析器会拦下它管的那部分。
+
+        正式 A2A v1.0.0 解析器的同源判定覆盖 `url` / `documentationUrl` / `provider.url`；
+        这里用跨域的 `provider.url` 触发它（接口列表不在其覆盖范围内，由本模块自己的
+        权威域检查兜住，见下一个用例）。
+        """
+        bad_provider = _card(
+            extra={"provider": {"organization": "Kiwi", "url": "https://other.example"}}
+        )
+        status, payload, _headers, _raw = self._publish(bad_provider)
+        self.assertEqual(status, 400, payload)
+        self.assertIn("A2A v1.0.0", str(payload.get("error", "")))
+
+        # 合法卡片照常通过——反例与正例必须成对，否则"全拒"也能让测试变绿
+        self.assertEqual(self._publish()[0], 200)
+
+    def test_every_declared_interface_must_live_on_the_runtime_origin(self) -> None:
+        """[绑定端点, 第三方端点] 这种卡片必须被拒。
+
+        只断言"绑定端点在列表里"是不够的：那样等于用 Catalog 的签名背书替第三方
+        端点做广告。云端名片声明的每个接口都必须落在绑定 Runtime 的权威域内。
+        """
+        cross_domain = _card(
+            extra={
+                "supportedInterfaces": [
+                    {"url": A2A_ENDPOINT, "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
+                    {
+                        "url": "https://other.example/a2a",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0",
+                    },
+                ]
+            }
+        )
+        status, payload, _headers, _raw = self._publish(cross_domain)
+        self.assertEqual(status, 400, payload)
+        self.assertIn("runtime origin", str(payload.get("error", "")))
+
+        # 子域仍然允许（同源判定含子域），且 url 指向 Runtime origin 是合法的
+        subdomain = _card(
+            extra={
+                "url": RUNTIME_ORIGIN,
+                "supportedInterfaces": [
+                    {"url": A2A_ENDPOINT, "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
+                ],
+            }
+        )
+        self.assertEqual(self._publish(subdomain)[0], 200)
+
+    def test_card_url_may_not_point_away_from_the_runtime_origin(self) -> None:
+        pointing_at_catalog = _card(extra={"url": "https://catalog.example"})
+        status, payload, _headers, _raw = self._publish(pointing_at_catalog)
+        self.assertEqual(status, 400, payload)
+        self.assertIn("runtime origin", str(payload.get("error", "")))
+
+    def test_wire_profile_is_pinned_to_a2a_1_0(self) -> None:
+        publication = self._publication()
+        for profile in ("a2a-1.1", "a2a-0.3", ""):
+            with self.subTest(profile=profile):
+                publication["wire_profile"] = profile
+                signature = self._sign(
+                    {
+                        "agent_id": self.catalog_agent_id,
+                        "binding_id": BINDING_ID,
+                        "card_digest": publication["card_digest"],
+                        "expected_revision": publication["expected_revision"],
+                        "generation": publication["generation"],
+                    }
+                )
+                status, payload, _headers, _raw = _call_http(
+                    self.app,
+                    "POST",
+                    f"/v1/agents/{self.catalog_agent_id}/card-publications",
+                    json.dumps({"publication": publication}).encode(),
+                    signature=signature,
+                )
+                self.assertEqual(status, 400, payload)
+                self.assertIn("wire_profile", str(payload.get("error", "")))
+
     # ── T033：泄漏字段注入 ────────────────────────────────────────
     def test_private_field_injection_rejected_and_old_card_intact(self) -> None:
         self.assertEqual(self._publish()[0], 200)

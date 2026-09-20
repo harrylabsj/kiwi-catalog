@@ -41,7 +41,13 @@ import sqlite3
 from typing import Any
 
 from kiwi_catalog.core.errors import ConflictError, GoneError, NotFoundError, ValidationError
-from kiwi_catalog.discovery._validation import scan_secrets
+from kiwi_catalog.discovery._validation import (
+    ProfileValidationError,
+    canonical_domain_of,
+    is_same_authority,
+    scan_secrets,
+)
+from kiwi_catalog.discovery.agent_card import AgentCardParser
 from kiwi_catalog.discovery.cache import compute_etag as _http_etag
 
 WIRE_PROFILE = "a2a-1.0"
@@ -185,9 +191,19 @@ def validate_publication(
         if not isinstance(card.get(field), str) or not card[field].strip():
             raise ValidationError(f"agent_card.{field} must be a non-empty string")
 
+    # §13.1（T040）：外层发布 Schema **不是**完整 A2A Schema——"Card 对象仍须交给
+    # 正式协议验证器。不得在生产中仅用这份外层 Schema 就接受任意 Card"。
+    # 这里跑仓库正式的 A2A v1.0.0 解析器（schema → 语义 → 身份/同源 → 秘密隔离）；
+    # 来源 URL 取 Card 自己的 url（Card 的权威域），接口/文档地址必须同源。
+    try:
+        AgentCardParser(reject_on_secret=True).parse(card, source_url=str(card["url"]))
+    except ProfileValidationError as exc:
+        raise ValidationError(f"agent_card failed A2A v1.0.0 validation: {exc}") from exc
+
     if binding is not None:
         endpoint = str(binding["a2a_endpoint"])
         origin = str(binding["runtime_origin"])
+        canonical = canonical_domain_of(origin)
         interfaces = card.get("supportedInterfaces")
         if not isinstance(interfaces, list) or not interfaces:
             raise ValidationError("agent_card.supportedInterfaces must be a non-empty array")
@@ -196,10 +212,22 @@ def validate_publication(
             raise ValidationError(
                 "agent_card.supportedInterfaces must point at the bound runtime endpoint"
             )
+        # 云端名片声明的**每一个**接口都必须落在绑定的 Runtime 权威域内：只要求
+        # "绑定端点在列表里"会让 [绑定端点, 第三方端点] 这种卡片混进来，等于用
+        # Catalog 的签名背书替第三方做广告（正式 A2A 验证器只对 url/documentationUrl/
+        # provider.url 做同源判定，接口列表不在其覆盖范围内——这一层必须自己拦）。
+        stray = [
+            url for url in urls if not is_same_authority(canonical_domain_of(url), canonical)
+        ]
+        if stray:
+            raise ValidationError(
+                "agent_card.supportedInterfaces must all live on the bound runtime origin:"
+                f" {', '.join(stray[:4])}"
+            )
         card_url = str(card.get("url", ""))
-        if card_url and card_url.startswith(origin) is False and endpoint not in card_url:
-            # Card 的 url 可以是名片地址或 Runtime origin；但绝不能指向 Catalog 自己。
-            raise ValidationError("agent_card.url must not point at the catalog host")
+        if card_url and not is_same_authority(canonical_domain_of(card_url), canonical):
+            # Card 的 url 只能是 Runtime origin 本身或其子域；绝不能指向 Catalog 或第三方。
+            raise ValidationError("agent_card.url must not point away from the runtime origin")
     return card, digest
 
 
