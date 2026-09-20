@@ -35,7 +35,10 @@ from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.route_table import (
+    _activate_card_publication,
     _claim_catalog_agent,
+    _create_card_publication,
+    _create_runtime_binding,
     _get_catalog_agent,
     _health,
     _heartbeat_catalog_agent,
@@ -43,10 +46,14 @@ from kiwi_catalog.api.route_table import (
     _hosted_ucp_profile_document,
     _list_catalog_agents,
     _list_merchant_catalog_agents,
+    _published_agent_card,
+    _read_runtime_binding,
     _refresh_catalog_agent,
     _register_catalog_agent,
     _reinstate_catalog_agent,
+    _revoke_runtime_binding,
     _search_agent_catalog,
+    _set_card_publication_state,
     _suspend_catalog_agent,
     _v1_admin_access_insights,
     _v1_admin_access_log,
@@ -123,6 +130,17 @@ def _idempotency_key_header_default() -> Any:
 
 AUTHORIZATION_HEADER = _auth_header_default()
 IDEMPOTENCY_KEY_HEADER = _idempotency_key_header_default()
+
+
+def _binding_jws_header_default() -> Any:
+    if _Header is None:
+        return ""
+    return _Header(default="", alias=BINDING_JWS_HEADER_NAME)
+
+
+#: M3 控制面写接口的 Runtime 请求签名头（设计 §14.1：owner token 不进 JSON body）。
+BINDING_JWS_HEADER_NAME = "x-kiwi-binding-jws"
+BINDING_JWS_HEADER = _binding_jws_header_default()
 
 
 def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
@@ -471,6 +489,76 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _v1_claim_agent(
             db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
         )
+
+    # ── M3 云端名片托管与 Runtime 绑定（与 route_table 逐条对齐） ──────────
+    # 写接口不接受 owner token；授权凭据是 `x-kiwi-binding-jws`（Runtime 用绑定私钥
+    # 对语义字段签名）。两栈的共同口径在 api_auth.payload_with_auth 第 4 参。
+    def _cloud_payload(payload: dict[str, Any], request: _FastAPIRequest) -> dict[str, Any]:
+        return api_auth.payload_with_auth(
+            payload,
+            request.headers.get("authorization", ""),
+            request.headers.get("idempotency-key", ""),
+            request.headers.get(BINDING_JWS_HEADER_NAME, ""),
+        )
+
+    @app.get("/v1/agents/{catalog_agent_id}/agent-card.json")
+    def published_agent_card_route(catalog_agent_id: str) -> Any:
+        return _published_agent_card(db_path, catalog_agent_id)
+
+    @app.post("/v1/agents/{catalog_agent_id}/card-publications")
+    def create_card_publication_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _create_card_publication(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+
+    @app.post("/v1/agents/{catalog_agent_id}/publish")
+    def activate_card_publication_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _activate_card_publication(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+
+    @app.post("/v1/agents/{catalog_agent_id}/pause")
+    def pause_card_publication_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _set_card_publication_state(
+            db_path, catalog_agent_id, _cloud_payload(payload, request), "PAUSED"
+        )
+
+    @app.post("/v1/agents/{catalog_agent_id}/withdraw")
+    def withdraw_card_publication_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _set_card_publication_state(
+            db_path, catalog_agent_id, _cloud_payload(payload, request), "WITHDRAWN"
+        )
+
+    @app.post("/v1/agents/{catalog_agent_id}/runtime-bindings")
+    def create_runtime_binding_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _create_runtime_binding(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+
+    @app.post("/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke")
+    def revoke_runtime_binding_route(
+        catalog_agent_id: str,
+        binding_id: str,
+        payload: dict[str, Any],
+        request: _FastAPIRequest,
+    ) -> dict[str, Any]:
+        return _revoke_runtime_binding(
+            db_path, catalog_agent_id, binding_id, _cloud_payload(payload, request)
+        )
+
+    @app.get("/v1/agents/{catalog_agent_id}/runtime-binding")
+    def read_runtime_binding_route(catalog_agent_id: str) -> dict[str, Any]:
+        return _read_runtime_binding(db_path, catalog_agent_id)
 
     @app.get("/v1/hosted/agents/{catalog_agent_id}/agent-card.json")
     def hosted_agent_card_route(catalog_agent_id: str) -> Any:

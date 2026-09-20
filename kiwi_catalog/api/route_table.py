@@ -628,34 +628,38 @@ def _reinstate_catalog_agent(db_path, catalog_agent_id, payload=None, query=None
     return agent_catalog_handlers.reinstate_catalog_agent(db_path, catalog_agent_id, payload or {})
 
 
-def _create_runtime_binding(db_path: str, catalog_agent_id: str, payload: dict):
+def _create_runtime_binding(db_path: str | Path, catalog_agent_id: str, payload: dict):
     return cloud_binding_handlers.create_runtime_binding(db_path, catalog_agent_id, payload)
 
 
-def _revoke_runtime_binding(db_path: str, catalog_agent_id: str, binding_id: str, payload: dict):
+def _revoke_runtime_binding(
+    db_path: str | Path, catalog_agent_id: str, binding_id: str, payload: dict
+):
     return cloud_binding_handlers.revoke_runtime_binding(
         db_path, catalog_agent_id, binding_id, payload
     )
 
 
-def _read_runtime_binding(db_path: str, catalog_agent_id: str):
+def _read_runtime_binding(db_path: str | Path, catalog_agent_id: str):
     return cloud_binding_handlers.read_runtime_binding_document(db_path, catalog_agent_id)
 
 
-def _published_agent_card(db_path: str, catalog_agent_id: str):
+def _published_agent_card(db_path: str | Path, catalog_agent_id: str):
     """GET /v1/agents/{id}/agent-card.json —— 原始 Card JSON（M3 稳定读地址）。"""
     return cloud_card_handlers.published_agent_card(db_path, catalog_agent_id)
 
 
-def _create_card_publication(db_path: str, catalog_agent_id: str, payload: dict):
+def _create_card_publication(db_path: str | Path, catalog_agent_id: str, payload: dict):
     return cloud_card_handlers.create_card_publication(db_path, catalog_agent_id, payload)
 
 
-def _activate_card_publication(db_path: str, catalog_agent_id: str, payload: dict):
+def _activate_card_publication(db_path: str | Path, catalog_agent_id: str, payload: dict):
     return cloud_card_handlers.activate_card_publication(db_path, catalog_agent_id, payload)
 
 
-def _set_card_publication_state(db_path: str, catalog_agent_id: str, payload: dict, state: str):
+def _set_card_publication_state(
+    db_path: str | Path, catalog_agent_id: str, payload: dict, state: str
+):
     return cloud_card_handlers.set_card_publication_state(db_path, catalog_agent_id, payload, state)
 
 

@@ -33,7 +33,7 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -89,7 +89,7 @@ class IssuerIdentity:
         return jwk_thumbprint(self.public_jwk)
 
 
-def load_issuer_identity(env: dict[str, str] | None = None) -> IssuerIdentity:
+def load_issuer_identity(env: Mapping[str, str] | None = None) -> IssuerIdentity:
     """从受控来源加载发行者身份；缺失/非法一律拒签（不生成临时钥匙）。"""
     source = env if env is not None else os.environ
     key_file = str(source.get(ISSUER_KEY_FILE_ENV) or "").strip()
@@ -133,7 +133,7 @@ def read_runtime_binding(
     *,
     now: datetime | None = None,
     ttl_seconds: int = DEFAULT_CLAIMS_TTL_SECONDS,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """签发并返回绑定声明 + 治理状态（公开读；不含平台 appId/用户 ID）。"""
     current = now or datetime.now(timezone.utc)
@@ -159,7 +159,9 @@ def read_runtime_binding(
     if publication_state == "WITHDRAWN":
         raise PermissionDenied("publication withdrawn; refusing to issue claims")
 
-    issuer = load_issuer_identity(env)
+    # 签发走密钥集合：只有 ACTIVE 的 kid 能签；COMPROMISED/RETIRED 一律拒签（SIG-04）。
+    # 未配置密钥集合时回退单密钥 env（视为 ACTIVE），行为与本函数既有调用方一致。
+    issuer = load_issuer_key_set(env).signing_identity()
     source = env if env is not None else os.environ
     issuer_name = str(source.get(ISSUER_NAME_ENV) or "").strip() or DEFAULT_ISSUER_NAME
     card_url = f"/v1/agents/{catalog_agent_id}/agent-card.json"
@@ -182,10 +184,118 @@ def read_runtime_binding(
         "scope": "a2a-runtime",
         "status": "active",
     }
+    publication = conn.execute(
+        "select active_revision, etag from card_publications where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    ).fetchone()
     return {
         "claims": claims,
         "claims_jws": _sign_claims(claims, issuer),
         "issuer_kid": issuer.kid,
         "issuer_thumbprint": issuer.thumbprint,
         "governance": {"publication_state": publication_state},
+        # 公开元数据（非敏感）：供 Buyer 按 (来源, card revision, binding_version, 端点)
+        # 建立信任缓存（设计 §12.1）。
+        "card_revision": int(publication["active_revision"]) if publication is not None else None,
+        "card_etag": str(publication["etag"]) if publication is not None else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# SIG-04（最小）：发行者密钥集合与状态机
+# ---------------------------------------------------------------------------
+
+ISSUER_KEYS_FILE_ENV = "KIWI_CATALOG_ISSUER_KEYS_FILE"
+ISSUER_KEY_STATES = ("PREPARED", "ACTIVE", "VERIFY_ONLY", "RETIRED", "COMPROMISED")
+#: 泄漏密钥（COMPROMISED）是**终态**：普通恢复不得把它重新激活（§11.6）。
+_TERMINAL_STATES = ("COMPROMISED",)
+
+
+class IssuerKeySet:
+    """发行者公钥集合与状态（kid → state + 公钥；ACTIVE 才用于签发）。
+
+    - 只从受控文件加载（`KIWI_CATALOG_ISSUER_KEYS_FILE`）；文件缺失时回退到
+      单密钥 env 形态（视为 ACTIVE）。
+    - **未知 kid 不得触发到任意外部 URL 下载信任根**：本类不做任何网络访问；
+      公钥集合由受控发布渠道/管理员提供。
+    """
+
+    def __init__(self, entries: dict[str, dict[str, Any]]) -> None:
+        self._entries = entries
+
+    @property
+    def kids(self) -> list[str]:
+        return sorted(self._entries)
+
+    def state_of(self, kid: str) -> str | None:
+        entry = self._entries.get(kid)
+        return None if entry is None else str(entry["state"])
+
+    def public_keys(self) -> dict[str, dict[str, Any]]:
+        """kid → {state, jwk}（供可信发布渠道分发；不含私钥）。"""
+        return {
+            kid: {"state": str(entry["state"]), "jwk": dict(entry["jwk"])}
+            for kid, entry in self._entries.items()
+        }
+
+    def signing_identity(self) -> IssuerIdentity:
+        """选取 ACTIVE 的签发身份；没有 ACTIVE 即拒签（不降级、不复用失效密钥）。"""
+        active = [kid for kid in self.kids if self._entries[kid]["state"] == "ACTIVE"]
+        if not active:
+            raise PermissionDenied("no ACTIVE catalog issuer key (rotation in progress or all retired)")
+        if len(active) > 1:
+            raise PermissionDenied("multiple ACTIVE catalog issuer keys; exactly one expected")
+        entry = self._entries[active[0]]
+        return IssuerIdentity(active[0], entry["private_key"], entry["jwk"])
+
+    def transition(self, kid: str, state: str) -> str:
+        """状态迁移；COMPROMISED 是终态，任何"恢复"尝试都被拒绝。"""
+        if state not in ISSUER_KEY_STATES:
+            raise ValidationError(f"unknown issuer key state: {state}")
+        entry = self._entries.get(kid)
+        if entry is None:
+            raise NotFoundError(f"unknown issuer kid: {kid}")
+        current = str(entry["state"])
+        if current in _TERMINAL_STATES and state != current:
+            raise PermissionDenied(f"issuer key {kid} is {current}; transitions out of it are refused")
+        entry["state"] = state
+        return state
+
+
+def load_issuer_key_set(env: Mapping[str, str] | None = None) -> IssuerKeySet:
+    """从受控文件加载密钥集合；未配置时回退单密钥 env（state=ACTIVE）。"""
+    source = env if env is not None else os.environ
+    keys_file = str(source.get(ISSUER_KEYS_FILE_ENV) or "").strip()
+    if keys_file:
+        path = Path(keys_file)
+        if not path.is_file():
+            raise PermissionDenied("catalog issuer keys file is missing")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        entries: dict[str, dict[str, Any]] = {}
+        for item in payload.get("keys", []):
+            kid = str(item.get("kid") or "").strip()
+            state = str(item.get("state") or "").strip()
+            key_file = str(item.get("private_key_file") or "").strip()
+            if not kid or state not in ISSUER_KEY_STATES or not key_file:
+                raise PermissionDenied("issuer keys file entry is malformed")
+            key_path = Path(key_file)
+            if not key_path.is_file():
+                raise PermissionDenied(f"issuer key file missing for kid {kid}")
+            key = load_pem_private_key(key_path.read_bytes(), password=None)
+            if not isinstance(key, Ed25519PrivateKey):
+                raise PermissionDenied(f"issuer key {kid} must be an Ed25519 PKCS8 private key")
+            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+            raw = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+            entries[kid] = {
+                "state": state,
+                "private_key": key,
+                "jwk": {"kty": "OKP", "crv": "Ed25519", "x": _b64url(raw)},
+            }
+        if not entries:
+            raise PermissionDenied("issuer keys file contains no keys")
+        return IssuerKeySet(entries)
+    single = load_issuer_identity(source)
+    return IssuerKeySet(
+        {single.kid: {"state": "ACTIVE", "private_key": single.private_key, "jwk": single.public_jwk}}
+    )
