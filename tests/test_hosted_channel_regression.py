@@ -36,7 +36,6 @@ import os
 import tempfile
 import unittest
 import unittest.mock
-from pathlib import Path
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     new_catalog_agent_id,
