@@ -422,6 +422,41 @@ class CloudBindingTest(unittest.TestCase):
             json.dumps(json.loads(card_bytes), ensure_ascii=False, sort_keys=True).encode("utf-8"),
         )
 
+    def test_unsafe_target_declared_at_binding_time_is_rejected(self) -> None:
+        """T035：私网 / metadata 目标在**创建绑定**时就被拒，不进签发链路。"""
+        for origin, endpoint in (
+            ("https://10.0.0.5", "https://10.0.0.5/a2a"),
+            ("https://169.254.169.254", "https://169.254.169.254/a2a"),
+            ("https://merchant.internal", "https://merchant.internal/a2a"),
+            ("https://merchant.example", "http://merchant.example/a2a"),
+        ):
+            with self.subTest(endpoint=endpoint):
+                body = self._binding_body()
+                body["binding"]["runtime_origin"] = origin
+                body["binding"]["a2a_endpoint"] = endpoint
+                status, payload = _call(
+                    self.app,
+                    "POST",
+                    f"/v1/agents/{self.catalog_agent_id}/runtime-bindings",
+                    body,
+                    signature=self._binding_signature(),
+                )
+                self.assertEqual(status, 400, payload)
+                self.assertIn("safe target", str(payload.get("error", "")))
+
+    def test_stored_unsafe_binding_refuses_claims(self) -> None:
+        """纵深防御：库里已有不安全绑定时，**签发**出口同样拒（不是只在入口拦一次）。"""
+        self.assertEqual(self._create_binding()[0], 200)
+        self._publish_and_activate()
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update runtime_bindings set a2a_endpoint = ? where catalog_agent_id = ?",
+                ("https://169.254.169.254/a2a", self.catalog_agent_id),
+            )
+        status, payload = self._read_claims()
+        self.assertEqual(status, 400, payload)
+        self.assertIn("safe target", str(payload.get("error", "")))
+
     def test_missing_public_origin_refuses_claims(self) -> None:
         """未配置公开 origin → **拒签**，绝不退化成相对路径的 card_url。
 
