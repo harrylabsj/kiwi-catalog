@@ -63,8 +63,17 @@ def payload_token(payload: dict[str, Any]) -> str:
     return str(payload.get("_auth_token") or payload.get("admin_token") or "")
 
 
-def payload_with_auth(payload: dict[str, Any], authorization: str, idempotency_key: str) -> dict[str, Any]:
-    """Merge transport auth headers into the payload (fallback ASGI path)."""
+def payload_with_auth(
+    payload: dict[str, Any],
+    authorization: str,
+    idempotency_key: str,
+    binding_jws: str = "",
+) -> dict[str, Any]:
+    """Merge transport auth headers into the payload (fallback ASGI path).
+
+    ``binding_jws`` 是绑定 Runtime 的请求签名（``x-kiwi-binding-jws``）——
+    M3 控制面写接口用它替代 owner token（设计 §14.1：不在 JSON 里放 owner token）。
+    """
     merged = dict(payload or {})
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
@@ -73,6 +82,8 @@ def payload_with_auth(payload: dict[str, Any], authorization: str, idempotency_k
         merged["_auth_token"] = token
     if idempotency_key:
         merged["idempotency_key"] = idempotency_key
+    if binding_jws:
+        merged["_binding_jws"] = str(binding_jws).strip()
     return merged
 
 

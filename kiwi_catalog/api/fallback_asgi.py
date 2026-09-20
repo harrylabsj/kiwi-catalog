@@ -182,6 +182,7 @@ class MarketplaceASGIApp:
                 payload,
                 authorization=headers.get("authorization", ""),
                 idempotency_key=headers.get("idempotency-key", ""),
+                binding_jws=headers.get("x-kiwi-binding-jws", ""),
             )
             # 会话 cookie（账号体系）：透传给 handler（auth 头之外的最小传输面）
             cookie = headers.get("cookie", "")

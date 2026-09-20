@@ -34,6 +34,7 @@ import pytest
 
 from kiwi_catalog.api.error_handlers import register_exception_handlers
 from kiwi_catalog.core.errors import (
+    GoneError,
     AuthError,
     ConflictError,
     IdempotencyConflict,
@@ -109,6 +110,7 @@ def test_business_exception_mappings() -> None:
         (AuthError("bad token"), 403),
         (PermissionDenied("no access"), 403),
         (NotFoundError("missing agent"), 404),
+        (GoneError("withdrawn"), 410),
         (ConflictError("conflicts with state"), 409),
         (IdempotencyConflict("reused key"), 409),
         (RateLimitError("too many requests"), 429),
@@ -127,6 +129,7 @@ def test_registration_order_matches_original_mapping() -> None:
         AuthError,
         PermissionDenied,
         NotFoundError,
+        GoneError,
         ConflictError,
         IdempotencyConflict,
         RateLimitError,

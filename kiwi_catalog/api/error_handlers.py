@@ -35,6 +35,7 @@ from typing import Any
 from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
+    GoneError,
     IdempotencyConflict,
     NotFoundError,
     PermissionDenied,
@@ -79,6 +80,10 @@ def register_exception_handlers(
     @app.exception_handler(NotFoundError)
     def _not_found_error(_request: Any, exc: NotFoundError) -> Any:
         return _error_response(404, exc)
+
+    @app.exception_handler(GoneError)
+    def _gone_error(_request: Any, exc: GoneError) -> Any:
+        return _error_response(410, exc)
 
     @app.exception_handler(ConflictError)
     def _conflict_error(_request: Any, exc: ConflictError) -> Any:
