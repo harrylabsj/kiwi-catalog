@@ -168,6 +168,58 @@ def _normalize(value: Any) -> str:
     return str(value)
 
 
+def verify_binding_possession(
+    *,
+    jws: str,
+    public_jwk: dict[str, Any],
+    expected_fields: dict[str, Any],
+    now: datetime | None = None,
+    clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
+) -> dict[str, Any]:
+    """**首次绑定**的持钥证明：请求体自带公钥，验签必须用该公钥并通过。
+
+    与 ``verify_runtime_request`` 的区别：这里没有"已知绑定"可查——信任来自
+    「只有私钥持有者能对请求签名」+ 调用方另行给出的商家授权/管理员凭据。
+    """
+    if not isinstance(jws, str) or jws.count(".") != 2:
+        raise PermissionDenied("missing or malformed possession proof")
+    header_segment, payload_segment, signature_segment = jws.split(".")
+    header = json.loads(_b64url_decode(header_segment))
+    payload = json.loads(_b64url_decode(payload_segment))
+    if not isinstance(header, dict) or not isinstance(payload, dict):
+        raise PermissionDenied("malformed possession proof")
+    if header.get("alg") not in ALLOWED_JWS_ALGS:
+        raise PermissionDenied(f"unsupported JWS alg: {header.get('alg')!r}")
+    kid = header.get("kid")
+    if not isinstance(kid, str) or kid == "":
+        raise PermissionDenied("possession proof missing kid")
+    public_key = _public_key_from_jwk(public_jwk)
+    try:
+        public_key.verify(
+            _b64url_decode(signature_segment), f"{header_segment}.{payload_segment}".encode("ascii")
+        )
+    except InvalidSignature as exc:
+        raise PermissionDenied("possession proof verification failed") from exc
+    if str(payload.get("key_id", "")) != kid:
+        raise PermissionDenied("possession proof kid does not match the bound key_id")
+    for field, actual in expected_fields.items():
+        if field not in payload:
+            raise ValidationError(f"possession proof does not cover required field: {field}")
+        if _normalize(payload[field]) != _normalize(actual):
+            raise PermissionDenied(f"possession proof field mismatch: {field}")
+    issued_at = str(payload.get("issued_at", ""))
+    try:
+        issued = datetime.fromisoformat(issued_at)
+    except ValueError as exc:
+        raise ValidationError(f"possession proof issued_at is malformed: {issued_at}") from exc
+    if issued.tzinfo is None:
+        issued = issued.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    if abs((current - issued).total_seconds()) > clock_skew_seconds:
+        raise PermissionDenied("possession proof outside the allowed clock skew window")
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # 参考签发（测试与本地联调用；生产签名方是 Runtime 自己）
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
+from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
 from kiwi_catalog.api.handlers import cloud_card as cloud_card_handlers
 from kiwi_catalog.api.handlers import connector_identity as connector_identity_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
@@ -167,6 +168,27 @@ RouteEntry(
         "/v1/agents/{catalog_agent_id}/claim",
         lambda db_path, payload, query, catalog_agent_id: _v1_claim_agent(
             db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/runtime-bindings",
+        lambda db_path, payload, query, catalog_agent_id: _create_runtime_binding(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke",
+        lambda db_path, payload, query, catalog_agent_id, binding_id: _revoke_runtime_binding(
+            db_path, catalog_agent_id, binding_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/runtime-binding",
+        lambda db_path, payload, query, catalog_agent_id: _read_runtime_binding(
+            db_path, catalog_agent_id
         ),
     ),
 RouteEntry(
@@ -604,6 +626,20 @@ def _suspend_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
 
 def _reinstate_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
     return agent_catalog_handlers.reinstate_catalog_agent(db_path, catalog_agent_id, payload or {})
+
+
+def _create_runtime_binding(db_path: str, catalog_agent_id: str, payload: dict):
+    return cloud_binding_handlers.create_runtime_binding(db_path, catalog_agent_id, payload)
+
+
+def _revoke_runtime_binding(db_path: str, catalog_agent_id: str, binding_id: str, payload: dict):
+    return cloud_binding_handlers.revoke_runtime_binding(
+        db_path, catalog_agent_id, binding_id, payload
+    )
+
+
+def _read_runtime_binding(db_path: str, catalog_agent_id: str):
+    return cloud_binding_handlers.read_runtime_binding_document(db_path, catalog_agent_id)
 
 
 def _published_agent_card(db_path: str, catalog_agent_id: str):
