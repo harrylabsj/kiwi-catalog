@@ -67,8 +67,21 @@ def _jws(private_pem: str, kid: str, fields: dict) -> str:
 
 
 def _call(app, method: str, path: str, body: dict | None = None, signature: str = ""):
+    status, payload, _headers, _chunks = _call_full(app, method, path, body, signature)
+    return status, payload
+
+
+def _call_full(
+    app,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    signature: str = "",
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+):
+    """同 `_call`，但保留响应头与原始字节（ETag / 条件请求断言用）。"""
     raw = json.dumps(body).encode() if body is not None else b""
-    headers = [(b"content-type", b"application/json")]
+    headers = [(b"content-type", b"application/json"), *(extra_headers or [])]
     if signature:
         headers.append((b"x-kiwi-binding-jws", signature.encode()))
     received: list[dict] = []
@@ -95,12 +108,16 @@ def _call(app, method: str, path: str, body: dict | None = None, signature: str 
         )
     )
     start = next(m for m in received if m["type"] == "http.response.start")
+    response_headers = {
+        key.decode("latin1").lower(): value.decode("latin1")
+        for key, value in start.get("headers", [])
+    }
     chunks = b"".join(m.get("body", b"") for m in received if m["type"] == "http.response.body")
     try:
         payload = json.loads(chunks.decode("utf-8")) if chunks else {}
     except json.JSONDecodeError:
         payload = {}
-    return start["status"], payload
+    return start["status"], payload, response_headers, chunks
 
 
 class CloudBindingTest(unittest.TestCase):
@@ -356,6 +373,44 @@ class CloudBindingTest(unittest.TestCase):
         serialized = json.dumps(payload)
         self.assertNotIn("wbapp_", serialized)
         self.assertNotIn("applicationId", serialized)
+
+    def test_published_card_etag_matches_committed_claims_card_etag(self) -> None:
+        """`If-None-Match: <claims.card_etag>` 必须真的 304 —— **两栈都要**。
+
+        `card_etag` 是对公开读地址**响应体字节**的承诺。fallback 栈的
+        `_send_json` 用 `json.dumps(..., sort_keys=True)` 序列化，与 card_store 口径
+        天然一致；FastAPI 栈默认紧凑分隔符 + 插入序，曾导致响应头 etag ≠ 承诺的
+        `card_etag`（重验证在 FastAPI 栈上静默失效——契约级双栈漂移）。
+        """
+        self.assertEqual(self._create_binding()[0], 200)
+        self._publish_and_activate()
+
+        status, _payload, headers, card_bytes = _call_full(
+            self.app, "GET", f"/v1/agents/{self.catalog_agent_id}/agent-card.json"
+        )
+        self.assertEqual(status, 200)
+        header_etag = headers.get("etag", "")
+        self.assertTrue(header_etag)
+
+        claims_status, claims_payload = self._read_claims()
+        self.assertEqual(claims_status, 200, claims_payload)
+        committed_etag = claims_payload["card_etag"]
+        self.assertEqual(header_etag, committed_etag)
+
+        # 承诺的 ETag 直接用于重验证：304，且无 body
+        status, _payload, _headers, raw = _call_full(
+            self.app,
+            "GET",
+            f"/v1/agents/{self.catalog_agent_id}/agent-card.json",
+            extra_headers=[(b"if-none-match", committed_etag.encode())],
+        )
+        self.assertEqual(status, 304)
+        self.assertEqual(raw, b"")
+        # 响应体就是规范字节（sort_keys + 非 ASCII 原样），与 ETag 的承诺对象同一份
+        self.assertEqual(
+            card_bytes,
+            json.dumps(json.loads(card_bytes), ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        )
 
     def test_no_binding_or_no_active_card_refuses_claims(self) -> None:
         # 无绑定时读取 → 404

@@ -503,7 +503,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/agents/{catalog_agent_id}/agent-card.json")
     def published_agent_card_route(catalog_agent_id: str) -> Any:
-        return _published_agent_card(db_path, catalog_agent_id)
+        # 发**规范字节**（而不是让 FastAPI 自己序列化）：响应体与 `card_etag` 的
+        # 承诺对象逐字节相同，`If-None-Match: <claims.card_etag>` 在两栈都能 304。
+        from kiwi_catalog.a2a.card_store import canonical_card_bytes
+
+        return Response(
+            content=canonical_card_bytes(_published_agent_card(db_path, catalog_agent_id)),
+            media_type="application/json",
+        )
 
     @app.post("/v1/agents/{catalog_agent_id}/card-publications")
     def create_card_publication_route(

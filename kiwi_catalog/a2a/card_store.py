@@ -75,14 +75,25 @@ def _storage_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def canonical_card_bytes(card: dict[str, Any]) -> bytes:
+    """公开名片读地址的**规范响应体字节**。
+
+    这是 `card_etag` 的承诺对象：`compute_etag(card)` 与两栈实际发出的字节都必须是它。
+    fallback 栈的 `_send_json` 天然是 `json.dumps(..., ensure_ascii=False,
+    sort_keys=True)`，与之逐字节相同；FastAPI 栈默认用紧凑分隔符 + 插入序，**不同**，
+    因此 FastAPI 路由必须显式发这份字节（否则承诺的 `card_etag` 永远匹配不上响应头，
+    `If-None-Match` 重验证在 FastAPI 栈上静默失效——契约级双栈漂移）。
+    """
+    return json.dumps(card, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+
 def compute_etag(card: dict[str, Any]) -> str:
     """ETag：与 ASGI 层（fallback 与 FastAPI 双栈）对同一响应体算出的值**一致**。
 
-    两栈都是对 `json.dumps(body, ensure_ascii=False, sort_keys=True)` 调
-    `discovery.cache.compute_etag`，这里照同一口径计算，避免"库里存一个、
-    响应里发另一个"。
+    两栈都对 `canonical_card_bytes(card)` 调 `discovery.cache.compute_etag`，这里照
+    同一口径计算，避免"库里存一个、响应里发另一个"。
     """
-    return _http_etag(json.dumps(card, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+    return _http_etag(canonical_card_bytes(card))
 
 
 def scan_publication_leaks(publication: dict[str, Any]) -> list[str]:
