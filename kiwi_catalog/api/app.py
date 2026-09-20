@@ -45,6 +45,7 @@ from kiwi_catalog.api.request_dispatch import dispatch_request
 from kiwi_catalog.api.route_matching import match_path as _match_path
 from kiwi_catalog.api.route_table import _ROUTE_TABLE, RouteEntry, resolve_route
 from kiwi_catalog.core.errors import (
+    GoneError,
     AuthError,
     ConflictError,
     IdempotencyConflict,
@@ -105,6 +106,8 @@ def handle_request(
         return error_result(409, exc)
     except NotFoundError as exc:
         return error_result(404, exc)
+    except GoneError as exc:
+        return error_result(410, exc)
     except RateLimitError as exc:
         return error_result(429, exc)
     except PayloadTooLargeError as exc:

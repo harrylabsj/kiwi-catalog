@@ -32,6 +32,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
+from kiwi_catalog.api.handlers import cloud_card as cloud_card_handlers
 from kiwi_catalog.api.handlers import connector_identity as connector_identity_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
@@ -166,6 +167,41 @@ RouteEntry(
         "/v1/agents/{catalog_agent_id}/claim",
         lambda db_path, payload, query, catalog_agent_id: _v1_claim_agent(
             db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/agent-card.json",
+        lambda db_path, payload, query, catalog_agent_id: _published_agent_card(
+            db_path, catalog_agent_id
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/card-publications",
+        lambda db_path, payload, query, catalog_agent_id: _create_card_publication(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/publish",
+        lambda db_path, payload, query, catalog_agent_id: _activate_card_publication(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/pause",
+        lambda db_path, payload, query, catalog_agent_id: _set_card_publication_state(
+            db_path, catalog_agent_id, payload, "PAUSED"
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/withdraw",
+        lambda db_path, payload, query, catalog_agent_id: _set_card_publication_state(
+            db_path, catalog_agent_id, payload, "WITHDRAWN"
         ),
     ),
 RouteEntry(
@@ -568,6 +604,23 @@ def _suspend_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
 
 def _reinstate_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
     return agent_catalog_handlers.reinstate_catalog_agent(db_path, catalog_agent_id, payload or {})
+
+
+def _published_agent_card(db_path: str, catalog_agent_id: str):
+    """GET /v1/agents/{id}/agent-card.json —— 原始 Card JSON（M3 稳定读地址）。"""
+    return cloud_card_handlers.published_agent_card(db_path, catalog_agent_id)
+
+
+def _create_card_publication(db_path: str, catalog_agent_id: str, payload: dict):
+    return cloud_card_handlers.create_card_publication(db_path, catalog_agent_id, payload)
+
+
+def _activate_card_publication(db_path: str, catalog_agent_id: str, payload: dict):
+    return cloud_card_handlers.activate_card_publication(db_path, catalog_agent_id, payload)
+
+
+def _set_card_publication_state(db_path: str, catalog_agent_id: str, payload: dict, state: str):
+    return cloud_card_handlers.set_card_publication_state(db_path, catalog_agent_id, payload, state)
 
 
 def _hosted_agent_card_document(db_path, catalog_agent_id, payload=None, query=None):

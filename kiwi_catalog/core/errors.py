@@ -45,6 +45,10 @@ class IdempotencyConflict(ConflictError):
     """Raised when an idempotency key is reused unsafely."""
 
 
+class GoneError(ShoppingCliError):
+    """资源已撤回（410 Gone）——例如已 withdraw 的公开名片（设计 §11.5）。"""
+
+
 class RateLimitError(ShoppingCliError):
     """Raised when a caller exceeds an API rate limit."""
 
