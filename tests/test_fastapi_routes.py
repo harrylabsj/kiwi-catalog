@@ -57,6 +57,30 @@ def test_register_fastapi_routes_covers_all_fallback_paths() -> None:
 
 
 @pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
+def test_register_fastapi_routes_matches_fallback_methods() -> None:
+    """路径一致还不够：同一个路径上的**方法集**也必须一致。
+
+    只比 path 会漏掉"表里是 POST、FastAPI 栈注册成 GET"这类错配——调用方拿到的是
+    405/404，而 parity 测试仍然全绿（M3 新增云端名片/绑定路由时就踩过这条）。
+    """
+    from fastapi import FastAPI as _FA
+
+    app = _FA()
+    register_fastapi_routes(app, ":db:")
+    fastapi_pairs = {
+        (method, route.path)
+        for route in app.routes
+        if hasattr(route, "path") and hasattr(route, "methods")
+        for method in route.methods
+        if method not in ("HEAD", "OPTIONS")
+    }
+    fallback_pairs = {
+        (method, entry.path_template) for entry in _ROUTE_TABLE for method in entry.methods
+    }
+    assert fallback_pairs <= fastapi_pairs
+
+
+@pytest.mark.skipif(not _HAS_FASTAPI, reason="fastapi not installed")
 def test_header_defaults_are_fastapi_header() -> None:
     from fastapi.params import Header
 
