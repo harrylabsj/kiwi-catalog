@@ -80,6 +80,23 @@ def _signed_fields(payload: dict[str, Any], catalog_agent_id: str) -> dict[str, 
     }
 
 
+def _audit_rejection(
+    db_path: str | Path, catalog_agent_id: str, event: str, reason: str
+) -> None:
+    """在被拒请求的**独立会话**里记一条审计；审计失败绝不掩盖原始错误。"""
+    try:
+        with db_session(db_path) as conn:
+            append_catalog_audit(
+                conn,
+                catalog_agent_id=catalog_agent_id,
+                actor="runtime",
+                event=event,
+                details={"reason": reason[:500]},
+            )
+    except Exception:  # pragma: no cover - 审计失败不改变请求的结果
+        pass
+
+
 def create_card_publication(
     db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -89,33 +106,40 @@ def create_card_publication(
     publication = payload.get("publication")
     if not isinstance(publication, dict):
         raise ValidationError("publication must be a JSON object")
-    with db_session(db_path) as conn:
-        actor_payload = verify_runtime_request(
-            conn,
-            catalog_agent_id=agent_id,
-            jws=jws,
-            expected_fields=_signed_fields(payload, agent_id),
-        )
-        actor = f"runtime:{actor_payload.get('binding_id', '')}"
-        created = create_card_revision(
-            conn,
-            catalog_agent_id=agent_id,
-            publication=publication,
-            actor=actor,
-            now=now_iso(),
-        )
-        append_catalog_audit(
-            conn,
-            catalog_agent_id=agent_id,
-            actor=actor,
-            event="card_revision_created",
-            details={
-                "card_revision": created["card_revision"],
-                "card_digest": created["card_digest"],
-                "expected_revision": publication.get("expected_revision"),
-            },
-        )
-        return created
+    try:
+        with db_session(db_path) as conn:
+            actor_payload = verify_runtime_request(
+                conn,
+                catalog_agent_id=agent_id,
+                jws=jws,
+                expected_fields=_signed_fields(payload, agent_id),
+            )
+            actor = f"runtime:{actor_payload.get('binding_id', '')}"
+            created = create_card_revision(
+                conn,
+                catalog_agent_id=agent_id,
+                publication=publication,
+                actor=actor,
+                now=now_iso(),
+            )
+            append_catalog_audit(
+                conn,
+                catalog_agent_id=agent_id,
+                actor=actor,
+                event="card_revision_created",
+                details={
+                    "card_revision": created["card_revision"],
+                    "card_digest": created["card_digest"],
+                    "expected_revision": publication.get("expected_revision"),
+                },
+            )
+            return created
+    except ValidationError as exc:
+        # A6：「拒绝」也要留痕（审计里只有字段**路径/原因**，没有字段值，更没有密钥）。
+        # 必须用**另一个会话**写：被拒的发布在同一事务里，异常即回滚——同事务写审计
+        # 会连审计一起回滚，等于什么都没记。
+        _audit_rejection(db_path, agent_id, "card_publication_rejected", str(exc))
+        raise
 
 
 def activate_card_publication(
