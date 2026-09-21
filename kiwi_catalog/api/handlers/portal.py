@@ -178,7 +178,7 @@ th { color: var(--kiwi-800); font-weight: 700; white-space: nowrap; font-size: 0
 """
 
 
-def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
+def _page(title: str, body: str, extra_js: str = "", head_js: str = "") -> dict[str, Any]:
     # CSP（KC-SEC-01 硬化）：script 走 per-response nonce——页面内嵌脚本
     # 是唯一合法执行源，匿名数据即使绕过转义也无法执行（meta CSP 对
     # 同源注入有效）。style 允许 inline（页面样式内嵌且无用户数据）。
@@ -205,7 +205,12 @@ def _page(title: str, body: str, extra_js: str = "") -> dict[str, Any]:
             f"<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"
             f"<title>{title} — Kiwi Merchant Portal</title>"
             f"<style>{_OFFICIAL_CSS}{_PORTAL_EXTRA_CSS}</style></head>"
-            f"<body>{body}<script nonce=\"{nonce}\">{_PORTAL_JS}{extra_js}</script></body></html>"
+            # `head_js` 在 **body 之前**发射：页面自己的 <script> 在 load 期就会调用
+            # 共享 helper（如 `nextTarget`），放在 body 之后会 ReferenceError →
+            # 整段页面脚本中断 → 按钮点了没反应（生产事故：商家登录页）。
+            # 因此它只能放**纯函数声明**，不得有 load 期的 DOM 访问。
+            f"<body><script nonce=\"{nonce}\">{head_js}</script>{body}"
+            f"<script nonce=\"{nonce}\">{_PORTAL_JS}{extra_js}</script></body></html>"
         )
     }
 
@@ -937,7 +942,13 @@ function nextTarget(fallback) {
 
 
 def _account_page(title: str, body: str) -> dict[str, Any]:
-    return _page(title, body, extra_js=_ACCOUNT_JS)
+    """商家账号页（登录/注册/连接/后台…）。
+
+    `_ACCOUNT_JS` 走 **head_js**（body 之前）：这些页面的 <script> 在 load 期就会用
+    `nextTarget`，必须在它之前定义。`_ACCOUNT_JS` 只有函数声明、无 load 期 DOM 访问，
+    所以前置是安全的。
+    """
+    return _page(title, body, head_js=_ACCOUNT_JS)
 
 
 def portal_register() -> dict[str, Any]:
