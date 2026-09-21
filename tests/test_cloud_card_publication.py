@@ -545,6 +545,45 @@ class CloudCardPublicationTest(unittest.TestCase):
         self.assertIn("card_publication_activated", events)
         self.assertIn("card_publication_withdrawn", events)
 
+    def test_rejected_publication_is_audited_and_carries_no_secrets(self) -> None:
+        """A6：**拒绝**也要留痕（此前只有成功路径进审计）。
+
+        被拒的发布在同一事务里，异常即回滚——审计必须写在**独立会话**，否则会连
+        审计一起回滚。审计里只放原因（字段路径），不放字段值，更不放密钥材料。
+        """
+        self.assertEqual(self._publish()[0], 200)
+        self.assertEqual(self._activate(revision=1, expected_revision=0)[0], 200)
+
+        leaked = _card(extra={"min_unit_price_private": 987654.0})
+        status, _payload, _headers, _raw = self._publish(leaked, expected_revision=1)
+        self.assertEqual(status, 400)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = list(
+                conn.execute(
+                    "select event, details_json from audit_events where details_json like ?",
+                    (f"%{self.catalog_agent_id}%",),
+                )
+            )
+        finally:
+            conn.close()
+        events = {row["event"] for row in rows}
+        self.assertIn("card_publication_rejected", events)
+        rejected = [r for r in rows if r["event"] == "card_publication_rejected"]
+        self.assertEqual(len(rejected), 1)
+        details = rejected[0]["details_json"]
+        # 只留原因（字段路径），不留字段值，更不留密钥
+        self.assertIn("min_unit_price_private", details)
+        self.assertNotIn("987654", details)
+        self.assertNotIn("PRIVATE KEY", details)
+        self.assertNotIn("private_key", details)
+        # 活动名片未被拒绝的发布改动
+        status, payload, _headers, _raw = self._read()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["name"], "Kiwi A2A Merchant")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
