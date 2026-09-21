@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs
 
+from kiwi_catalog.a2a import card_store
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.limits import max_request_body_bytes
@@ -217,6 +218,8 @@ class MarketplaceASGIApp:
                 response,
                 if_none_match=headers.get("if-none-match", ""),
                 allow_304=method == "GET",
+                request_method=method,
+                request_path=path,
             )
         finally:
             _record_access_log()
@@ -229,6 +232,8 @@ class MarketplaceASGIApp:
         *,
         if_none_match: str = "",
         allow_304: bool = False,
+        request_method: str = "",
+        request_path: str = "",
     ) -> None:
         """Serialize *response* with a §18 server-side ETag.
 
@@ -281,6 +286,10 @@ class MarketplaceASGIApp:
                 (b"content-security-policy", b"frame-ancestors 'none'"),
             ]
         )
+        # 稳定读地址（M3 §11.3 / 计划 A3）：公开只读 + ETag ⇒ 允许中间缓存但必须回源
+        # 重验证。**只在成功响应上**加；404/410 不得带缓存头（错误不可缓存）。
+        if status == 200 and card_store.is_stable_card_read(request_method, request_path):
+            extra_headers.append((b"cache-control", card_store.CARD_CACHE_CONTROL.encode("ascii")))
         cookies = response.get("__cookies__") if isinstance(response, dict) else None
         if cookies:
             extra_headers.extend(

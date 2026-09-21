@@ -505,11 +505,13 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def published_agent_card_route(catalog_agent_id: str) -> Any:
         # 发**规范字节**（而不是让 FastAPI 自己序列化）：响应体与 `card_etag` 的
         # 承诺对象逐字节相同，`If-None-Match: <claims.card_etag>` 在两栈都能 304。
-        from kiwi_catalog.a2a.card_store import canonical_card_bytes
+        from kiwi_catalog.a2a.card_store import CARD_CACHE_CONTROL, canonical_card_bytes
 
         return Response(
             content=canonical_card_bytes(_published_agent_card(db_path, catalog_agent_id)),
             media_type="application/json",
+            # 稳定读地址：公开只读 + ETag ⇒ 允许中间缓存但必须回源重验证（计划 A3）。
+            headers={"cache-control": CARD_CACHE_CONTROL},
         )
 
     @app.post("/v1/agents/{catalog_agent_id}/card-publications")

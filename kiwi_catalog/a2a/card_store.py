@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -79,6 +80,19 @@ def _storage_json(value: Any) -> str:
     `card_digest` 一律由发布方（Runtime，TS 侧经审查的 JCS）计算并经其签名背书。
     """
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+#: 稳定读地址（M3 §11.3 / 计划 A3）在**成功**响应上的缓存指令。
+#: 公开只读资源 + ETag ⇒ `public, max-age=60, must-revalidate`：允许中间缓存，
+#: 但每次复用前必须回源重验证。错误响应（404/410）绝不带缓存头。
+CARD_CACHE_CONTROL = "public, max-age=60, must-revalidate"
+
+_STABLE_CARD_PATH = re.compile(r"^/v1/agents/[^/]+/agent-card\.json$")
+
+
+def is_stable_card_read(method: str, path: str) -> bool:
+    """该方法+路径是否为云端名片的稳定读地址（两栈共用同一判定）。"""
+    return method.upper() == "GET" and _STABLE_CARD_PATH.match(path or "") is not None
 
 
 def canonical_card_bytes(card: dict[str, Any]) -> bytes:

@@ -266,6 +266,8 @@ class CloudCardPublicationTest(unittest.TestCase):
         self.assertEqual(payload["name"], "Kiwi A2A Merchant")
         self.assertEqual(payload["supportedInterfaces"][0]["url"], A2A_ENDPOINT)
         self.assertTrue(headers.get("etag"))
+        # 计划 A3：公开只读 + ETag ⇒ 允许中间缓存但必须回源重验证
+        self.assertEqual(headers.get("cache-control"), "public, max-age=60, must-revalidate")
 
         # If-None-Match → 304（无 body）
         status, _payload, _headers, raw = _call_http(
@@ -353,6 +355,46 @@ class CloudCardPublicationTest(unittest.TestCase):
             }
         )
         self.assertEqual(self._publish(subdomain)[0], 200)
+
+    def test_cache_control_is_identical_on_the_fallback_stack(self) -> None:
+        """两栈必须发同一个 cache-control（双栈 parity 的又一项）。
+
+        FastAPI 可用时 `create_catalog_app` 返回 FastAPI app，fallback 路径不会被走到；
+        这里直挂 `MarketplaceASGIApp`（与 fallback 部署同一构造），确保那份实现也带
+        缓存指令——否则换栈部署时缓存语义会静默变化。
+        """
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+        from kiwi_catalog.api.route_table import _ROUTE_TABLE, resolve_route
+
+        fallback = MarketplaceASGIApp(
+            self.db_path,
+            route_provider=lambda: list(_ROUTE_TABLE),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+        self.assertEqual(self._publish()[0], 200)
+        self.assertEqual(self._activate(revision=1, expected_revision=0)[0], 200)
+        status, payload, headers, _raw = _call_http(
+            fallback, "GET", f"/v1/agents/{self.catalog_agent_id}/agent-card.json"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(headers.get("cache-control"), "public, max-age=60, must-revalidate")
+        self.assertEqual(payload["name"], "Kiwi A2A Merchant")
+
+    def test_error_responses_carry_no_cache_control(self) -> None:
+        """错误不可缓存：404（未发布）与 410（已撤回）都不带 cache-control。"""
+        missing = new_catalog_agent_id()
+        status, _payload, headers, _raw = _call_http(
+            self.app, "GET", f"/v1/agents/{missing}/agent-card.json"
+        )
+        self.assertEqual(status, 404)
+        self.assertNotIn("cache-control", headers)
+
+        self.assertEqual(self._publish()[0], 200)
+        self.assertEqual(self._activate(revision=1, expected_revision=0)[0], 200)
+        self.assertEqual(self._set_state("WITHDRAWN", expected_revision=1)[0], 200)
+        status, _payload, headers, _raw = self._read()
+        self.assertEqual(status, 410)
+        self.assertNotIn("cache-control", headers)
 
     def test_card_url_may_not_point_away_from_the_runtime_origin(self) -> None:
         pointing_at_catalog = _card(extra={"url": "https://catalog.example"})
