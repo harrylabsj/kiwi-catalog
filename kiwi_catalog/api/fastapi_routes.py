@@ -493,6 +493,16 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     # ── M3 云端名片托管与 Runtime 绑定（与 route_table 逐条对齐） ──────────
     # 写接口不接受 owner token；授权凭据是 `x-kiwi-binding-jws`（Runtime 用绑定私钥
     # 对语义字段签名）。两栈的共同口径在 api_auth.payload_with_auth 第 4 参。
+    def _client_payload(request: _FastAPIRequest) -> dict[str, Any]:
+        """公开读的 payload：只带客户端 IP（限流分桶用，与 parity 中间件同一解析规则）。"""
+        client = getattr(request, "client", None)
+        direct_peer = str(client.host or "") if client is not None else None
+        return {
+            "_client_ip": resolve_client_ip(
+                request.headers.get("x-forwarded-for", ""), direct_peer
+            )
+        }
+
     def _cloud_payload(payload: dict[str, Any], request: _FastAPIRequest) -> dict[str, Any]:
         return api_auth.payload_with_auth(
             payload,
@@ -502,13 +512,15 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
 
     @app.get("/v1/agents/{catalog_agent_id}/agent-card.json")
-    def published_agent_card_route(catalog_agent_id: str) -> Any:
+    def published_agent_card_route(catalog_agent_id: str, request: _FastAPIRequest) -> Any:
         # 发**规范字节**（而不是让 FastAPI 自己序列化）：响应体与 `card_etag` 的
         # 承诺对象逐字节相同，`If-None-Match: <claims.card_etag>` 在两栈都能 304。
         from kiwi_catalog.a2a.card_store import CARD_CACHE_CONTROL, canonical_card_bytes
 
         return Response(
-            content=canonical_card_bytes(_published_agent_card(db_path, catalog_agent_id)),
+            content=canonical_card_bytes(
+                _published_agent_card(db_path, catalog_agent_id, _client_payload(request))
+            ),
             media_type="application/json",
             # 稳定读地址：公开只读 + ETag ⇒ 允许中间缓存但必须回源重验证（计划 A3）。
             headers={"cache-control": CARD_CACHE_CONTROL},
@@ -566,8 +578,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
 
     @app.get("/v1/agents/{catalog_agent_id}/runtime-binding")
-    def read_runtime_binding_route(catalog_agent_id: str) -> dict[str, Any]:
-        return _read_runtime_binding(db_path, catalog_agent_id)
+    def read_runtime_binding_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _read_runtime_binding(db_path, catalog_agent_id, _client_payload(request))
 
     @app.get("/v1/hosted/agents/{catalog_agent_id}/agent-card.json")
     def hosted_agent_card_route(catalog_agent_id: str) -> Any:

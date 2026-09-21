@@ -30,6 +30,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
 from kiwi_catalog.a2a.card_store import (
     activate_card,
     create_card_revision,
@@ -52,9 +53,16 @@ def _signature_of(payload: dict[str, Any]) -> str:
     raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
 
 
-def published_agent_card(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
-    """GET /v1/agents/{id}/agent-card.json —— 返回**原始 Card JSON**（不套 ok 信封）。"""
+def published_agent_card(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """GET /v1/agents/{id}/agent-card.json —— 返回**原始 Card JSON**（不套 ok 信封）。
+
+    公开读，按客户端 IP 限流（计划 B3）。资源本身可缓存（`Cache-Control` + ETag），
+    限流只是匿名滥用的兜底。
+    """
     with db_session(db_path) as conn:
+        enforce_public_read_limit(conn, payload, surface="agent-card read")
         card, _etag, _state = read_active_card(conn, str(catalog_agent_id or "").strip())
         return card
 

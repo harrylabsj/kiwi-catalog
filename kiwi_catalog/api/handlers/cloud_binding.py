@@ -37,6 +37,7 @@ from typing import Any
 
 from kiwi_catalog.a2a.binding_claims import jwk_thumbprint, read_runtime_binding
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
+from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
 from kiwi_catalog.a2a.request_signature import verify_binding_possession, verify_runtime_request
 from kiwi_catalog.agent_catalog.catalog_audit import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
@@ -46,9 +47,16 @@ from kiwi_catalog.db.session import db_session, now_iso
 SIGNATURE_HEADER = "x-kiwi-binding-jws"
 
 
-def read_runtime_binding_document(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
-    """GET /v1/agents/{id}/runtime-binding —— 公开读（限流由 ASGI 层负责）。"""
+def read_runtime_binding_document(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """GET /v1/agents/{id}/runtime-binding —— 公开读，**按客户端 IP 限流**（计划 B3）。
+
+    每次读取都要做一次 Ed25519 签名，因此这一侧的限流不是可选项：不限流等于把
+    Catalog 的私钥运算开放给任何匿名来源。
+    """
     with db_session(db_path) as conn:
+        enforce_public_read_limit(conn, payload, surface="runtime-binding read")
         return read_runtime_binding(conn, str(catalog_agent_id or "").strip())
 
 

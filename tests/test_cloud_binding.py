@@ -457,6 +457,24 @@ class CloudBindingTest(unittest.TestCase):
         self.assertEqual(status, 400, payload)
         self.assertIn("safe target", str(payload.get("error", "")))
 
+    def test_public_read_is_rate_limited(self) -> None:
+        """计划 B3：读取声明要**限流**——每次读取都做一次 Ed25519 签名。
+
+        预算按客户端 IP 分桶；这里直调 ASGI 无 client，全部落入同一个 unknown 桶，
+        正好用来验证"超预算即 429"。
+        """
+        self.assertEqual(self._create_binding()[0], 200)
+        self._publish_and_activate()
+        with unittest.mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_PUBLIC_READ_RATE_LIMIT_PER_MINUTE": "2"}
+        ):
+            self.assertEqual(self._read_claims()[0], 200)
+            self.assertEqual(self._read_claims()[0], 200)
+            status, payload = self._read_claims()
+            self.assertEqual(status, 429, payload)
+        # 解除限流后立刻恢复（预算按固定窗口计数，不因一次 429 永久封禁）
+        self.assertEqual(self._read_claims()[0], 200)
+
     def test_missing_public_origin_refuses_claims(self) -> None:
         """未配置公开 origin → **拒签**，绝不退化成相对路径的 card_url。
 
