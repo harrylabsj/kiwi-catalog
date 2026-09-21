@@ -33,9 +33,13 @@ card_digest 摘要、并发保护由 expected_revision、代次由 generation。
   4. 负载里的每个**被签名语义字段**必须与请求体一致；
   5. `issued_at` 在允许时钟偏移内（缺省 ±300s）。
 
-限制（如实记录，不冒充已具备）：尚未接入 nonce 重放存储——签名在偏移窗口内可被
-重放；重放的后果是**多一条不可变名片版本**（不改变活动版本、CAS 仍生效）。
-nonce 重放保护与轮换窗口测量属 SIG-04（M3 最小 + M5 演练）。
+**nonce 重放保护**（SIG-04）：验签与时间窗都通过后，`(key_id, nonce)` 会被写入
+`control_plane_nonces` 并以其为主键消费一次；同一密钥重复使用同一 nonce 即冲突 →
+403。记录只在时钟偏移窗口内保留（`expires_at = issued_at + window`），过窗行会惰性
+清理——窗口外的请求本来就被时间窗拒绝，不必留更久。
+
+消费发生在**全部校验之后**：验签失败的请求不会烧掉 nonce（否则攻击者可以用无效签名
+把合法请求的 nonce 提前占掉，等于拒绝服务）。
 """
 
 from __future__ import annotations
@@ -44,7 +48,7 @@ import base64
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -55,6 +59,11 @@ from kiwi_catalog.core.errors import PermissionDenied, ValidationError
 
 #: 允许的时钟偏移（秒）。
 DEFAULT_CLOCK_SKEW_SECONDS = 300
+#: nonce 的合理长度（太短会撞车、太长是无界键空间的借口）。
+MIN_NONCE_LENGTH = 8
+MAX_NONCE_LENGTH = 128
+#: 惰性清理频率（每消费 N 次顺带删过期行，避免重放表只增不删）。
+_PRUNE_EVERY = 64
 ALLOWED_JWS_ALGS = ("EdDSA",)
 
 
@@ -156,7 +165,62 @@ def verify_runtime_request(
         issued = issued.replace(tzinfo=timezone.utc)
     if abs((current - issued).total_seconds()) > clock_skew_seconds:
         raise PermissionDenied("request signature outside the allowed clock skew window")
+
+    # 全部校验通过后才消费 nonce：无效签名不得"占掉"合法请求的 nonce（DoS 面）。
+    nonce = payload.get("nonce")
+    if not isinstance(nonce, str) or nonce == "":
+        raise ValidationError("request signature missing nonce")
+    consume_request_nonce(
+        conn,
+        key_id=str(binding["key_id"]),
+        nonce=nonce,
+        issued_at=issued_at,
+        now=current,
+        window_seconds=clock_skew_seconds,
+    )
     return payload
+
+
+def consume_request_nonce(
+    conn: sqlite3.Connection,
+    *,
+    key_id: str,
+    nonce: str,
+    issued_at: str,
+    now: datetime | None = None,
+    window_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
+) -> None:
+    """消费一次 `(key_id, nonce)`；已被消费过即拒绝（重放）。
+
+    用主键冲突做判定，而不是"先查后插"：并发下先查后插会双放行。
+    """
+    text = str(nonce)
+    if len(text) < MIN_NONCE_LENGTH or len(text) > MAX_NONCE_LENGTH:
+        raise ValidationError(
+            f"request nonce length must be within {MIN_NONCE_LENGTH}..{MAX_NONCE_LENGTH}"
+        )
+    current = now or datetime.now(timezone.utc)
+    try:
+        issued = datetime.fromisoformat(str(issued_at))
+    except ValueError as exc:
+        raise ValidationError(f"signature issued_at is malformed: {issued_at}") from exc
+    if issued.tzinfo is None:
+        issued = issued.replace(tzinfo=timezone.utc)
+    expires_at = (issued + timedelta(seconds=window_seconds)).isoformat()
+    cursor = conn.execute(
+        "insert into control_plane_nonces (key_id, nonce, issued_at, expires_at, created_at)"
+        " values (?, ?, ?, ?, ?) on conflict(key_id, nonce) do nothing",
+        (str(key_id), text, str(issued_at), expires_at, current.isoformat()),
+    )
+    if cursor.rowcount == 0:
+        raise PermissionDenied("request signature replayed (nonce already used)")
+    if _prune_counter[0] % _PRUNE_EVERY == 0:
+        conn.execute("delete from control_plane_nonces where expires_at < ?", (current.isoformat(),))
+    _prune_counter[0] += 1
+
+
+#: 惰性清理计数器（模块级；进程内单调递增即可，不需要持久化）。
+_prune_counter = [0]
 
 
 def _normalize(value: Any) -> str:

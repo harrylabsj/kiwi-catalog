@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 33
+CURRENT_SCHEMA_VERSION = 34
 
 
 @dataclass(frozen=True)
@@ -1183,6 +1183,35 @@ def migration_033_cloud_card_store(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_CONTROL_PLANE_NONCE_DDL = [
+    """
+create table if not exists control_plane_nonces (
+        key_id text not null,
+        nonce text not null,
+        issued_at text not null,
+        expires_at text not null,
+        created_at text not null,
+        primary key (key_id, nonce)
+    )
+    """,
+    """
+create index if not exists idx_control_plane_nonces_expires
+        on control_plane_nonces(expires_at)
+    """,
+]
+
+
+def migration_034_control_plane_nonces(conn: sqlite3.Connection) -> None:
+    """SIG-04：控制面写请求的 nonce 重放存储。
+
+    主键 `(key_id, nonce)` 就是重放判定本身：同 `同名字段` 第二次出现即冲突。
+    `expires_at = issued_at + 时钟偏移窗口`，过窗即可清理——重放窗口外的请求本来就
+    会被时间窗拒绝，不必留更久。
+    """
+    for statement in _CONTROL_PLANE_NONCE_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1217,6 +1246,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(31, "connector_identity", migration_031_connector_identity),
     Migration(32, "connector_merchant_tokens", migration_032_connector_merchant_tokens),
     Migration(33, "cloud_card_store", migration_033_cloud_card_store),
+    Migration(34, "control_plane_nonces", migration_034_control_plane_nonces),
 )
 
 

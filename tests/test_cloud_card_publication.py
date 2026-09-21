@@ -32,6 +32,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -161,7 +162,7 @@ class CloudCardPublicationTest(unittest.TestCase):
             private_key_pem=self.private_pem,
             signed_fields=fields,
             issued_at=issued_at or datetime.now(timezone.utc).isoformat(),
-            nonce="nonce-" + str(id(fields)),
+            nonce=f"nonce-{uuid.uuid4().hex}",
         )
 
     def _publication(self, card: dict | None = None, expected_revision: int = 0) -> dict:
@@ -501,7 +502,7 @@ class CloudCardPublicationTest(unittest.TestCase):
                 "generation": 1,
             },
             issued_at=datetime.now(timezone.utc).isoformat(),
-            nonce="forged",
+            nonce=f"forged-{uuid.uuid4().hex}",
         )
         status, payload, _headers, _raw = _call_http(self.app, "POST", path, body, signature=forged)
         self.assertEqual(status, 403, payload)
