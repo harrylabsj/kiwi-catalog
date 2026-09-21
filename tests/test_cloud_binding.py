@@ -33,6 +33,7 @@ import os
 import tempfile
 import unittest
 import unittest.mock
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,7 +61,12 @@ def _jws(private_pem: str, kid: str, fields: dict) -> str:
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
     header = {"alg": "EdDSA", "kid": kid}
-    payload = {**fields, "issued_at": datetime.now(timezone.utc).isoformat(), "nonce": "n1"}
+    # nonce 必须每次唯一：控制面有重放存储（同 key 复用 nonce 即 403）
+    payload = {
+        **fields,
+        "issued_at": datetime.now(timezone.utc).isoformat(),
+        "nonce": f"nonce-{uuid.uuid4().hex}",
+    }
     header_segment = _b64url(json.dumps(header, separators=(",", ":")).encode())
     payload_segment = _b64url(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode())
     key = load_pem_private_key(private_pem.encode(), password=None)

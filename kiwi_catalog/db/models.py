@@ -708,6 +708,20 @@ create unique index if not exists idx_runtime_bindings_agent_version
     """
 create index if not exists idx_runtime_bindings_agent_status
         on runtime_bindings(catalog_agent_id, status)
+    """,
+    """
+create table if not exists control_plane_nonces (
+        key_id text not null,
+        nonce text not null,
+        issued_at text not null,
+        expires_at text not null,
+        created_at text not null,
+        primary key (key_id, nonce)
+    )
+    """,
+    """
+create index if not exists idx_control_plane_nonces_expires
+        on control_plane_nonces(expires_at)
     """
 ]
 
