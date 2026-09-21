@@ -162,6 +162,60 @@ class IssuerKeySetTest(unittest.TestCase):
                 key_set.transition("issuer-0", attempt)
         self.assertEqual(key_set.state_of("issuer-0"), "COMPROMISED")
 
+    def test_transition_is_in_memory_until_persisted(self) -> None:
+        """状态迁移**只有** persist() 之后才survive 重新加载。
+
+        这是安全相关语义：如果调用方以为"标记 COMPROMISED 就生效了"，下一次
+        `load_issuer_key_set()` 会把旧状态从文件读回来——**被泄漏的密钥原地复活**。
+        """
+        env = self._env_with_set(["ACTIVE"])
+
+        # 只 transition：重新加载仍是文件里的 ACTIVE（内存改动不持久）
+        in_memory = load_issuer_key_set(env)
+        self.assertEqual(in_memory.transition("issuer-0", "COMPROMISED"), "COMPROMISED")
+        self.assertEqual(load_issuer_key_set(env).state_of("issuer-0"), "ACTIVE")
+
+        # transition + persist：重新加载得到 COMPROMISED，且是终态
+        durable = load_issuer_key_set(env)
+        durable.transition("issuer-0", "COMPROMISED")
+        written = durable.persist()
+        self.assertEqual(written.name, "issuer-keys.json")
+        reloaded = load_issuer_key_set(env)
+        self.assertEqual(reloaded.state_of("issuer-0"), "COMPROMISED")
+        with self.assertRaises(PermissionDenied):
+            reloaded.transition("issuer-0", "ACTIVE")
+        # 磁盘上也只有状态变了：kid / 私钥路径原样，且文件里不出现任何私钥材料
+        payload = json.loads(written.read_text(encoding="utf-8"))
+        self.assertEqual([item["kid"] for item in payload["keys"]], ["issuer-0"])
+        self.assertTrue(payload["keys"][0]["private_key_file"].endswith("issuer-0.pem"))
+        self.assertNotIn("PRIVATE KEY", written.read_text(encoding="utf-8"))
+        self.assertNotIn("private_key", payload["keys"][0])
+
+    def test_persist_refuses_without_a_source_file(self) -> None:
+        """单密钥 env 回退形态没有可写回的集合——明确拒绝，不伪造文件。"""
+        key_set = load_issuer_key_set(self._env_with_single())
+        with self.assertRaises(PermissionDenied):
+            key_set.persist()
+
+    def test_persist_does_not_clobber_unknown_entries(self) -> None:
+        """写回只改状态：文件里本实例不认识的条目原样保留（不丢配置）。"""
+        env = self._env_with_set(["ACTIVE"])
+        keys_path = Path(env[ISSUER_KEYS_FILE_ENV])
+        payload = json.loads(keys_path.read_text(encoding="utf-8"))
+        _, kept_key_path = _write_key(self.dir, "kept.pem")
+        payload["keys"].append(
+            {"kid": "issuer-kept", "state": "RETIRED", "private_key_file": str(kept_key_path)}
+        )
+        keys_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        key_set = load_issuer_key_set(env)
+        self.assertEqual(key_set.transition("issuer-0", "VERIFY_ONLY"), "VERIFY_ONLY")
+        key_set.persist()
+        after = json.loads(keys_path.read_text(encoding="utf-8"))
+        kept = {item["kid"]: item for item in after["keys"]}
+        self.assertEqual(kept["issuer-kept"]["state"], "RETIRED")
+        self.assertEqual(kept["issuer-0"]["state"], "VERIFY_ONLY")
+
     def test_transition_rejects_unknown_kid_and_state(self) -> None:
         key_set = load_issuer_key_set(self._env_with_set(["ACTIVE"]))
         with self.assertRaises(NotFoundError):

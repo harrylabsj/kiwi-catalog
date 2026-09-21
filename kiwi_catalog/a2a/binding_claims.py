@@ -264,8 +264,16 @@ class IssuerKeySet:
       公钥集合由受控发布渠道/管理员提供。
     """
 
-    def __init__(self, entries: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        entries: dict[str, dict[str, Any]],
+        *,
+        source_path: Path | None = None,
+    ) -> None:
         self._entries = entries
+        #: 本实例是从哪个受控文件加载的（单密钥 env 回退时为 None）。
+        #: `persist()` 只写回它——绝不往一个"不知道原来长什么样"的路径写状态。
+        self._source_path = source_path
 
     @property
     def kids(self) -> list[str]:
@@ -293,7 +301,10 @@ class IssuerKeySet:
         return IssuerIdentity(active[0], entry["private_key"], entry["jwk"])
 
     def transition(self, kid: str, state: str) -> str:
-        """状态迁移；COMPROMISED 是终态，任何"恢复"尝试都被拒绝。"""
+        """状态迁移（**仅本实例**；受控文件仍是权威，见 `persist()`）。
+
+        COMPROMISED 是终态，任何"恢复"尝试都被拒绝。
+        """
         if state not in ISSUER_KEY_STATES:
             raise ValidationError(f"unknown issuer key state: {state}")
         entry = self._entries.get(kid)
@@ -304,6 +315,34 @@ class IssuerKeySet:
             raise PermissionDenied(f"issuer key {kid} is {current}; transitions out of it are refused")
         entry["state"] = state
         return state
+
+    def persist(self) -> Path:
+        """把当前**状态**写回受控文件（原子替换：临时文件 + rename）。
+
+        为什么必须有这个方法：`transition()` 只改内存。若调用方以为"标记 COMPROMISED
+        就等于生效"，下一次 `load_issuer_key_set()` 会从文件把旧状态读回来——**被泄漏
+        的密钥原地复活**。这是安全相关的语义，不能靠"记得手改文件"。
+
+        - 只写回 `state`；`kid` / `private_key_file` 等原样保留，绝不改写私钥路径，
+          更不把任何私钥材料写进这个文件。
+        - 单密钥 env 回退形态（无来源文件）没有可写回的集合 → 明确拒绝，而不是
+          伪造一个文件出来。
+        """
+        if self._source_path is None:
+            raise PermissionDenied(
+                "issuer key set was not loaded from a keys file; nothing to persist"
+            )
+        payload = json.loads(self._source_path.read_text(encoding="utf-8"))
+        for item in payload.get("keys", []):
+            kid = str(item.get("kid") or "").strip()
+            if kid in self._entries:
+                item["state"] = str(self._entries[kid]["state"])
+        tmp_path = self._source_path.with_name(f".{self._source_path.name}.tmp")
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        tmp_path.replace(self._source_path)
+        return self._source_path
 
 
 def load_issuer_key_set(env: Mapping[str, str] | None = None) -> IssuerKeySet:
@@ -338,8 +377,14 @@ def load_issuer_key_set(env: Mapping[str, str] | None = None) -> IssuerKeySet:
             }
         if not entries:
             raise PermissionDenied("issuer keys file contains no keys")
-        return IssuerKeySet(entries)
+        return IssuerKeySet(entries, source_path=path)
     single = load_issuer_identity(source)
     return IssuerKeySet(
-        {single.kid: {"state": "ACTIVE", "private_key": single.private_key, "jwk": single.public_jwk}}
+        {
+            single.kid: {
+                "state": "ACTIVE",
+                "private_key": single.private_key,
+                "jwk": single.public_jwk,
+            }
+        }
     )
