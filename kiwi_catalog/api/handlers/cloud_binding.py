@@ -41,8 +41,15 @@ from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
 from kiwi_catalog.a2a.request_signature import verify_binding_possession, verify_runtime_request
 from kiwi_catalog.agent_catalog.catalog_audit import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
-from kiwi_catalog.core.errors import ConflictError, NotFoundError, PermissionDenied, ValidationError
+from kiwi_catalog.api.auth import AuthError
+from kiwi_catalog.core.errors import (
+    ConflictError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
 from kiwi_catalog.db.session import db_session, now_iso
+from kiwi_catalog.services import merchant_tokens as tokens_service
 
 SIGNATURE_HEADER = "x-kiwi-binding-jws"
 
@@ -58,6 +65,70 @@ def read_runtime_binding_document(
     with db_session(db_path) as conn:
         enforce_public_read_limit(conn, payload, surface="runtime-binding read")
         return read_runtime_binding(conn, str(catalog_agent_id or "").strip())
+
+
+def read_management_descriptor(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/cloud-enrollments/{id}/management-descriptor（BD §6.3）。
+
+    **私有只读绑定对象**：给已认证的商家入口提供"我这台 Runtime 的管理页在哪"。
+    三条纪律：
+
+    1. **归属鉴权**：商家 owner token 解析出的 merchant_id 必须与绑定的 merchant_id
+       一致；不一致一律 **404**（与"不存在"不可区分，避免枚举他人 agent）。
+    2. **绝不含凭据**：只有绑定元数据——Token/Cookie/平台密钥/商家私钥/底价都不在
+       这里，也永远不该出现在这里。它不是认证凭据：打开地址本身不授予管理权限。
+    3. **未声明即拒**：运行时没在绑定里声明管理面元数据 → **409**，绝不用 Catalog
+       的默认值伪造一个地址（那会把商家导到错的地方，且看起来"能用"）。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    presented = str(query.get("owner_token") or payload.get("owner_token") or "").strip()
+    if not presented:
+        raise AuthError("invalid owner token")
+    with db_session(db_path) as conn:
+        token_row = tokens_service.resolve_merchant_by_token(conn, presented)
+        if token_row is None:
+            raise AuthError("invalid owner token")
+        merchant_id = str(token_row["merchant_id"])
+
+        binding = conn.execute(
+            "select * from runtime_bindings where catalog_agent_id = ? and status = 'active'"
+            " order by binding_version desc limit 1",
+            (agent_id,),
+        ).fetchone()
+        # 不存在 / 不属本商家 / 无活动绑定：统一 404（不可区分）
+        if binding is None or str(binding["merchant_id"]) != merchant_id:
+            raise NotFoundError("management descriptor not found")
+
+        base_path = str(binding["management_base_path"] or "")
+        api_major = int(binding["management_api_major"] or 0)
+        if base_path == "" or api_major < 1:
+            raise ConflictError(
+                "runtime has not declared management metadata for this binding"
+            )
+
+        descriptor: dict[str, Any] = {
+            "binding_ref": str(binding["binding_id"]),
+            "merchant_id": merchant_id,
+            "agent_id": agent_id,
+            "runtime_origin": str(binding["runtime_origin"]),
+            "management_base_path": base_path,
+            "binding_version": int(binding["binding_version"]),
+            "deployment_generation": int(binding["service_epoch"]),
+            "status": str(binding["status"]),
+            "expires_at": str(binding["expires_at"] or ""),
+            "management_api_major": api_major,
+        }
+        # 可选 MCP 路径：B07 通过前运行时不声明，这里就不返回（schema 里是可选字段）。
+        mcp_path = str(binding["mcp_path"] or "")
+        if mcp_path != "":
+            descriptor["mcp_path"] = mcp_path
+        # 绑定未设到期时间时，descriptor 的 expires_at 需是合法 date-time；
+        # 用"长期有效"的表达而不是空串（空串过不了 schema，也会让入口误判过期）。
+        if descriptor["expires_at"] == "":
+            descriptor["expires_at"] = "9999-12-31T00:00:00+00:00"
+        return descriptor
 
 
 def _binding_required(payload: dict[str, Any]) -> dict[str, Any]:
@@ -81,6 +152,46 @@ def _binding_required(payload: dict[str, Any]) -> dict[str, Any]:
     return binding
 
 
+def _management_declaration(binding: dict[str, Any]) -> dict[str, Any]:
+    """运行时在绑定里声明的**管理面元数据**（BD §6.3）。
+
+    为什么必须由运行时声明、而不是 Catalog 猜：门户要拿它导航到管理页；猜一个
+    "/merchant/" 等于把"约定"当"事实"，一旦运行时换了基路径就会把商家导到错的地方。
+    未声明 → 描述符端点 409（fail-closed），绝不用默认值伪造。
+
+    可选字段：老运行时（M3 形态）不带它，绑定仍然成立，只是描述符不可用。
+    """
+    raw = binding.get("management")
+    if raw is None:
+        return {"management_base_path": "", "management_api_major": 0, "mcp_path": ""}
+    if not isinstance(raw, dict):
+        raise ValidationError("binding.management must be a JSON object")
+    base_path = _safe_management_path(raw.get("base_path"), field="management.base_path")
+    mcp_path = _safe_management_path(raw.get("mcp_path"), field="management.mcp_path")
+    api_major = raw.get("api_major")
+    if not isinstance(api_major, int) or isinstance(api_major, bool) or api_major < 1:
+        raise ValidationError("binding.management.api_major must be a positive integer")
+    return {
+        "management_base_path": base_path,
+        "management_api_major": api_major,
+        "mcp_path": mcp_path,
+    }
+
+
+def _safe_management_path(value: Any, *, field: str) -> str:
+    """管理路径必须是**规范化绝对路径**：防目录穿越与重定向到别处。"""
+    if value is None or value == "":
+        return ""
+    text = str(value).strip()
+    if not text.startswith("/"):
+        raise ValidationError(f"binding.{field} must start with /")
+    if ".." in text or "//" in text or "?" in text or "#" in text:
+        raise ValidationError(f"binding.{field} must be a normalized absolute path")
+    if len(text) > 64:
+        raise ValidationError(f"binding.{field} is too long")
+    return text
+
+
 def _current_active_binding(conn, catalog_agent_id: str):
     return conn.execute(
         "select * from runtime_bindings where catalog_agent_id = ? and status = 'active'"
@@ -100,6 +211,7 @@ def create_runtime_binding(
         raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
     key_jwk = dict(binding["key_jwk"])
     thumbprint = jwk_thumbprint(key_jwk)
+    management = _management_declaration(binding)
     signed_fields = {
         "agent_id": agent_id,
         "key_id": str(binding["key_id"]),
@@ -161,8 +273,9 @@ def create_runtime_binding(
         conn.execute(
             "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
             " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
-            " binding_version, service_epoch, status, expires_at, created_at, updated_at)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+            " binding_version, service_epoch, status, expires_at, created_at, updated_at,"
+            " management_base_path, management_api_major, mcp_path)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
             (
                 binding_id,
                 agent_id,
@@ -177,6 +290,9 @@ def create_runtime_binding(
                 str(binding.get("expires_at") or ""),
                 stamp,
                 stamp,
+                management["management_base_path"],
+                management["management_api_major"],
+                management["mcp_path"],
             ),
         )
         if existing is not None:

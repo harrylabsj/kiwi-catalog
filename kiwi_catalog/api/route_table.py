@@ -193,6 +193,13 @@ RouteEntry(
     ),
 RouteEntry(
         {"GET"},
+        "/v1/cloud-enrollments/{catalog_agent_id}/management-descriptor",
+        lambda db_path, payload, query, catalog_agent_id: _read_management_descriptor(
+            db_path, catalog_agent_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"GET"},
         "/v1/agents/{catalog_agent_id}/agent-card.json",
         lambda db_path, payload, query, catalog_agent_id: _published_agent_card(
             db_path, catalog_agent_id, payload
@@ -637,6 +644,17 @@ def _revoke_runtime_binding(
 ):
     return cloud_binding_handlers.revoke_runtime_binding(
         db_path, catalog_agent_id, binding_id, payload
+    )
+
+
+def _read_management_descriptor(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    payload: dict | None = None,
+    query: dict | None = None,
+):
+    return cloud_binding_handlers.read_management_descriptor(
+        db_path, catalog_agent_id, payload or {}, query or {}
     )
 
 

@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 34
+CURRENT_SCHEMA_VERSION = 35
 
 
 @dataclass(frozen=True)
@@ -1212,6 +1212,32 @@ def migration_034_control_plane_nonces(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+#: 绑定记录上由**运行时声明**的管理面元数据（BD 设计 §6.3）。
+#: 用 ADD COLUMN 而不是改表：既有绑定行保持默认空值 = "未声明"，
+#: 描述符端点据此 fail-closed，而不是替运行时猜一个路径。
+_RUNTIME_MANAGEMENT_DECLARATION_COLUMNS = (
+    ("management_base_path", "text not null default ''"),
+    ("management_api_major", "integer not null default 0"),
+    ("mcp_path", "text not null default ''"),
+)
+
+
+def migration_035_runtime_management_declaration(conn: sqlite3.Connection) -> None:
+    """BD §6.3：运行时在绑定里声明管理面元数据（路径 / API major / 可选 MCP 路径）。
+
+    这三个字段是**运行时的事实**，不是 Catalog 的猜测：没有它们，门户只能靠"约定"
+    导航到管理页。既有行留空 = 未声明 → 描述符端点返回 409，绝不用默认值伪造。
+    """
+    # 守卫：全新库由 models.SCHEMA 一次建出（已含这三列），迁移在它之后跑——
+    # 不判存在会 "duplicate column name"。本仓既有 ALTER 迁移同此写法。
+    existing = {
+        str(row[1]) for row in conn.execute("pragma table_info(runtime_bindings)").fetchall()
+    }
+    for name, decl in _RUNTIME_MANAGEMENT_DECLARATION_COLUMNS:
+        if name not in existing:
+            conn.execute(f"alter table runtime_bindings add column {name} {decl}")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1247,6 +1273,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(32, "connector_merchant_tokens", migration_032_connector_merchant_tokens),
     Migration(33, "cloud_card_store", migration_033_cloud_card_store),
     Migration(34, "control_plane_nonces", migration_034_control_plane_nonces),
+    Migration(35, "runtime_management_declaration", migration_035_runtime_management_declaration),
 )
 
 

@@ -47,6 +47,7 @@ from kiwi_catalog.api.route_table import (
     _list_catalog_agents,
     _list_merchant_catalog_agents,
     _published_agent_card,
+    _read_management_descriptor,
     _read_runtime_binding,
     _refresh_catalog_agent,
     _register_catalog_agent,
@@ -575,6 +576,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _revoke_runtime_binding(
             db_path, catalog_agent_id, binding_id, _cloud_payload(payload, request)
+        )
+
+    @app.get("/v1/cloud-enrollments/{catalog_agent_id}/management-descriptor")
+    def read_management_descriptor_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return _read_management_descriptor(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
         )
 
     @app.get("/v1/agents/{catalog_agent_id}/runtime-binding")

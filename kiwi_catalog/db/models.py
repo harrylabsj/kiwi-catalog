@@ -698,7 +698,10 @@ create table if not exists runtime_bindings (
         status text not null check(status in ('active','paused','revoked')),
         expires_at text not null default '',
         created_at text not null,
-        updated_at text not null
+        updated_at text not null,
+        management_base_path text not null default '',
+        management_api_major integer not null default 0,
+        mcp_path text not null default ''
     )
     """,
     """
