@@ -188,14 +188,14 @@ RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}/runtime-binding",
         lambda db_path, payload, query, catalog_agent_id: _read_runtime_binding(
-            db_path, catalog_agent_id
+            db_path, catalog_agent_id, payload
         ),
     ),
 RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}/agent-card.json",
         lambda db_path, payload, query, catalog_agent_id: _published_agent_card(
-            db_path, catalog_agent_id
+            db_path, catalog_agent_id, payload
         ),
     ),
 RouteEntry(
@@ -640,13 +640,15 @@ def _revoke_runtime_binding(
     )
 
 
-def _read_runtime_binding(db_path: str | Path, catalog_agent_id: str):
-    return cloud_binding_handlers.read_runtime_binding_document(db_path, catalog_agent_id)
+def _read_runtime_binding(db_path: str | Path, catalog_agent_id: str, payload: dict | None = None):
+    return cloud_binding_handlers.read_runtime_binding_document(
+        db_path, catalog_agent_id, payload
+    )
 
 
-def _published_agent_card(db_path: str | Path, catalog_agent_id: str):
+def _published_agent_card(db_path: str | Path, catalog_agent_id: str, payload: dict | None = None):
     """GET /v1/agents/{id}/agent-card.json —— 原始 Card JSON（M3 稳定读地址）。"""
-    return cloud_card_handlers.published_agent_card(db_path, catalog_agent_id)
+    return cloud_card_handlers.published_agent_card(db_path, catalog_agent_id, payload)
 
 
 def _create_card_publication(db_path: str | Path, catalog_agent_id: str, payload: dict):
