@@ -83,7 +83,13 @@ def read_management_descriptor(
        的默认值伪造一个地址（那会把商家导到错的地方，且看起来"能用"）。
     """
     agent_id = str(catalog_agent_id or "").strip()
-    presented = str(query.get("owner_token") or payload.get("owner_token") or "").strip()
+    # 凭据只从 Authorization header 注入的 payload 读取；不接受 URL query，避免
+    # token 进入访问日志、代理缓存和浏览器历史。
+    presented = str(payload.get("_auth_token") or "").strip()
+    # 仅兼容本地 fallback ASGI 的旧调用约定；生产 FastAPI 路由不设置该标记，
+    # 因而不会从 URL 读取凭据。
+    if not presented and payload.get("_allow_query_owner_token") is True:
+        presented = str(query.get("owner_token") or "").strip()
     if not presented:
         raise AuthError("invalid owner token")
     with db_session(db_path) as conn:

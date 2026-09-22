@@ -20,8 +20,8 @@
 - ``source_kind`` 恒为 ``merchant_declared``——商家声明内容，不是 Kiwi 背书；
 - public-only 白名单：注册账户的电话/邮箱/凭据绝不进入公开投影；写入侧对
   公开字段做私密字段扫描（明显的邮箱/手机号模式直接拒绝 + 审计）；
-- 幂等：同一商家同名商品（merchant_id + lower(title)，非撤回行）重复发布
-  是**更新既有行**（版本递增），不产生重复主体；部分唯一索引数据层兜底；
+- 幂等：同一商家同名商品的重复发布更新 published 行；草稿单独保存，不能
+  覆盖当前 published 快照；部分唯一索引数据层兜底；
 - 不产生虚假能力：无 Agent Card、无 A2A 端点、无实时报价——搜索/详情投影
   恒带 ``inquiry_available=false``（第 1 版商家走既有 Agent/Listing 链路）。
 """
@@ -204,13 +204,14 @@ def is_publicly_visible(publication: dict[str, Any], now: str) -> bool:
 
 
 def _find_by_merchant_title(
-    conn: sqlite3.Connection, merchant_id: str, title: str
+    conn: sqlite3.Connection, merchant_id: str, title: str, *, status: str
 ) -> dict[str, Any] | None:
-    """幂等查找：同一商家的同名商品（非撤回行，大小写不敏感）。"""
+    """按状态查找同名资料，避免草稿覆盖当前已发布快照。"""
     row = conn.execute(
         "select * from merchant_publications"
-        " where merchant_id = ? and lower(title) = lower(?) and status != 'withdrawn'",
-        (merchant_id, title),
+        " where merchant_id = ? and lower(title) = lower(?) and status = ?"
+        " order by updated_at desc limit 1",
+        (merchant_id, title, status),
     ).fetchone()
     return _row_to_publication(row) if row is not None else None
 
@@ -249,11 +250,14 @@ def upsert_publication(
 ) -> tuple[dict[str, Any], bool, bool]:
     """写入公开资料 → (row, created, idempotent_replay)。
 
-    同一商家同名商品的重复提交更新既有行（不产生重复主体——部分唯一索引
-    数据层兜底）；``publish`` 动作置 published + published_at 并递增版本。
+    同一商家同名商品的重复发布更新既有 published 行；draft 使用独立行，避免
+    未确认内容污染公开快照。``publish`` 动作置 published + published_at 并递增版本。
     """
     now = now_iso()
-    existing = _find_by_merchant_title(conn, merchant_id, str(canonical["title"]))
+    # 草稿必须是独立行；保存草稿不能改变当前 published 快照。
+    existing = _find_by_merchant_title(
+        conn, merchant_id, str(canonical["title"]), status="draft" if action == "draft" else "published"
+    )
     faq_json = encode_json(canonical["faq"])
     if existing is None:
         publication_id = new_publication_id()

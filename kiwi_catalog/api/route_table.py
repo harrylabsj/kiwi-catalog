@@ -654,7 +654,10 @@ def _read_management_descriptor(
     query: dict | None = None,
 ):
     return cloud_binding_handlers.read_management_descriptor(
-        db_path, catalog_agent_id, payload or {}, query or {}
+        db_path,
+        catalog_agent_id,
+        {**(payload or {}), "_allow_query_owner_token": True},
+        query or {},
     )
 
 

@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 35
+CURRENT_SCHEMA_VERSION = 36
 
 
 @dataclass(frozen=True)
@@ -1238,6 +1238,15 @@ def migration_035_runtime_management_declaration(conn: sqlite3.Connection) -> No
             conn.execute(f"alter table runtime_bindings add column {name} {decl}")
 
 
+def migration_036_publication_draft_isolation(conn: sqlite3.Connection) -> None:
+    """允许同名草稿与已发布快照并存，保存草稿不污染公开版本。"""
+    conn.execute("drop index if exists idx_merchant_publications_merchant_title_unique")
+    conn.execute(
+        "create unique index if not exists idx_merchant_publications_merchant_title_published_unique"
+        " on merchant_publications(merchant_id, lower(title)) where status = 'published'"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1274,6 +1283,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(33, "cloud_card_store", migration_033_cloud_card_store),
     Migration(34, "control_plane_nonces", migration_034_control_plane_nonces),
     Migration(35, "runtime_management_declaration", migration_035_runtime_management_declaration),
+    Migration(36, "publication_draft_isolation", migration_036_publication_draft_isolation),
 )
 
 
