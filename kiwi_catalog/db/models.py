@@ -509,8 +509,8 @@ create index if not exists idx_access_log_target
     # source_kind 恒为 merchant_declared，public-only 白名单字段——注册账户的
     # 电话/邮箱/凭据绝不进入本表（写入侧私密字段扫描 + 公开投影白名单双保险）。
     # 不产生 Agent Card / A2A 端点 / 实时报价标记（inquiry_available=false）。
-    # (merchant_id, lower(title)) 非撤回行部分唯一索引兜底行级幂等（同一商家
-    # 同名商品重复发布 = 更新既有行，不产生重复主体；弱引用无 FK 约定）。
+    # published 行按 (merchant_id, lower(title)) 唯一；draft 可与 published 并存，
+    # 避免未确认内容覆盖公开快照（弱引用无 FK 约定）。
     # v30 — view_count（非商家本人的公开详情浏览计数，商家匿名汇总数据源）。
     # DDL 与迁移链 migration_029/030 逐字一致（test_shadow_tables 守护）。
     """
@@ -545,9 +545,9 @@ create index if not exists idx_merchant_publications_status_updated
         on merchant_publications(status, updated_at, publication_id)
     """,
     """
-create unique index if not exists idx_merchant_publications_merchant_title_unique
+    create unique index if not exists idx_merchant_publications_merchant_title_published_unique
         on merchant_publications(merchant_id, lower(title))
-        where status != 'withdrawn'
+        where status = 'published'
     """,
     # v30 — 商家公开事件流 + 买家关注（M4 拉取式订阅，kiwi 仓
     # docs/merchant-buddy/v0-ai-cs-and-pull-subscriptions-design.md §4）。
