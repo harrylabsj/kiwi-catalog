@@ -286,7 +286,11 @@ class AdminApiTest(unittest.TestCase):
         from datetime import UTC, datetime
 
         # 制造一次买家搜索：写 buyer_search_events + buyer_keyword_daily
-        status, _ = _call_http(self.app, "GET", "/v1/listings/search?q=保温杯")
+        # 查询串必须 URL 编码——FastAPI 栈按字节解析（裸中文会被当成 latin-1），
+        # fallback 栈容忍原始字节；编码后两栈一致（真实客户端也总是编码）。
+        from urllib.parse import quote
+
+        status, _ = _call_http(self.app, "GET", f"/v1/listings/search?q={quote('保温杯')}")
         self.assertEqual(status, 200)
         today = datetime.now(UTC).date().isoformat()
         status, payload = _call_http(

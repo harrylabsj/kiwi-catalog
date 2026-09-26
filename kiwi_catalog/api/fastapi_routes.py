@@ -58,6 +58,7 @@ from kiwi_catalog.api.route_table import (
     _suspend_catalog_agent,
     _v1_admin_access_insights,
     _v1_admin_access_log,
+    _v1_admin_buyer_day,
     _v1_admin_buyer_stats,
     _v1_admin_dashboard,
     _v1_admin_merchant_report,

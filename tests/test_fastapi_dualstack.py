@@ -22,9 +22,11 @@ FastAPI branch (skipped when fastapi is unavailable).
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from kiwi_catalog.api import app as app_module
 
@@ -241,6 +243,38 @@ class FastApiDualStackTest(unittest.TestCase):
             )
             self.assertEqual(revalidated.status_code, 304, revalidated.text)
             self.assertEqual(revalidated.text, "")
+
+
+    def test_admin_buyer_day_registered_in_fastapi(self) -> None:
+        """FastAPI 栈必须能真正调用 /v1/admin/buyer-day。
+
+        回归用例（2026-09-26 生产 500 事故）：fastapi_routes 里新增的路由若忘了把
+        wrapper 加进 `from ... import (...)` 列表，NameError 只在**请求时**抛 →
+        500；而本地未装 fastapi 时应用回退 fallback 栈，测试全绿也发现不了。
+        这里显式断言 403/400/200 三种路径，守住这类「只在 FastAPI 栈暴露」的接线错误。
+        """
+        from fastapi.testclient import TestClient
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}, clear=False
+        ):
+            with TestClient(self.app) as client:
+                resp = client.get("/v1/admin/buyer-day?day=2026-09-25")
+                self.assertEqual(resp.status_code, 403, resp.text)
+                resp = client.get(
+                    "/v1/admin/buyer-day?day=bogus",
+                    headers={"Authorization": "Bearer admin-tok"},
+                )
+                self.assertEqual(resp.status_code, 400, resp.text)
+                resp = client.get(
+                    "/v1/admin/buyer-day?day=2026-09-25",
+                    headers={"Authorization": "Bearer admin-tok"},
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                body = resp.json()
+                self.assertEqual(body["day"], "2026-09-25")
+                self.assertIn("keywords", body)
+                self.assertIn("events", body)
 
 
 if __name__ == "__main__":
