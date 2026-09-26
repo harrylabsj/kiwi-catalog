@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 36
+CURRENT_SCHEMA_VERSION = 37
 
 
 @dataclass(frozen=True)
@@ -1247,6 +1247,33 @@ def migration_036_publication_draft_isolation(conn: sqlite3.Connection) -> None:
     )
 
 
+_ADMIN_CREDENTIAL_DDL = [
+    """
+create table if not exists admin_credentials (
+        credential_id integer primary key check(credential_id = 1),
+        token_digest text not null,
+        rotated_at text not null,
+        rotated_by text not null default '',
+        rotation_count integer not null default 1
+    )
+    """,
+]
+
+
+def migration_037_admin_credentials(conn: sqlite3.Connection) -> None:
+    """运营 admin token 轮换存储（2026-09-26）。
+
+    单例行只存 **SHA-256 摘要**（与商家令牌同一模型：明文只在轮换响应里返回一次）。
+    `check(credential_id = 1)` 就是单例约束本身。
+
+    语义：**有行 = 已轮换**。此后 env 里的 `KIWI_CATALOG_ADMIN_TOKEN` 只作首次
+    引导，不再被接受——否则"轮换"对已经拿到旧值的人毫无作用。恢复路径 = 删掉这
+    一行并重启（把控制权交回服务器配置）。
+    """
+    for statement in _ADMIN_CREDENTIAL_DDL:
+        conn.execute(statement)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1284,6 +1311,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(34, "control_plane_nonces", migration_034_control_plane_nonces),
     Migration(35, "runtime_management_declaration", migration_035_runtime_management_declaration),
     Migration(36, "publication_draft_isolation", migration_036_publication_draft_isolation),
+    Migration(37, "admin_credentials", migration_037_admin_credentials),
 )
 
 

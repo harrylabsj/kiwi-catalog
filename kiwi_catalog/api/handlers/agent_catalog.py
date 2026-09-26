@@ -339,7 +339,7 @@ def _require_catalog_write_auth(conn: Any, agent: dict[str, Any], payload: dict[
     Returns an actor string used for §23 audit.
     """
     try:
-        api_auth.require_admin_token(payload)
+        api_auth.require_admin_token(payload, conn)
         return "admin"
     except AuthError:
         pass
@@ -369,7 +369,7 @@ def _register_actor(conn: Any, payload: dict[str, Any], merchant_id: str) -> str
     public registration cannot squat on an existing merchant's catalog entry.
     """
     try:
-        api_auth.require_admin_token(payload)
+        api_auth.require_admin_token(payload, conn)
         return "admin"
     except AuthError:
         pass
@@ -386,7 +386,7 @@ def _claim_identity(conn: Any, agent: dict[str, Any], payload: dict[str, Any]) -
     current binding).  A merchant token claims for the token's merchant.
     """
     try:
-        api_auth.require_admin_token(payload)
+        api_auth.require_admin_token(payload, conn)
     except AuthError:
         pass
     else:
@@ -512,7 +512,7 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
                     for r in domain_rows
                 )
                 if not merchant_bound and not has_active and governed_unbound and actor != "admin":
-                    api_auth.require_admin_token(payload)
+                    api_auth.require_admin_token(payload, db_path)
             result = agent_catalog_writes.register_catalog_agent(
                 conn,
                 domain=canonical,
@@ -792,7 +792,7 @@ def _moderation_action(
         # 预算后 403，可耗尽匿名桶 DoS 公共 register。
         # Admin-only: moderation must never be driven by a merchant owner
         # or the verification worker (raises AuthError → 401/403).
-        api_auth.require_admin_token(payload)
+        api_auth.require_admin_token(payload, db_path)
         require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()

@@ -118,6 +118,9 @@ class PortalPageTest(unittest.TestCase):
                 self.assertIn("mountAdminTokenPanel", html)
                 self.assertIn("storedAdminToken", html)
                 self.assertIn("adminToken()", html)  # 各页读取统一走它
+                # 服务器端轮换入口（2026-09-26）：与"只改本浏览器"的「更换」并存
+                self.assertIn("admin_token_rotate_toggle", html)
+                self.assertIn("/v1/admin/token/rotate", html)
 
 
 if __name__ == "__main__":

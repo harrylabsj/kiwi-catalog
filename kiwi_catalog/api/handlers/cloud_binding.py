@@ -237,9 +237,7 @@ def create_runtime_binding(
         if existing is None:
             # 首次绑定：持钥证明 + 管理员闸门（受控注册）。
             admin_token = str(payload.get("admin_token") or "")
-            if not admin_token or not api_auth.token_matches(
-                admin_token, api_auth.configured_admin_token()
-            ):
+            if not admin_token or not api_auth.admin_token_matches(admin_token, conn):
                 raise PermissionDenied("first runtime binding requires a valid admin token")
             verify_binding_possession(
                 jws=jws, public_jwk=key_jwk, expected_fields=signed_fields
@@ -248,9 +246,7 @@ def create_runtime_binding(
         else:
             # 轮换：必须由**当前活动绑定**的私钥签名（或管理员）。
             admin_token = str(payload.get("admin_token") or "")
-            is_admin = bool(admin_token) and api_auth.token_matches(
-                admin_token, api_auth.configured_admin_token()
-            )
+            is_admin = bool(admin_token) and api_auth.admin_token_matches(admin_token, conn)
             if is_admin:
                 verify_binding_possession(
                     jws=jws, public_jwk=key_jwk, expected_fields=signed_fields
@@ -339,9 +335,7 @@ def revoke_runtime_binding(
         if str(row["status"]) == "revoked":
             return {"binding_id": target, "status": "revoked", "changed": False}
         admin_token = str(payload.get("admin_token") or "")
-        is_admin = bool(admin_token) and api_auth.token_matches(
-            admin_token, api_auth.configured_admin_token()
-        )
+        is_admin = bool(admin_token) and api_auth.admin_token_matches(admin_token, conn)
         if is_admin:
             actor = "admin"
         else:

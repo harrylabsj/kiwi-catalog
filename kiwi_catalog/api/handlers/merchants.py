@@ -51,7 +51,7 @@ def list_applications(
     admin token 只经 Authorization header（KC-SEC-02：凭据不得进 query——
     会落入访问日志/浏览器历史；fallback 栈已合并 header 为 _auth_token）。
     """
-    api_auth.require_admin_token(payload)
+    api_auth.require_admin_token(payload, db_path)
     status = str(query.get("status") or "").strip()
     if status and status not in APPLICATION_STATUSES:
         raise ValidationError(f"status must be one of {APPLICATION_STATUSES}")
@@ -69,7 +69,7 @@ def approve_application(
     原子完成见 services.merchant_tokens.approve_application；响应含明文
     token —— 仅此一次。重复 approve → 409（ConflictError）。
     """
-    api_auth.require_admin_token(payload)
+    api_auth.require_admin_token(payload, db_path)
     try:
         app_id = int(str(application_id).strip())
     except ValueError as exc:
@@ -83,7 +83,7 @@ def reject_application(
     db_path: str | Path, application_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     """POST /v1/merchants/applications/{id}/reject（admin）。"""
-    api_auth.require_admin_token(payload)
+    api_auth.require_admin_token(payload, db_path)
     try:
         app_id = int(str(application_id).strip())
     except ValueError as exc:
@@ -104,7 +104,7 @@ def rotate_token(
     新随机 token 覆盖（旧 hash 作废），明文 token 仅此一次。故意走 admin
     （泄露场景下旧 token 可能在攻击者手里，自助轮换 = 攻击者也能轮换）。
     """
-    api_auth.require_admin_token(payload)
+    api_auth.require_admin_token(payload, db_path)
     merchant_id = str(merchant_id).strip()
     if not merchant_id:
         raise ValidationError("merchant_id is required")
@@ -121,7 +121,7 @@ def revoke_token(
     active 行置 revoked；之后所有带该 token 的写请求 fail-closed。已
     revoked 重复吊销幂等返回 ok（不报错）。
     """
-    api_auth.require_admin_token(payload)
+    api_auth.require_admin_token(payload, db_path)
     merchant_id = str(merchant_id).strip()
     if not merchant_id:
         raise ValidationError("merchant_id is required")
@@ -143,7 +143,7 @@ def self_status(
     presented = str(query.get("owner_token") or payload.get("owner_token") or "").strip()
     with db_session(db_path) as conn:
         if merchant_id:
-            api_auth.require_admin_token(payload)
+            api_auth.require_admin_token(payload, db_path)
             token_row: sqlite3.Row | None = tokens_service.require_token_row(conn, merchant_id)
         else:
             if not presented:

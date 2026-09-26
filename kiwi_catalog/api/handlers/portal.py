@@ -302,10 +302,34 @@ function mountAdminTokenPanel() {
   panel.innerHTML = '<span id="admin_token_status" class="small muted"></span>'
     + '<button type="button" class="btn-mini" id="admin_token_remember">记住</button>'
     + '<button type="button" class="btn-mini" id="admin_token_edit">更换</button>'
-    + '<button type="button" class="btn-mini" id="admin_token_clear">清除</button>';
+    + '<button type="button" class="btn-mini" id="admin_token_clear">清除</button>'
+    + '<button type="button" class="btn-mini" id="admin_token_rotate_toggle">轮换服务器 token</button>';
   input.insertAdjacentElement('afterend', panel);
+  // 查询写错会得到 null，抛出的 TypeError 会把同一段脚本里**后续所有**监听
+  // 一起带走——"按钮点了没反应"的经典成因（2026-09-26 实测抓到过一次）。
+  // 全部按钮统一走这个守卫：今后再错也只是该按钮失效，不会整页瘫。
+  const on = (root, sel, handler) => {
+    const el = root.querySelector(sel);
+    if (el) { el.addEventListener('click', handler); }
+  };
   const rememberBtn = panel.querySelector('#admin_token_remember');
   const editBtn = panel.querySelector('#admin_token_edit');
+  // 轮换区：改的是**服务器上**的 admin token（需要当前 token 有效）。
+  // 与「更换」的区别在文案里写死，避免又一次把两者混起来。
+  const rotateBox = document.createElement('div');
+  rotateBox.id = 'admin_token_rotate_box';
+  rotateBox.style.cssText = 'display:none;margin-top:8px';
+  rotateBox.innerHTML = '<label for="admin_new_token">新 token（留空 = 自动生成 43 字符；至少 24 字符、不含空白）</label>'
+    + '<input id="admin_new_token" placeholder="新 admin token" autocomplete="off">'
+    + '<div class="token-panel">'
+    + '<button type="button" class="btn-mini" id="admin_token_rotate_go">确认轮换（旧值立即失效）</button>'
+    + '<button type="button" class="btn-mini" id="admin_token_rotate_cancel">取消</button>'
+    + '</div><div id="admin_token_rotate_out" class="small"></div>';
+  panel.insertAdjacentElement('afterend', rotateBox);
+  function setRotateOut(text, cls) {
+    const out = document.getElementById('admin_token_rotate_out');
+    if (out) { out.className = 'small ' + (cls || 'muted'); out.textContent = text || ''; }
+  }
   function showStoredState() {
     const has = !!storedAdminToken();
     adminTokenFields(!has);
@@ -313,7 +337,7 @@ function mountAdminTokenPanel() {
     editBtn.style.display = has ? '' : 'none';
     if (has) { setTokenStatus('已记住 token（仅本浏览器）', 'muted'); }
   }
-  rememberBtn.addEventListener('click', () => {
+  if (rememberBtn) rememberBtn.addEventListener('click', () => {
     const v = normalizeTokenValue(input.value);
     if (!v) { setTokenStatus('输入框为空，未记住', 'err'); return; }
     try { window.localStorage.setItem(ADMIN_TOKEN_KEY, v); }
@@ -327,7 +351,7 @@ function mountAdminTokenPanel() {
       else { setTokenStatus('已记住，但校验请求没成功（网络或服务问题），有效性未确认', 'err'); }
     });
   });
-  editBtn.addEventListener('click', () => {
+  if (editBtn) editBtn.addEventListener('click', () => {
     adminTokenFields(true);
     input.value = '';
     input.focus();
@@ -335,13 +359,62 @@ function mountAdminTokenPanel() {
     editBtn.style.display = 'none';
     setTokenStatus('输入 token 后点「记住」（只改本浏览器；服务器上的 token 不受影响）', 'muted');
   });
-  panel.querySelector('#admin_token_clear').addEventListener('click', () => {
+  on(panel, '#admin_token_clear', () => {
     try { window.localStorage.removeItem(ADMIN_TOKEN_KEY); } catch (e) { /* 忽略 */ }
     input.value = '';
     adminTokenFields(true);
     rememberBtn.style.display = '';
     editBtn.style.display = 'none';
     setTokenStatus('已清除（服务器上的 token 未受影响）', 'muted');
+  });
+  // ── 轮换服务器 token ────────────────────────────────────────────────────
+  on(panel, '#admin_token_rotate_toggle', () => {
+    const show = rotateBox.style.display === 'none';
+    rotateBox.style.display = show ? '' : 'none';
+    if (show) {
+      setRotateOut('轮换会改动**服务器上**的 token：旧值在所有地方立即失效。'
+        + '需要当前 token 有效（本浏览器已记住或已输入）。', 'muted');
+      const el = document.getElementById('admin_new_token');
+      if (el) { el.value = ''; el.focus(); }
+    }
+  });
+  on(rotateBox, '#admin_token_rotate_cancel', () => {
+    rotateBox.style.display = 'none';
+    setRotateOut('', '');
+  });
+  on(rotateBox, '#admin_token_rotate_go', () => {
+    const current = adminToken();
+    if (!current) {
+      setRotateOut('需要先在输入框里填当前 token（或先「记住」）才能轮换', 'err');
+      return;
+    }
+    if (!window.confirm('轮换后旧 admin token 在所有地方立即失效（其它浏览器/脚本都要重新输入新值）。继续？')) {
+      return;
+    }
+    const body = {};
+    const chosen = normalizeTokenValue((document.getElementById('admin_new_token') || {}).value || '');
+    if (chosen) { body.new_token = chosen; }
+    setRotateOut('正在轮换…', 'muted');
+    postJson('/v1/admin/token/rotate', body, current).then(r => {
+      if (!r || !r.ok) {
+        setRotateOut('轮换失败：' + ((r && r.error) || '未知错误'), 'err');
+        return;
+      }
+      try { window.localStorage.setItem(ADMIN_TOKEN_KEY, r.token); } catch (e) { /* 忽略 */ }
+      input.value = '';          // 关键：别让输入框里的旧值继续赢过已存的新值
+      showStoredState();
+      const out = document.getElementById('admin_token_rotate_out');
+      out.className = 'small ok';
+      out.innerHTML = '已轮换（第 ' + escHtml(r.rotation_count) + ' 次 · ' + escHtml(r.rotated_at) + '）。'
+        + '<div class="token-box" id="admin_token_new_value">' + escHtml(r.token) + '</div>'
+        + '<button type="button" class="btn-mini" id="admin_token_copy_new">复制新 token</button>'
+        + '<p class="small err">旧 token 已立即失效。请把新值保存好——服务器配置里仍是旧值，'
+        + '恢复路径见部署文档（删库里的轮换行 + 重启）。</p>';
+      on(document, '#admin_token_copy_new', () => {
+        const box = document.getElementById('admin_token_new_value');
+        if (box && navigator.clipboard) { navigator.clipboard.writeText(box.textContent || ''); }
+      });
+    });
   });
   showStoredState();
 }

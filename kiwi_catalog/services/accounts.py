@@ -343,6 +343,38 @@ def notify_admin_new_application(
         return False
 
 
+def notify_admin_token_rotated(
+    *, rotated_at: str = "", rotation_count: int | str = "", generated: bool = False,
+    actor: str = "",
+) -> bool:
+    """运营 admin token **被轮换**时通知运营邮箱（2026-09-26）。
+
+    为什么要发这封信：轮换是"旧值立即失效"的动作。若攻击者拿到了 token 并轮换，
+    运营会**在没有这封信的情况下毫无察觉**地失去后台（随后只会遇到"invalid"）。
+    收件人仍取 env ``KIWI_CATALOG_ADMIN_NOTIFY_EMAIL``；未配置 → False（不发信）。
+    **不抛异常**：旁路，绝不因为发信失败让轮换回滚（此时库里已经换了）。
+    """
+    to = (os.environ.get(_ADMIN_NOTIFY_EMAIL_ENV) or "").strip()
+    if not to:
+        return False
+    body = (
+        "运营后台的 admin token 刚刚被轮换。\n\n"
+        f"轮换时间：{rotated_at or '(未知)'}\n"
+        f"累计轮换次数：{rotation_count or '(未知)'}\n"
+        f"新值来源：{'由系统生成' if generated else '由操作者指定'}\n"
+        f"操作者：{actor or '(未记录)'}\n\n"
+        "**旧 token 已立即失效**：其他浏览器/脚本需要重新输入新值。\n"
+        f"如果这不是你本人的操作：请立即在运营后台再次轮换，并检查服务器\n"
+        f"（{_ADMIN_PORTAL_URL}）。\n"
+    )
+    try:
+        _send_email(to, "[Kiwi] admin token 已轮换", body)
+        return True
+    except Exception as exc:  # noqa: BLE001 —— 旁路：发信失败不得影响轮换结果
+        _LOGGER.warning("admin token rotation notification failed: %r", exc)
+        return False
+
+
 def issue_password_reset(
     conn: sqlite3.Connection, account_id: int, email: str
 ) -> str:
