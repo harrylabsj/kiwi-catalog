@@ -510,6 +510,11 @@ RouteEntry(
     ),
 RouteEntry(
         {"GET"},
+        "/v1/admin/buyer-day",
+        lambda db_path, payload, query, **kw: _v1_admin_buyer_day(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
         "/v1/admin/access-log",
         lambda db_path, payload, query, **kw: _v1_admin_access_log(db_path, payload, query),
     ),
@@ -583,6 +588,16 @@ RouteEntry(
         {"GET"},
         "/portal/publications",
         lambda db_path, payload, query, **kw: _portal_publications(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/merchant/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _portal_merchant(merchant_id),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/day/{day}",
+        lambda db_path, payload, query, day: _portal_day(day),
     ),
 RouteEntry(
         {"GET"},
@@ -899,6 +914,10 @@ def _v1_admin_buyer_stats(db_path, payload, query):
     return admin_handlers.buyer_stats(db_path, payload, query or {})
 
 
+def _v1_admin_buyer_day(db_path, payload, query):
+    return admin_handlers.buyer_day(db_path, payload, query or {})
+
+
 def _v1_admin_access_log(db_path, payload, query):
     return admin_handlers.access_log(db_path, payload, query or {})
 
@@ -932,6 +951,14 @@ def _portal_admin_buyer_stats():
 
 def _portal_dashboard():
     return portal_handlers.portal_dashboard()
+
+
+def _portal_merchant(merchant_id: str):
+    return portal_handlers.portal_merchant(merchant_id)
+
+
+def _portal_day(day: str):
+    return portal_handlers.portal_day(day)
 
 
 def _portal_register():

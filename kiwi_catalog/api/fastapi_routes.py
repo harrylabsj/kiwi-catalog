@@ -978,6 +978,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             _query_params_from_request(request),
         )
 
+    @app.get("/v1/admin/buyer-day")
+    def v1_admin_buyer_day(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_admin_buyer_day(
+            db_path,
+            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            _query_params_from_request(request),
+        )
+
     @app.get("/v1/admin/access-log")
     def v1_admin_access_log(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_admin_access_log(
@@ -1041,6 +1049,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/dashboard")
     def portal_dashboard_page() -> Response:
         return _portal_html(portal_handlers.portal_dashboard())
+
+    @app.get("/portal/merchant/{merchant_id}")
+    def portal_merchant_page(merchant_id: str) -> Response:
+        return _portal_html(portal_handlers.portal_merchant(merchant_id))
+
+    @app.get("/portal/day/{day}")
+    def portal_day_page(day: str) -> Response:
+        return _portal_html(portal_handlers.portal_day(day))
 
     @app.get("/portal/register")
     def portal_register_page() -> Response:

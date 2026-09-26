@@ -137,6 +137,9 @@ input:focus, textarea:focus { outline: 2px solid var(--kiwi-600); outline-offset
 }
 .btn-form:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(27, 94, 32, 0.25); }
 .btn-form:disabled { opacity: 0.55; cursor: not-allowed; }
+.token-panel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.token-panel .btn-mini { margin-left: 0; }
+.token-panel .small { flex: 1 1 auto; }
 .btn-mini {
   border: 1px solid var(--line); background: var(--paper-soft); color: var(--ink);
   padding: 7px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
@@ -239,6 +242,58 @@ function getJson(url, token) {
     postJson('/v1/accounts/logout', {}).then(() => { window.location.href = '/portal'; });
   });
 })();
+
+/* ── admin token 面板：记住 / 修改 / 清除 ──────────────────────────────────
+   三个 admin 页各自有一个 token 输入框（元素 id 为 admin_token），这里统一
+   接管：token 存 localStorage（键 kiwi_admin_token，同源共享），页面代码
+   一律走 adminToken()。
+   有意识的取舍——CSP 用 per-response nonce、页面无第三方脚本，XSS 面可控；
+   但 token 是**全权凭据**，故已记住时**不回填输入框**（避免截屏/共享屏泄露），
+   只显示状态与「修改」入口。 localStorage 不可用（隐私模式）时静默降级为
+   「每次手输」，行为与改造前一致。 */
+const ADMIN_TOKEN_KEY = 'kiwi_admin_token';
+function storedAdminToken() {
+  try { return (window.localStorage.getItem(ADMIN_TOKEN_KEY) || '').trim(); } catch (e) { return ''; }
+}
+function adminToken() {
+  const el = document.getElementById('admin_token');
+  const typed = el ? el.value.trim() : '';
+  return typed || storedAdminToken();
+}
+function setTokenStatus(text, isErr) {
+  const s = document.getElementById('admin_token_status');
+  if (s) { s.textContent = text || ''; s.className = 'small' + (isErr ? ' err' : ' muted'); }
+}
+function mountAdminTokenPanel() {
+  const input = document.getElementById('admin_token');
+  if (!input || document.getElementById('admin_token_panel')) { return; }
+  const panel = document.createElement('div');
+  panel.id = 'admin_token_panel';
+  panel.className = 'token-panel';
+  panel.innerHTML = '<span id="admin_token_status" class="small muted"></span>'
+    + '<button type="button" class="btn-mini" id="admin_token_remember">记住</button>'
+    + '<button type="button" class="btn-mini" id="admin_token_edit">修改</button>'
+    + '<button type="button" class="btn-mini" id="admin_token_clear">清除</button>';
+  input.insertAdjacentElement('afterend', panel);
+  const refresh = () => setTokenStatus(storedAdminToken() ? '已记住 token（点「修改」可更换）' : '');
+  panel.querySelector('#admin_token_remember').addEventListener('click', () => {
+    const v = input.value.trim();
+    if (!v) { setTokenStatus('输入框为空，未记住', true); return; }
+    try { window.localStorage.setItem(ADMIN_TOKEN_KEY, v); }
+    catch (e) { setTokenStatus('本浏览器不允许记住（localStorage 不可用）', true); return; }
+    input.value = '';
+    refresh();
+  });
+  panel.querySelector('#admin_token_edit').addEventListener('click', () => {
+    input.value = ''; input.focus(); setTokenStatus('输入新 token 后点「记住」');
+  });
+  panel.querySelector('#admin_token_clear').addEventListener('click', () => {
+    try { window.localStorage.removeItem(ADMIN_TOKEN_KEY); } catch (e) { /* 忽略 */ }
+    setTokenStatus('已清除');
+  });
+  refresh();
+}
+mountAdminTokenPanel();
 """
 
 
@@ -399,7 +454,7 @@ function showToken(r) {
       运营无需记录令牌。</p>';
 }
 function loadList() {
-  const token = document.getElementById('admin_token').value.trim();
+  const token = adminToken();
   const out = document.getElementById('out');
   const list = document.getElementById('list');
   out.className = ''; out.textContent = '';
@@ -422,7 +477,7 @@ function loadList() {
 }
 document.getElementById('load').addEventListener('click', loadList);
 document.getElementById('list').addEventListener('click', e => {
-  const token = document.getElementById('admin_token').value.trim();
+  const token = adminToken();
   const app = e.target.dataset.app;
   const rej = e.target.dataset.rej;
   if (app) {
@@ -514,7 +569,7 @@ function renderEvents(events) {
   list.appendChild(table);
 }
 function loadSearches() {
-  const token = document.getElementById('admin_token').value.trim();
+  const token = adminToken();
   const limit = document.getElementById('search_limit').value || 100;
   const out = document.getElementById('out');
   out.className = ''; out.textContent = '';
@@ -530,6 +585,176 @@ document.getElementById('load').addEventListener('click', loadSearches);
     )
     return _page("买家搜索事件", body)
 
+
+def portal_merchant(merchant_id: str) -> dict[str, Any]:
+    """单商家详情页（/portal/merchant/{merchant_id}）。
+
+    商家列表行末的「详情」链到这里：可刷新、可分享、可后退。页面不含数据，
+    由页面 JS 用 admin token 调 /v1/admin/merchants/{id}/report 渲染（与
+    Dashboard 同一条 API，读侧逻辑只有一份）。merchant_id 由 JS 从
+    location.pathname 取——**不注入 HTML**，零注入面；服务端参数仅用于
+    路由匹配与（非法时）404 之外的占位。
+    """
+    if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {"__html__": _not_found_html(), "__status__": 404}
+    body = (
+        _ADMIN_NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Admin</div>
+  <h2>商家详情</h2>
+  <p class="lead"><a href="/portal/dashboard">← 返回 Dashboard</a></p>
+  <div class="card form-card">
+    <label for="admin_token">Admin Token</label>
+    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
+    <button class="btn-form" id="load">加载详情</button>
+    <div id="out"></div>
+  </div>
+  <div id="report"></div>
+</div></section>
+<script>
+function merchantIdFromPath() {
+  // 路径形如 /portal/merchant/<id>（id 由服务端生成，这里只做最后一段解码）。
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  return decodeURIComponent(parts[parts.length - 1] || '');
+}
+function loadMerchant() {
+  const out = document.getElementById('out');
+  out.className = ''; out.textContent = '';
+  const mid = merchantIdFromPath();
+  if (!mid) { out.className = 'err'; out.textContent = '缺少商家 ID'; return; }
+  adminApi('/v1/admin/merchants/' + encodeURIComponent(mid) + '/report', adminToken()).then(r => {
+    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
+    document.getElementById('report').innerHTML = reportHtml(r);
+  });
+}
+document.getElementById('load').addEventListener('click', loadMerchant);
+// 已记住 token 时自动加载。必须等 load 事件：本段脚本先于共享 helper
+// （_PORTAL_JS / _PORTAL_JS_EXTRA，发射在 body 之后）执行，parse 期直接调用会
+// ReferenceError（生产上出过同类事故）。
+window.addEventListener('load', () => { if (storedAdminToken()) { loadMerchant(); } });
+</script>
+"""
+        + _FOOTER
+    )
+    return _page("商家详情", body, extra_js=_PORTAL_JS_EXTRA)
+
+
+def portal_day(day: str) -> dict[str, Any]:
+    """某一天的买家搜索详情页（/portal/day/{YYYY-MM-DD}）。
+
+    两块内容：① 当天关键词（来自 ``buyer_keyword_daily`` 日聚合，任意历史日期
+    都有，分「搜商家 / 搜商品」）② 当天明细事件（来自有界事件流，超出保留窗口
+    时页面按 ``events_note`` 如实说明，不伪装成「当天没有搜索」）。
+    日期由 JS 从 location.pathname 取，服务端只做路由匹配；日期选择器切换时
+    整页跳转（保持可分享/可后退）。
+    """
+    if str(os.environ.get(_PORTAL_ADMIN_ENABLED_ENV) or "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return {"__html__": _not_found_html(), "__status__": 404}
+    body = (
+        _ADMIN_NAV
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Admin</div>
+  <h2>某日买家搜索</h2>
+  <p class="lead"><a href="/portal/dashboard">← 返回 Dashboard</a></p>
+  <div class="card form-card">
+    <label for="day_pick">日期（UTC）</label>
+    <input id="day_pick" type="date">
+    <label for="admin_token">Admin Token</label>
+    <input id="admin_token" type="password" placeholder="admin token" autocomplete="off">
+    <button class="btn-form" id="load">加载这一天</button>
+    <div id="out"></div>
+  </div>
+  <div id="day_content"></div>
+</div></section>
+<style>
+.search-table{width:100%;border-collapse:collapse;margin-top:16px;font-size:0.86rem}
+.search-table th,.search-table td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+.search-table th{background:var(--kiwi-100);color:var(--kiwi-800)}
+.badge-hit{color:#0a7d3c;font-weight:700}
+.badge-miss{color:#b02a37;font-weight:700}
+</style>
+<script>
+function dayFromPath() {
+  const parts = window.location.pathname.split('/').filter(Boolean);
+  return decodeURIComponent(parts[parts.length - 1] || '');
+}
+function keywordTable(rows, title) {
+  if (!rows.length) { return '<div class="section-title">' + title + '（0）</div><p class="small muted">该日没有这类搜索</p>'; }
+  return '<div class="section-title">' + title + '（' + escHtml(rows.length) + '）</div>'
+    + '<table class="search-table"><thead><tr><th>关键词</th><th>搜索次数</th><th>零命中</th></tr></thead>'
+    + rows.map(k => '<tr><td><strong>' + escHtml(k.keyword) + '</strong></td><td>' + escHtml(k.searches) + '</td><td>'
+        + ((k.zero_results || 0) > 0 ? '<span class="badge-miss">' + escHtml(k.zero_results) + '</span>' : '0') + '</td></tr>').join('')
+    + '</table>';
+}
+function renderDay(r) {
+  const kw = r.keywords || [];
+  const agentKw = kw.filter(k => k.search_type === 'agent');
+  const listingKw = kw.filter(k => k.search_type === 'listing');
+  let html = '<div class="kpis">'
+    + '<div class="kpi"><div class="num">' + escHtml(agentKw.length) + '</div><div class="lbl">搜商家关键词</div></div>'
+    + '<div class="kpi"><div class="num">' + escHtml(listingKw.length) + '</div><div class="lbl">搜商品关键词</div></div>'
+    + '<div class="kpi"><div class="num">' + escHtml((r.events || []).length) + '</div><div class="lbl">明细条数</div></div>'
+    + '</div>';
+  html += keywordTable(agentKw, '搜商家（agent）');
+  html += keywordTable(listingKw, '搜商品（listing）');
+  if (r.events_note) { html += '<p class="small muted">' + escHtml(r.events_note) + '</p>'; }
+  const events = r.events || [];
+  html += '<div class="section-title">当天明细（' + escHtml(events.length) + '）</div>';
+  if (!events.length) {
+    html += '<p class="small muted">' + (r.events_note ? '明细不可得（见上）' : '该日没有搜索明细') + '</p>';
+  } else {
+    html += '<table class="search-table"><thead><tr><th>时间(UTC)</th><th>类型</th><th>关键词</th><th>筛选</th><th>结果</th><th>返回摘要</th></tr></thead>'
+      + events.map(e => {
+          const hit = (e.result_count || 0) > 0;
+          const filters = Object.entries(e.filters || {}).map(([k, v]) => k + '=' + v).join(', ');
+          const summary = (e.result_summary || []).slice(0, 5)
+            .map(s => (s.title || s.display_name || s.catalog_agent_id || s.listing_id || ''))
+            .filter(Boolean).join(' · ');
+          return '<tr><td class="small mono">' + escHtml(e.created_at || '') + '</td>'
+            + '<td>' + escHtml(e.search_type || '') + '</td>'
+            + '<td><strong>' + escHtml(e.query || '') + '</strong></td>'
+            + '<td class="small">' + escHtml(filters) + '</td>'
+            + '<td>' + (hit ? '<span class="badge-hit">命中 ' + escHtml(e.result_count) + '</span>'
+                            : '<span class="badge-miss">未命中</span>') + '</td>'
+            + '<td class="small">' + escHtml(summary) + '</td></tr>';
+        }).join('')
+      + '</table>';
+  }
+  document.getElementById('day_content').innerHTML = html;
+}
+function loadDay() {
+  const out = document.getElementById('out');
+  out.className = ''; out.textContent = '';
+  const day = dayFromPath();
+  if (!day) { out.className = 'err'; out.textContent = '缺少日期'; return; }
+  adminApi('/v1/admin/buyer-day?day=' + encodeURIComponent(day), adminToken()).then(r => {
+    if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
+    renderDay(r);
+  });
+}
+document.getElementById('day_pick').value = dayFromPath();
+document.getElementById('day_pick').addEventListener('change', e => {
+  if (e.target.value) { window.location.href = '/portal/day/' + encodeURIComponent(e.target.value); }
+});
+document.getElementById('load').addEventListener('click', loadDay);
+window.addEventListener('load', () => { if (storedAdminToken()) { loadDay(); } });
+</script>
+"""
+        + _FOOTER
+    )
+    return _page("某日买家搜索", body, extra_js=_PORTAL_JS_EXTRA)
 
 
 def portal_admin_buyer_stats() -> dict[str, Any]:
@@ -611,12 +836,7 @@ def portal_dashboard() -> dict[str, Any]:
     <p class="small muted">登录失败数（今日）与失败来源 IP 前缀 Top——防爆破监测（仅存 /24 前缀）。</p>
     <div id="login_failures"></div>
   </div>
-  <div class="card form-card" id="report_card" style="display:none">
-    <h3 id="report_title">商家报告</h3>
-    <div id="report"></div>
-    <button class="btn-mini" id="report_back" style="margin-top:12px">← 返回列表</button>
-  </div>
-</div></section>
+  </div></section>
 <style>
 .bars2{display:flex;align-items:flex-end;gap:6px;height:120px;margin-top:18px}
 .bars2 .bar{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
@@ -663,7 +883,7 @@ function renderUsage(usage) {
   const max = Math.max(1, ...usage.map(u => u.total));
   document.getElementById('usage').innerHTML =
     '<div class="bars">' + usage.map(u =>
-      '<div class="bar" title="' + escHtml(u.day) + ' 总 ' + escHtml(u.total) + '"><div class="fill" style="height:' + Math.max(2, Math.round(u.total / max * 100)) + '%"></div><div class="d">' + escHtml(u.day.slice(5)) + '</div></div>'
+      '<div class="bar" title="' + escHtml(u.day) + ' 总 ' + escHtml(u.total) + '"><div class="fill" style="height:' + Math.max(2, Math.round(u.total / max * 100)) + '%"></div><div class="d"><a href="/portal/day/' + encodeURIComponent(u.day) + '">' + escHtml(u.day.slice(5)) + '</a></div></div>'
     ).join('') + '</div>';
   document.getElementById('legend').innerHTML = Object.entries(METRIC_LABELS).map(([k, v]) =>
     '<span><span class="sw" style="background:' + METRIC_COLORS[k] + '"></span>' + v + '</span>'
@@ -700,7 +920,7 @@ function renderBuyerChart(series) {
           '<div class="fill" style="background:' + color + ';height:'
           + Math.max(2, Math.round((u.distinct_buyers[k] || 0) / max * 100)) + '%"></div>'
         ).join('')
-        + '</div><div class="d">' + escHtml(u.day.slice(5)) + '</div></div>'
+        + '</div><div class="d"><a href="/portal/day/' + encodeURIComponent(u.day) + '">' + escHtml(u.day.slice(5)) + '</a></div></div>'
     ).join('') + '</div>';
   document.getElementById('buyer_legend').innerHTML = BSERIES.map(([, lbl, color]) =>
     '<span><span class="sw" style="background:' + color + '"></span>' + lbl + '</span>'
@@ -714,7 +934,7 @@ function renderBuyerDetail(series) {
     + '<th>事件(找商家)</th><th>事件(找商品)</th><th>未识别事件</th></tr></thead>'
     + rows.map(u => {
       const unid = BSERIES.reduce((s, [k]) => s + (u.unidentified_events[k] || 0), 0);
-      return '<tr><td class="mono">' + escHtml(u.day) + '</td>'
+      return '<tr><td class="mono"><a href="/portal/day/' + encodeURIComponent(u.day) + '">' + escHtml(u.day) + '</a></td>'
         + '<td>' + escHtml(u.distinct_buyers.buyer_agent_search) + '</td>'
         + '<td>' + escHtml(u.distinct_buyers.buyer_listing_search) + '</td>'
         + '<td>' + escHtml(u.total_events.buyer_agent_search) + '</td>'
@@ -770,7 +990,7 @@ function renderFunnelChart(daily) {
         + ' / 详情 ' + escHtml(d.detail_views) + '"><div class="pair">'
         + '<div class="fill" style="background:#2e7d32;height:' + Math.max(2, Math.round(d.searches / max * 100)) + '%"></div>'
         + '<div class="fill" style="background:#ef6c00;height:' + Math.max(2, Math.round(d.detail_views / max * 100)) + '%"></div>'
-        + '</div><div class="d">' + escHtml(d.day.slice(5)) + '</div></div>'
+        + '</div><div class="d"><a href="/portal/day/' + encodeURIComponent(d.day) + '">' + escHtml(d.day.slice(5)) + '</a></div></div>'
     ).join('') + '</div>';
   document.getElementById('funnel_legend').innerHTML =
     '<span><span class="sw" style="background:#2e7d32"></span>搜索</span>'
@@ -827,23 +1047,35 @@ function renderApps(token, apps) {
 function renderMerchants(list) {
   const el = document.getElementById('merchants');
   if (!list.length) { el.innerHTML = '<p class="small muted">还没有商家</p>'; return; }
-  el.innerHTML = '<table><tr><th>商家 ID</th><th>名称</th><th>Agent</th><th>商品</th><th>令牌</th><th>签发</th><th></th></tr>' +
-    list.map(m => '<tr><td class="mono">' + escHtml(m.merchant_id) + '</td><td>' + escHtml(m.name) + '</td><td>' + escHtml(m.agents_count) +
+  el.innerHTML = '<table><tr><th>商家 ID</th><th>名称</th><th>注册邮箱</th><th>Agent</th><th>商品</th><th>令牌</th><th>签发</th><th></th></tr>' +
+    list.map(m => '<tr><td class="mono">' + escHtml(m.merchant_id) + '</td><td>' + escHtml(m.name) +
+      '</td><td class="mono small">' + escHtml(m.account_email || '—') +
+      '</td><td>' + escHtml(m.agents_count) +
       '</td><td>' + escHtml(m.listings_count) + '</td><td>' + escHtml(m.token_status) + '</td><td class="small muted">' +
-      escHtml((m.token_issued_at || '-').slice(0, 10)) + '</td><td><button class="btn-mini" data-report="' +
-      escHtml(m.merchant_id) + '">详情</button></td></tr>').join('') + '</table>';
+      escHtml((m.token_issued_at || '-').slice(0, 10)) + '</td><td><a class="btn-mini" href="/portal/merchant/' +
+      encodeURIComponent(m.merchant_id) + '">详情</a></td></tr>').join('') + '</table>';
 }
 
-function renderReport(r, token) {
+/* 商家报告正文（纯函数，详情页 /portal/merchant/<id> 复用）。 */
+function reportHtml(r) {
   const m = r.merchant;
   let html = '<div class="merchant-info">'
     + '<p><strong>' + escHtml(m.name || '') + '</strong> <span class="mono">' + escHtml(m.merchant_id) + '</span></p>'
     + '<p class="small muted">创建 ' + escHtml((m.created_at || '').slice(0, 10)) + ' · 更新 ' + escHtml((m.updated_at || '').slice(0, 10)) + '</p>'
-    + '<table class="kv"><tr><td>申请邮箱</td><td class="mono">' + escHtml(m.contact_email || '-') + '</td></tr>'
-    + '<tr><td>账号邮箱</td><td class="mono">' + escHtml(m.account_email || '-') + '</td></tr>'
+    + '<table class="kv"><tr><td>商家 ID</td><td class="mono">' + escHtml(m.merchant_id || '-') + '</td></tr>'
+    + '<tr><td>商家名称</td><td>' + escHtml(m.name || '-') + '</td></tr>'
+    + '<tr><td>注册邮箱（账号）</td><td class="mono">' + escHtml(m.account_email || '-') + '</td></tr>'
+    + '<tr><td>申请邮箱</td><td class="mono">' + escHtml(m.contact_email || '-') + '</td></tr>'
     + '<tr><td>城市</td><td>' + escHtml(m.city || '-') + '</td></tr>'
     + '<tr><td>服务区域</td><td>' + escHtml(m.service_area || '-') + '</td></tr>'
-    + '<tr><td>联系</td><td class="mono">' + escHtml(m.contact || '-') + '</td></tr></table></div>';
+    + '<tr><td>联系</td><td class="mono">' + escHtml(m.contact || '-') + '</td></tr>'
+    + '<tr><td>创建时间</td><td class="small muted">' + escHtml(m.created_at || '-') + '</td></tr>'
+    + '<tr><td>更新时间</td><td class="small muted">' + escHtml(m.updated_at || '-') + '</td></tr></table></div>';
+  html += '<div class="section-title">令牌（' + escHtml((r.tokens || []).length) + '）</div>';
+  html += (r.tokens || []).length ? '<table><tr><th>状态</th><th>签发</th><th>轮换</th><th>吊销</th></tr>' + r.tokens.map(t =>
+    '<tr><td>' + escHtml(t.status) + '</td><td class="small muted">' + escHtml(t.issued_at || '-') + '</td><td class="small muted">' +
+    escHtml(t.rotated_at || '-') + '</td><td class="small muted">' + escHtml(t.revoked_at || '-') + '</td></tr>').join('') + '</table>'
+    : '<p class="small muted">无令牌记录</p>';
   html += '<div class="section-title">Agents（' + escHtml(r.agents.length) + '）</div>';
   html += r.agents.length ? '<table><tr><th>ID</th><th>名称</th><th>域名</th><th>验证</th><th>状态</th></tr>' + r.agents.map(a =>
     '<tr><td class="mono">' + escHtml(a.catalog_agent_id) + '</td><td>' + escHtml(a.display_name) + '</td><td class="mono">' + escHtml(a.canonical_domain) +
@@ -856,10 +1088,7 @@ function renderReport(r, token) {
   html += r.audit_events.length ? '<table><tr><th>时间</th><th>事件</th><th>操作者</th><th>详情</th></tr>' + r.audit_events.map(e =>
     '<tr><td class="small muted">' + escHtml((e.created_at || '').slice(0, 16)) + '</td><td>' + escHtml(e.event) + '</td><td>' + escHtml(e.actor) +
     '</td><td class="small muted">' + escHtml(e.details) + '</td></tr>').join('') + '</table>' : '<p class="small muted">无审计事件</p>';
-  document.getElementById('report_title').textContent = '商家报告：' + String(m.name == null ? '' : m.name);
-  document.getElementById('report').innerHTML = html;
-  document.getElementById('report_card').style.display = 'block';
-  document.getElementById('content').style.display = 'none';
+  return html;
 }
 
 function loadDashboard(token) {
@@ -887,11 +1116,11 @@ function loadDashboard(token) {
 }
 
 document.getElementById('load').addEventListener('click', () => {
-  const token = document.getElementById('admin_token').value.trim();
+  const token = adminToken();
   if (token) loadDashboard(token);
 });
 document.getElementById('apps').addEventListener('click', e => {
-  const token = document.getElementById('admin_token').value.trim();
+  const token = adminToken();
   const app = e.target.dataset.app;
   const rej = e.target.dataset.rej;
   if (app) {
@@ -909,19 +1138,8 @@ document.getElementById('apps').addEventListener('click', e => {
       .then(r => { if (r.ok) { loadDashboard(token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; } });
   }
 });
-document.getElementById('merchants').addEventListener('click', e => {
-  const token = document.getElementById('admin_token').value.trim();
-  const mid = e.target.dataset.report;
-  if (mid) {
-    adminApi('/v1/admin/merchants/' + mid + '/report', token).then(r => {
-      if (r.ok) { renderReport(r, token); } else { document.getElementById('out').textContent = r.error; document.getElementById('out').className = 'err'; }
-    });
-  }
-});
-document.getElementById('report_back').addEventListener('click', () => {
-  document.getElementById('report_card').style.display = 'none';
-  document.getElementById('content').style.display = 'block';
-});
+/* 商家详情已拆为独立页 /portal/merchant/<id>（列表行末的「详情」是链接），
+   本页不再有同页报告卡片与其点击分支。 */
 """
 
 

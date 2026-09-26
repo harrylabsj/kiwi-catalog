@@ -1021,5 +1021,135 @@ class TokenEncryptionTest(unittest.TestCase):
             accounts.decrypt_merchant_token("v2:not-a-valid-ciphertext")
 
 
+class AdminApplicationNotificationTest(unittest.TestCase):
+    """商家提交接入申请 → 通知运营邮箱（2026-09-26 新增）。
+
+    语义要点：通知是**旁路**——SMTP 故障不得影响商家的申请（与注册验证邮件的
+    fail-closed 刻意不同）；未配置通知邮箱时静默跳过。
+    """
+
+    NOTIFY_TO = "1711496337@qq.com"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmp, "catalog.sqlite")
+        env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+                "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL": self.NOTIFY_TO,
+                "KIWI_CATALOG_SMTP_HOST": "smtp.example",
+                "KIWI_CATALOG_SMTP_USER": "ops@example",
+                "KIWI_CATALOG_SMTP_PASSWORD": "pw",
+            },
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        self.app = create_catalog_app(self.db_path)
+
+    def _register_and_apply(self) -> tuple[int, dict]:
+        """注册 → 验证邮箱（console）→ 提交接入申请，返回 (状态码, 响应)。"""
+        status, registered, _ = _call_http(
+            self.app, "POST", "/v1/accounts/register", json.dumps(REGISTER_BODY).encode()
+        )
+        self.assertEqual(status, 200, registered)
+        status, verified, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps(
+                {"email": REGISTER_BODY["email"], "code": registered["verification_code"]}
+            ).encode(),
+        )
+        self.assertEqual(status, 200, verified)
+        cookie = headers.get("set-cookie", "").split(";")[0]
+        status, applied, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
+            cookie=cookie,
+        )
+        return status, applied
+
+    def test_new_application_notifies_admin_inbox(self) -> None:
+        with mock.patch("smtplib.SMTP") as smtp_cls:
+            status, applied = self._register_and_apply()
+        self.assertEqual(status, 200, applied)
+        self.assertEqual(applied["status"], "pending")
+        smtp_cls.assert_called_once()
+        message = smtp_cls.return_value.__enter__.return_value.send_message.call_args[0][0]
+        self.assertEqual(message["To"], self.NOTIFY_TO)
+        self.assertIn("Acme 商贸", message["Subject"])
+        body = message.get_content()
+        self.assertIn("acme.example", body)
+        self.assertIn(str(applied["application_id"]), body)
+
+    def test_notification_failure_does_not_break_application(self) -> None:
+        """SMTP 抛错 → 申请仍然成功且工单已落库（旁路语义）。"""
+        with mock.patch("smtplib.SMTP") as smtp_cls:
+            smtp_cls.return_value.__enter__.return_value.send_message.side_effect = (
+                RuntimeError("smtp down")
+            )
+            status, applied = self._register_and_apply()
+        self.assertEqual(status, 200, applied)
+        self.assertEqual(applied["status"], "pending")
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select status, contact_email from merchant_applications where application_id = ?",
+                (applied["application_id"],),
+            ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["contact_email"], REGISTER_BODY["email"])
+
+    def test_no_notify_email_configured_is_silent(self) -> None:
+        """未配置 KIWI_CATALOG_ADMIN_NOTIFY_EMAIL → 不发信，也不报错。"""
+        os.environ.pop("KIWI_CATALOG_ADMIN_NOTIFY_EMAIL", None)
+        self.addCleanup(
+            os.environ.__setitem__, "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL", self.NOTIFY_TO
+        )
+        with mock.patch("smtplib.SMTP") as smtp_cls:
+            status, applied = self._register_and_apply()
+        self.assertEqual(status, 200, applied)
+        smtp_cls.assert_not_called()
+
+    def test_repeat_application_does_not_renotify(self) -> None:
+        """已有 pending 工单时再次申请 → 不重复通知（避免噪音）。"""
+        with mock.patch("smtplib.SMTP") as first:
+            status, _ = self._register_and_apply()
+            self.assertEqual(status, 200)
+        self.assertEqual(first.call_count, 1)
+        with mock.patch("smtplib.SMTP") as second:
+            status, again = self._register_and_apply_second_attempt()
+        self.assertEqual(status, 200, again)
+        second.assert_not_called()
+
+    def _register_and_apply_second_attempt(self) -> tuple[int, dict]:
+        """同一账号再申请一次（走登录而非注册，复用邮箱验证码通道）。"""
+        status, logged_in, headers = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/login",
+            json.dumps(
+                {"email": REGISTER_BODY["email"], "password": REGISTER_BODY["password"]}
+            ).encode(),
+        )
+        self.assertEqual(status, 200, logged_in)
+        cookie = headers.get("set-cookie", "").split(";")[0]
+        status, applied, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
+            cookie=cookie,
+        )
+        return status, applied
+
+
 if __name__ == "__main__":
     unittest.main()

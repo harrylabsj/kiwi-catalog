@@ -276,6 +276,64 @@ class AdminApiTest(unittest.TestCase):
         self.assertEqual(row["agents_count"], 1)
         self.assertEqual(row["listings_count"], 1)
         self.assertEqual(row["token_status"], "active")
+        # 列表带注册邮箱（商家详情页/运营视图都依赖它）
+        self.assertEqual(row["account_email"], "ops@acme.example")
+
+    # ── 某日买家搜索（buyer-day）───────────────────────────────────────────
+
+    def test_buyer_day_returns_keywords_and_events(self) -> None:
+        """当天关键词来自日聚合表，明细来自事件流；两者都按 UTC 日期取。"""
+        from datetime import UTC, datetime
+
+        # 制造一次买家搜索：写 buyer_search_events + buyer_keyword_daily
+        status, _ = _call_http(self.app, "GET", "/v1/listings/search?q=保温杯")
+        self.assertEqual(status, 200)
+        today = datetime.now(UTC).date().isoformat()
+        status, payload = _call_http(
+            self.app,
+            "GET",
+            f"/v1/admin/buyer-day?day={today}",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["day"], today)
+        keywords = {(k["search_type"], k["keyword"]) for k in payload["keywords"]}
+        self.assertIn(("listing", "保温杯"), keywords)
+        self.assertEqual(len(payload["events"]), 1)
+        self.assertEqual(payload["events"][0]["query"], "保温杯")
+        self.assertEqual(payload["events_note"], "")
+
+    def test_buyer_day_reports_truncated_events_honestly(self) -> None:
+        """超出事件保留窗口的日期：明细为空但必须给出 events_note，不假装没搜索过。"""
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into buyer_keyword_daily (day, search_type, keyword, searches,"
+                " zero_results, updated_at) values ('2020-01-01', 'listing', '老关键词', 3, 1, '2020-01-01T00:00:00+00:00')"
+            )
+        status, payload = _call_http(
+            self.app,
+            "GET",
+            "/v1/admin/buyer-day?day=2020-01-01",
+            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["events"], [])
+        self.assertIn("保留窗口", payload["events_note"])
+        self.assertEqual(payload["keywords"][0]["keyword"], "老关键词")
+
+    def test_buyer_day_rejects_bad_day_and_missing_token(self) -> None:
+        for bad in ("2026-13-45", "20260101", "today", ""):
+            status, payload = _call_http(
+                self.app,
+                "GET",
+                f"/v1/admin/buyer-day?day={bad}",
+                headers={"Authorization": "Bearer " + ADMIN_TOKEN},
+            )
+            self.assertEqual(status, 400, (bad, payload))
+        status, _ = _call_http(self.app, "GET", "/v1/admin/buyer-day?day=2026-01-01")
+        self.assertEqual(status, 403)
 
     def test_registered_merchant_visible_without_approval(self) -> None:
         """注册即商家（无需批准）：仅注册 + 验证邮箱即出现在 admin 商家列表。

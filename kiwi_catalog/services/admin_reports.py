@@ -30,7 +30,7 @@ import sqlite3
 from typing import Any
 
 from kiwi_catalog.core.errors import NotFoundError
-from kiwi_catalog.services import buyer_stats, usage_metrics
+from kiwi_catalog.services import buyer_search_events, buyer_stats, usage_metrics
 
 DEFAULT_DAYS = 14
 MAX_DAYS = 90
@@ -295,6 +295,11 @@ def merchant_list(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, 
                (select issued_at from merchant_tokens mt2
                  where mt2.merchant_id = m.id and mt2.token_hash <> ''
                  order by issued_at desc limit 1) as token_issued_at,
+               -- 注册邮箱：merchant_accounts.merchant_id 非唯一（同一商家可绑多个账号），
+               -- 取最新一个，与 merchant_report 的反查口径一致。
+               (select email from merchant_accounts ma
+                 where ma.merchant_id = m.id
+                 order by ma.account_id desc limit 1) as account_email,
                (select count(*) from audit_events ae where ae.details_json like '%' || m.id || '%') as audit_events
         from merchants m
         order by m.updated_at desc
@@ -314,9 +319,38 @@ def merchant_list(conn: sqlite3.Connection, limit: int = 100) -> list[dict[str, 
                 "listings_count": int(r["listings"]),
                 "token_status": r["token_status"] or "none",
                 "token_issued_at": r["token_issued_at"] or "",
+                "account_email": r["account_email"] or "",
             }
         )
     return result
+
+
+def buyer_day_report(
+    conn: sqlite3.Connection, day: str, limit: int = 200
+) -> dict[str, Any]:
+    """某一天的买家搜索：关键词（日聚合）+ 明细事件（有界保留，可能已被裁剪）。
+
+    - 关键词来自 ``buyer_keyword_daily``（``day × search_type × keyword``，**无保留
+      上限**）——任意历史日期都有；``search_type`` 是 agent（找商家）/ listing（找商品）。
+    - 明细来自 ``buyer_search_events``（全局最近 5000 条的有界事件流）——超出窗口
+      的日期会给空列表，此时 ``events_note`` 如实说明「仅剩日聚合」，不伪装成
+      「当天没有搜索」。
+    """
+    keywords = conn.execute(
+        "select search_type, keyword, searches, zero_results from buyer_keyword_daily"
+        " where day = ? order by searches desc, keyword asc",
+        (day,),
+    ).fetchall()
+    events = buyer_search_events.list_search_events_for_day(conn, day, limit)
+    note = ""
+    if not events and keywords:
+        note = "该日明细已不在保留窗口内（事件流只保留最近 5000 条），以下仅剩日聚合关键词。"
+    return {
+        "day": day,
+        "keywords": [dict(row) for row in keywords],
+        "events": events,
+        "events_note": note,
+    }
 
 
 def merchant_report(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
