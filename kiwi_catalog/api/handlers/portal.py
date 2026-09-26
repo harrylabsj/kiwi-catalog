@@ -335,7 +335,25 @@ function mountAdminTokenPanel() {
     adminTokenFields(!has);
     rememberBtn.style.display = has ? 'none' : '';
     editBtn.style.display = has ? '' : 'none';
-    if (has) { setTokenStatus('已记住 token（仅本浏览器）', 'muted'); }
+  }
+  /** 校验**已记住**的那个 token 并把结果说出来。
+   *
+   * 为什么必须做：`showStoredState()` 只说"本浏览器存了一个值"，此前页面就停在
+   * 那句中性文案上——用户会读成"token 有效"，直到点「加载」才吃一个 invalid
+   * （2026-09-26 生产反馈）。记住的那一刻校验过还不够：值可能是**上次**存下的
+   * （当时就报错、但按设计仍保留），或服务器端 token 期间被轮换。
+   */
+  function validateStored() {
+    const current = storedAdminToken();
+    if (!current) { return; }
+    setTokenStatus('已记住 token（仅本浏览器），正在校验…', 'muted');
+    probeAdminToken(current).then(ok => {
+      // 校验期间用户可能已改过/清掉 → 只在值未变时更新，避免新值被旧结果盖住
+      if (storedAdminToken() !== current) { return; }
+      if (ok === true) { setTokenStatus('已记住 token（仅本浏览器），校验通过', 'muted'); }
+      else if (ok === false) { setTokenStatus('已记住的 token 被服务端拒绝（invalid）——点「更换」填入正确的 token，或点「清除」', 'err'); }
+      else { setTokenStatus('已记住 token（仅本浏览器），但校验请求没成功（网络或服务问题），有效性未确认', 'err'); }
+    });
   }
   if (rememberBtn) rememberBtn.addEventListener('click', () => {
     const v = normalizeTokenValue(input.value);
@@ -344,12 +362,7 @@ function mountAdminTokenPanel() {
     catch (e) { setTokenStatus('本浏览器不允许记住（localStorage 不可用）', 'err'); return; }
     input.value = '';
     showStoredState();
-    setTokenStatus('已记住，正在校验…', 'muted');
-    probeAdminToken(v).then(ok => {
-      if (ok === true) { setTokenStatus('已记住，校验通过（仅本浏览器）', 'muted'); }
-      else if (ok === false) { setTokenStatus('已记住，但服务端拒绝了这个 token（invalid）——请核对服务器上的 admin token 配置', 'err'); }
-      else { setTokenStatus('已记住，但校验请求没成功（网络或服务问题），有效性未确认', 'err'); }
-    });
+    validateStored();
   });
   if (editBtn) editBtn.addEventListener('click', () => {
     adminTokenFields(true);
@@ -417,6 +430,7 @@ function mountAdminTokenPanel() {
     });
   });
   showStoredState();
+  validateStored();  // 页面一打开就校验已记住的值，别让"已记住"被读成"有效"
 }
 mountAdminTokenPanel();
 """
