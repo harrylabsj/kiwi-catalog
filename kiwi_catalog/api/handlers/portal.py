@@ -1745,10 +1745,35 @@ function loadMe() {
         + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
         + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
         + (r.token.revoked_at ? ' · 已吊销 ' + esc(r.token.revoked_at.slice(0, 10)) : '')
-        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>';
+        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>'
+        // 下一步指引（2026-09-26）：令牌拿到手之后**填到哪里**此前页面上没有任何提示，
+        // 而粘贴点是 `kiwi merchant init` 的第 4 个提示 / ~/.kiwi/credentials.env。
+        // 次要动作（复制整行）放在它该出现的上下文里，避免把上面的动作行挤成两行。
+        + '<div style="margin-top:12px;border-left:3px solid var(--kiwi-600);padding-left:10px">'
+        + '<p class="small"><strong>下一步：把令牌填进你的 Kiwi Merchant</strong></p>'
+        + '<p class="small">① 自建实例：终端运行 <code>kiwi merchant init</code>，在第 4 个提示'
+        + '「商家令牌」处粘贴；或把下面这行写进 <code>~/.kiwi/credentials.env</code>（权限 0600）'
+        + ' <button type="button" class="btn-mini" id="copy_env_line">复制这一行</button><br>'
+        + '<code>KIWI_MERCHANT_TOKEN=&lt;你的令牌&gt;</code></p>'
+        + '<p class="small">② 填好后 <code>kiwi merchant publish</code>、<code>kiwi agent serve</code> '
+        + '等命令会自动读取（shopping-cli 不需要配这个令牌）。</p>'
+        + '<p class="small">③ WorkBuddy 云端应用：填入口在接入向导里（开发中）。'
+        + '如果只是发布公开资料，现在不需要令牌。</p>'
+        + '</div>';
       copyBtn.disabled = false;
       applyBtn.disabled = true;  // 有令牌：申请令牌变灰
       document.getElementById('apply_form').style.display = 'none';
+      // 守卫式绑定：该按钮只存在于上面这段 innerHTML 里
+      const copyEnv = document.getElementById('copy_env_line');
+      if (copyEnv) {
+        copyEnv.addEventListener('click', () => {
+          const box = document.querySelector('.token-box');
+          if (box) {
+            navigator.clipboard.writeText(
+              'KIWI_MERCHANT_TOKEN=' + (box.textContent || '').trim());
+          }
+        });
+      }
     } else if (r.application && r.application.status === 'pending') {
       tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
       copyBtn.disabled = true;
