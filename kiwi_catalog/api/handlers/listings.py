@@ -76,7 +76,7 @@ def _require_owner_token_for_merchant(
     HMAC 派生路径（行为同旧版）。
     """
     try:
-        api_auth.require_admin_token(payload)
+        api_auth.require_admin_token(payload, conn if conn is not None else db_path)
         return "admin"
     except AuthError:
         pass
@@ -235,7 +235,7 @@ def v1_list_agent_listings(
             _require_owner_token_for_merchant(auth_payload, merchant_id, conn=conn)
         else:
             try:
-                api_auth.require_admin_token(auth_payload)
+                api_auth.require_admin_token(auth_payload, db_path)
             except AuthError as exc:
                 raise AuthError(
                     f"agent {owner_agent_id} has no merchant binding; only admin may read its listings"

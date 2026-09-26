@@ -64,6 +64,7 @@ from kiwi_catalog.api.route_table import (
     _v1_admin_merchant_report,
     _v1_admin_merchants,
     _v1_admin_searches,
+    _v1_admin_token_rotate,
     _v1_approve_application,
     _v1_claim_agent,
     _v1_create_connector_identity_request,
@@ -1001,6 +1002,15 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path,
             api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
             _query_params_from_request(request),
+        )
+
+    @app.post("/v1/admin/token/rotate")
+    def v1_admin_token_rotate(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return _v1_admin_token_rotate(
+            db_path, api_auth.payload_with_auth(payload, authorization, "")
         )
 
     # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────

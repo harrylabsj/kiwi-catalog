@@ -83,6 +83,31 @@ owner token 双路径（`api/auth.py`）：
 
 应用列表/审批动作的管理视图。
 
+| 路由 | 说明 |
+| --- | --- |
+| `GET /v1/admin/*` | 只读聚合（dashboard / merchants / report / searches / buyer-stats / buyer-day / access-log / access-insights） |
+| `POST /v1/admin/token/rotate` | **轮换 admin token**（2026-09-26，迁移 v37）。必须带当前 token；body `new_token` 可选（≥24 字符、不含空白），缺省由服务端生成 43 字符；响应里的明文**只返回一次**；旧值立即失效 |
+
+**轮换语义与恢复**（`services/admin_credentials.py` + `db/session.py` 的迁移链）：
+
+- 表 `admin_credentials` 是**单例行**，只存 SHA-256 摘要；`env` 的
+  `KIWI_CATALOG_ADMIN_TOKEN` 只作**首次引导**——一旦有行，旧配置值不再被接受
+  （否则轮换对已拿到旧值的人毫无作用）。
+- 判定口径统一在 `api.auth.effective_admin_digest(db)`：有行读行、无行读 env；
+  **所有**调用点必须带 db 上下文（`db_path` 或 `conn`），漏传 = 那条路径上旧值复活
+  ——由 `tests/test_admin_token_rotate.py::test_every_require_admin_token_call_passes_db_context` 静态守住。
+- **恢复路径**（丢失新 token / 需要交回配置管理时）：
+  `sqlite3 <db> "delete from admin_credentials where credential_id = 1"` + 重启服务，
+  env 引导值重新生效。
+- **回滚注意**：迁移 v37 会把 `meta.schema_version` 提到 37，而旧版本代码拒绝打开
+  "比自己新"的库（`RuntimeError: database schema version ... is newer`）。因此回滚旧包时
+  需一并把 `meta.schema_version` 改回 36（多出的空表对旧代码无害）或恢复部署前的库备份。
+- 轮换后发一封通知邮件（`KIWI_CATALOG_ADMIN_NOTIFY_EMAIL`，未配置则不发）：轮换会让旧值
+  立即失效，若是攻击者所为，这封信是运营唯一的即时信号。发信失败不回滚轮换。
+- 门户 `/portal/*` 的 admin 页都有 token 面板：「记住」把 token 存进**本浏览器**
+  （localStorage，已记住时校验一次并给出"通过/被拒/无法判定"）、「更换」只改本浏览器、
+  「轮换服务器 token」才真正改服务器（需当前 token 有效 + 二次确认）。
+
 ### 3.4 `/portal/*`（HTML 门户，登录态）
 
 | 路由 | 页面 |
@@ -177,6 +202,8 @@ owner token 双路径（`api/auth.py`）：
   （能收到码即证明邮箱归属，避免未验证账号重置后仍无法登录的死角）；
 - 生产部署需配置 `KIWI_CATALOG_ADMIN_TOKEN` 与
   `KIWI_CATALOG_OWNER_TOKEN_SECRET`（未配置时鉴权一律 fail-closed）；
+- admin token：轮换行只存摘要（同商家令牌模型）；轮换后旧值在**所有** admin 端点
+  立即失效（含 env 引导值），恢复 = 删行 + 重启（见 §3.3）；
 - 买家订阅（§3.6）：`buyer_subject` 为账号稳定标识的不透明字符串（不存
   邮箱）；商家侧接口只输出匿名汇总数字，无任何买家身份/列表/写消息通道。
 

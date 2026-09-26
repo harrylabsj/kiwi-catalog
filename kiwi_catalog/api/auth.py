@@ -88,19 +88,65 @@ def payload_with_auth(
 
 
 def configured_admin_token() -> str:
+    """**引导值**：服务器配置里的 admin token（轮换前的唯一来源）。
+
+    轮换后（表里存在单例行）它不再被接受——见 require_admin_token。
+    """
     return str(os.environ.get(_ADMIN_TOKEN_ENV) or "").strip()
 
 
-def require_admin_token(payload: dict[str, Any]) -> None:
-    """Raise AuthError unless the payload carries a valid admin token."""
-    expected = configured_admin_token()
+def effective_admin_digest(db: Any = None) -> str:
+    """当前生效的 admin token **摘要**；两边都没有时返回 ''。
+
+    口径（2026-09-26 轮换）：有轮换行 → 只认行里的摘要（env 值作废）；无行 →
+    env 引导值。比较摘要而非明文：轮换行里本来就只有摘要，比较两侧同为定长
+    十六进制串，恒时比较仍然成立。
+
+    `db` 可以是 db_path（自开短连接）或已打开的 sqlite3 连接（调用点已在事务
+    里时传 conn，避免嵌套连接）。**必须传**——漏传会让该端点只认 env 引导值
+    （轮换后旧值复活）；有一条静态检查守着全部调用点。
+    """
+    if db is not None:
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import admin_credentials
+
+        try:
+            if isinstance(db, sqlite3.Connection):
+                digest = admin_credentials.current_digest(db)
+            else:
+                with db_session(db) as conn:
+                    digest = admin_credentials.current_digest(conn)
+        except sqlite3.Error:
+            # 读不到库时按"未配置"处理（fail-closed），绝不回退到 env——
+            # 否则一次临时读错就会让轮换前的旧值重新生效。
+            return ""
+        if digest:
+            return digest
+    bootstrap = configured_admin_token()
+    return token_digest(bootstrap) if bootstrap else ""
+
+
+def admin_token_matches(candidate: str, db: Any = None) -> bool:
+    """呈现的凭据是否等于当前生效的 admin token（恒时比较）。"""
+    expected = effective_admin_digest(db)
+    if not expected or not candidate:
+        return False
+    return hmac.compare_digest(token_digest(candidate), expected)
+
+
+def require_admin_token(payload: dict[str, Any], db: Any = None) -> None:
+    """Raise AuthError unless the payload carries a valid admin token.
+
+    `db`（db_path 或 conn）决定是否命中轮换行，见 effective_admin_digest。
+    """
+    expected = effective_admin_digest(db)
     if not expected:
         # 审查 P3：不区分「未配置」与「无效」——配置状态泄漏会辅助枚举性探测
         raise AuthError("invalid admin token")
     token = payload_token(payload)
     if not token:
         raise AuthError("invalid admin token")
-    if not token_matches(token, expected):
+    if not hmac.compare_digest(token_digest(token), expected):
         raise AuthError("invalid admin token")
 
 

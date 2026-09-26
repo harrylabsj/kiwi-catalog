@@ -523,6 +523,11 @@ RouteEntry(
         "/v1/admin/access-insights",
         lambda db_path, payload, query, **kw: _v1_admin_access_insights(db_path, payload, query),
     ),
+RouteEntry(
+        {"POST"},
+        "/v1/admin/token/rotate",
+        lambda db_path, payload, query, **kw: _v1_admin_token_rotate(db_path, payload),
+    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -924,6 +929,10 @@ def _v1_admin_access_log(db_path, payload, query):
 
 def _v1_admin_access_insights(db_path, payload, query):
     return admin_handlers.access_insights(db_path, payload, query or {})
+
+
+def _v1_admin_token_rotate(db_path, payload):
+    return admin_handlers.rotate_admin_token(db_path, payload)
 
 
 # ── /portal wrapper（门户页面）────────────────────────────────────────────

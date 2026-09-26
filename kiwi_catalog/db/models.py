@@ -725,6 +725,20 @@ create table if not exists control_plane_nonces (
     """
 create index if not exists idx_control_plane_nonces_expires
         on control_plane_nonces(expires_at)
+    """,
+    # v37 — 运营 admin token 轮换（2026-09-26）。DDL 与 migration_037 逐字一致
+    # （test_shadow_tables 守护）：单例行存 **摘要**，明文永不落库。
+    # 存在行 = 已轮换：env 的 KIWI_CATALOG_ADMIN_TOKEN 只作**首次引导**，此后
+    # 服务器配置里的旧值不再被接受（这正是轮换的意义）。恢复路径 = 删除该行
+    # （服务器上 CLI/psql 均不可得，用 sqlite3 + 重启，见 docs/accounts.md）。
+    """
+create table if not exists admin_credentials (
+        credential_id integer primary key check(credential_id = 1),
+        token_digest text not null,
+        rotated_at text not null,
+        rotated_by text not null default '',
+        rotation_count integer not null default 1
+    )
     """
 ]
 
