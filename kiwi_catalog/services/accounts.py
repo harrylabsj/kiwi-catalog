@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -46,6 +47,8 @@ from typing import Any
 
 from kiwi_catalog.core.errors import ConflictError, ShoppingCliError, ValidationError
 from kiwi_catalog.core.tokens import token_digest, token_matches
+
+_LOGGER = logging.getLogger(__name__)
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
 
@@ -195,11 +198,13 @@ def store_verification_code(
     )
 
 
-def send_verification_email(email: str, code: str) -> None:
-    """发送验证邮件（标准库 smtplib；SMTP 凭据走 env）。
+def _send_email(to: str, subject: str, body: str) -> None:
+    """裸发送：标准库 smtplib，凭据走 env。
 
     env：KIWI_CATALOG_SMTP_HOST / _PORT / _USER / _PASSWORD / _FROM。
-    发送失败抛 RuntimeError（注册事务回滚）。
+    **未配置或发送失败一律抛异常**——调用方决定语义：验证/重置邮件是
+    fail-closed（异常 → 事务回滚，见 send_verification_email 的调用链）；
+    运营通知是旁路（调用方自行 try/except，不影响请求）。
     """
     host = os.environ.get("KIWI_CATALOG_SMTP_HOST") or ""
     if not host:
@@ -213,17 +218,24 @@ def send_verification_email(email: str, code: str) -> None:
     from_addr = os.environ.get("KIWI_CATALOG_SMTP_FROM") or user
 
     message = EmailMessage()
-    message["Subject"] = "Kiwi 商家账号邮箱验证码"
+    message["Subject"] = subject
     message["From"] = from_addr
-    message["To"] = email
-    message.set_content(
-        f"你的 Kiwi 商家账号验证码是：{code}\n\n15 分钟内有效。如果不是你注册的，请忽略此邮件。"
-    )
+    message["To"] = to
+    message.set_content(body)
     with smtplib.SMTP(host, port, timeout=15) as smtp:
         smtp.starttls()
         if user:
             smtp.login(user, password)
         smtp.send_message(message)
+
+
+def send_verification_email(email: str, code: str) -> None:
+    """发送验证邮件。发送失败抛异常（注册事务回滚，fail-closed，语义不变）。"""
+    _send_email(
+        email,
+        "Kiwi 商家账号邮箱验证码",
+        f"你的 Kiwi 商家账号验证码是：{code}\n\n15 分钟内有效。如果不是你注册的，请忽略此邮件。",
+    )
 
 
 def issue_verification(
@@ -271,35 +283,64 @@ def verify_email_code(
 
 
 def send_password_reset_email(email: str, code: str) -> None:
-    """发送密码重置验证码邮件（标准库 smtplib；SMTP 凭据走 env）。
+    """发送密码重置邮件。发送失败抛异常（fail-closed，语义不变）。
 
     env 与 send_verification_email 相同：KIWI_CATALOG_SMTP_HOST / _PORT /
-    _USER / _PASSWORD / _FROM。发送失败抛 RuntimeError。
+    _USER / _PASSWORD / _FROM。
     """
-    host = os.environ.get("KIWI_CATALOG_SMTP_HOST") or ""
-    if not host:
-        raise RuntimeError("SMTP is not configured")
-    import smtplib
-    from email.message import EmailMessage
-
-    port = int(os.environ.get("KIWI_CATALOG_SMTP_PORT") or "587")
-    user = os.environ.get("KIWI_CATALOG_SMTP_USER") or ""
-    password = os.environ.get("KIWI_CATALOG_SMTP_PASSWORD") or ""
-    from_addr = os.environ.get("KIWI_CATALOG_SMTP_FROM") or user
-
-    message = EmailMessage()
-    message["Subject"] = "Kiwi 商家账号密码重置验证码"
-    message["From"] = from_addr
-    message["To"] = email
-    message.set_content(
+    _send_email(
+        email,
+        "Kiwi 商家账号密码重置验证码",
         f"你的 Kiwi 商家账号密码重置验证码是：{code}\n\n"
-        "15 分钟内有效。如果不是你本人的操作，请忽略此邮件。"
+        "15 分钟内有效。如果不是你本人的操作，请忽略此邮件。",
     )
-    with smtplib.SMTP(host, port, timeout=15) as smtp:
-        smtp.starttls()
-        if user:
-            smtp.login(user, password)
-        smtp.send_message(message)
+
+
+_ADMIN_NOTIFY_EMAIL_ENV = "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL"
+_ADMIN_PORTAL_URL = "https://catalog.kiwi.harrylabsj.com/portal/dashboard"
+
+
+def notify_admin_new_application(
+    *,
+    merchant_name: str,
+    account_email: str,
+    merchant_id: str,
+    account_id: int | str,
+    application_id: int | str,
+    domain: str = "",
+    purpose: str = "",
+    created_at: str = "",
+) -> bool:
+    """商家**提交接入申请**（新建 pending 工单）时通知运营邮箱。
+
+    - 收件人取自 env ``KIWI_CATALOG_ADMIN_NOTIFY_EMAIL``；未配置 → 返回 False
+      且不做任何事（本机/测试环境本就不发信，不是错误）。
+    - **不抛异常**：通知是旁路，SMTP 故障绝不能影响商家的申请（与验证邮件的
+      fail-closed 语义刻意不同；先例见 services/access_log.py 的旁路写法）。
+      调用方应在**事务提交之后**调用。
+    - 返回是否真的发出（便于测试与日志）。
+    """
+    to = (os.environ.get(_ADMIN_NOTIFY_EMAIL_ENV) or "").strip()
+    if not to:
+        return False
+    body = (
+        "新的商家接入申请：\n\n"
+        f"商家名称：{merchant_name or '(未填)'}\n"
+        f"账号邮箱：{account_email or '(未知)'}\n"
+        f"merchant_id：{merchant_id or '(未分配)'}\n"
+        f"account_id：{account_id}\n"
+        f"申请单号：{application_id}\n"
+        f"域名/主体：{domain or '(未填)'}\n"
+        f"用途：{purpose or '(未填)'}\n"
+        f"提交时间：{created_at or '(未知)'}\n\n"
+        f"到运营后台审批：{_ADMIN_PORTAL_URL}\n"
+    )
+    try:
+        _send_email(to, f"[Kiwi] 新商家接入申请：{merchant_name or account_email}", body)
+        return True
+    except Exception as exc:  # noqa: BLE001 —— 旁路：任何发信失败都不得影响申请
+        _LOGGER.warning("admin application notification failed: %r", exc)
+        return False
 
 
 def issue_password_reset(

@@ -14,8 +14,8 @@
 
 """运营 Dashboard API（admin token 保护，fail-closed）。
 
-6 条路由：dashboard 总览 / merchant 列表 / 单商家报告 / 买家搜索事件 /
-每日去重买家统计 / 个体访问日志。全部只读聚合，数据来自
+7 条路由：dashboard 总览 / merchant 列表 / 单商家报告 / 买家搜索事件 /
+某一日的买家搜索（buyer-day）/ 每日去重买家统计 / 个体访问日志。全部只读聚合，数据来自
 services/admin_reports.py、services/access_log.py 等；页面
 （/portal/dashboard、/portal/admin/*）与 CLI 之外的唯一数据入口。
 GET 无 body，admin token 经 query string（审查 P2 惯例）。
@@ -23,6 +23,7 @@ GET 无 body，admin token 经 query string（审查 P2 惯例）。
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,28 @@ def buyer_stats(
     days = _parse_int_query(query.get("days"), admin_reports.DEFAULT_DAYS, "days")
     with db_session(db_path) as conn:
         return {"ok": True, **admin_reports.buyer_stats_summary(conn, days=days)}
+
+
+def buyer_day(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/admin/buyer-day?day=YYYY-MM-DD&limit=200（admin）——某一天的买家搜索。
+
+    关键词来自日聚合表（任意历史日期可得）；明细事件来自有界事件流（超出保留
+    窗口则空 + ``events_note`` 说明）。``day`` 必须是合法日历日（UTC），
+    否则 400——不允许把任意字符串当作日期查询。
+    """
+    api_auth.require_admin_token(payload)
+    raw_day = str(query.get("day") or "").strip()
+    try:
+        parsed = date.fromisoformat(raw_day)
+    except ValueError:
+        raise ValidationError("day must be a calendar date in YYYY-MM-DD form") from None
+    if parsed.isoformat() != raw_day:
+        raise ValidationError("day must be a calendar date in YYYY-MM-DD form")
+    limit = _parse_int_query(query.get("limit"), 200, "limit")
+    with db_session(db_path) as conn:
+        return {"ok": True, **admin_reports.buyer_day_report(conn, raw_day, limit=limit)}
 
 
 def access_log(

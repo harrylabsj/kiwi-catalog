@@ -29,7 +29,7 @@ from typing import Any
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api.handlers.common import require_field
 from kiwi_catalog.core.errors import AuthError, ValidationError
-from kiwi_catalog.db.session import db_session
+from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services.rate_limit import (
     SQLiteRateLimitBackend,
@@ -392,9 +392,22 @@ def token_request(
             phone=str(payload.get("phone") or ""),
             purpose=str(payload.get("purpose") or ""),
         )
-        return {"ok": True, **result}
     finally:
         _ctx.__exit__(None, None, None)
+    # 通知必须在事务提交之后（_ctx.__exit__）再发：既保证工单已落库，
+    # 也避免发信失败牵连申请——notify_admin_new_application 自身不抛异常。
+    if result.get("status") == "pending" and result.get("application_id"):
+        accounts_service.notify_admin_new_application(
+            merchant_name=str(account.get("merchant_name") or ""),
+            account_email=str(account.get("email") or ""),
+            merchant_id=str(account.get("merchant_id") or ""),
+            account_id=account.get("account_id") or "",
+            application_id=result.get("application_id") or "",
+            domain=str(payload.get("domain") or ""),
+            purpose=str(payload.get("purpose") or ""),
+            created_at=now_iso(),
+        )
+    return {"ok": True, **result}
 
 
 def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:

@@ -110,14 +110,8 @@ def record_search_event(
     )
 
 
-def list_recent_search_events(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
-    """返回最近买家搜索事件（倒序），filters/result_summary 反序列化为对象。"""
-    limit = max(1, min(int(limit or 100), 500))
-    rows = conn.execute(
-        "select event_id, search_type, query, filters_json, result_count, result_summary_json, created_at"
-        " from buyer_search_events order by created_at desc, event_id desc limit ?",
-        (limit,),
-    ).fetchall()
+def _serialize_event_rows(rows) -> list[dict]:
+    """事件行 → dict（filters/result_summary 反序列化为对象）。"""
     out: list[dict] = []
     for row in rows:
         item = dict(row)
@@ -125,6 +119,40 @@ def list_recent_search_events(conn: sqlite3.Connection, limit: int = 100) -> lis
         item["result_summary"] = _parse_json(item.pop("result_summary_json", ""), [])
         out.append(item)
     return out
+
+
+_EVENT_COLUMNS = (
+    "select event_id, search_type, query, filters_json, result_count,"
+    " result_summary_json, created_at from buyer_search_events"
+)
+
+
+def list_recent_search_events(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    """返回最近买家搜索事件（倒序），filters/result_summary 反序列化为对象。"""
+    limit = max(1, min(int(limit or 100), 500))
+    rows = conn.execute(
+        f"{_EVENT_COLUMNS} order by created_at desc, event_id desc limit ?",
+        (limit,),
+    ).fetchall()
+    return _serialize_event_rows(rows)
+
+
+def list_search_events_for_day(
+    conn: sqlite3.Connection, day: str, limit: int = 200
+) -> list[dict]:
+    """返回某一天（UTC，``YYYY-MM-DD``）的买家搜索事件（倒序）。
+
+    注意事件流是**全局最近 MAX_RETAINED_EVENTS 条**的有界保留：早于该窗口的日期
+    会返回空列表——调用方必须结合 ``buyer_keyword_daily``（无保留上限）判断
+    「此前没有搜索」还是「明细已被裁剪」，不得把空列表当成「当天没有搜索」。
+    """
+    limit = max(1, min(int(limit or 200), 500))
+    rows = conn.execute(
+        f"{_EVENT_COLUMNS} where substr(created_at, 1, 10) = ?"
+        " order by created_at desc, event_id desc limit ?",
+        (day, limit),
+    ).fetchall()
+    return _serialize_event_rows(rows)
 
 
 def _parse_json(text: str, default: object):
