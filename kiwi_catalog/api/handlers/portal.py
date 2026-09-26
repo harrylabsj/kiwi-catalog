@@ -243,26 +243,55 @@ function getJson(url, token) {
   });
 })();
 
-/* ── admin token 面板：记住 / 修改 / 清除 ──────────────────────────────────
+/* ── admin token 面板：记住（本浏览器）/ 更换 / 清除 ──────────────────────
    三个 admin 页各自有一个 token 输入框（元素 id 为 admin_token），这里统一
    接管：token 存 localStorage（键 kiwi_admin_token，同源共享），页面代码
    一律走 adminToken()。
-   有意识的取舍——CSP 用 per-response nonce、页面无第三方脚本，XSS 面可控；
-   但 token 是**全权凭据**，故已记住时**不回填输入框**（避免截屏/共享屏泄露），
-   只显示状态与「修改」入口。 localStorage 不可用（隐私模式）时静默降级为
-   「每次手输」，行为与改造前一致。 */
+
+   三条行为约定（2026-09-26 修）：
+   1. **空白一律剥离**：token 是 hex/base64 串，空白只可能来自粘贴；此前只
+      `.trim()` 首尾，粘贴带入的内部换行会让服务端比对必然失败。
+   2. **记住即校验**：保存后立刻用一个轻量 admin 端点探一次，把"记住了但
+      服务端不认"当场说清楚——此前要等下一次业务请求才以「invalid admin
+      token」暴露，看起来像"记住失败"。
+   3. **面板只管本浏览器**：它**不修改服务器上的 admin token**（服务器值在
+      部署配置 /etc/kiwi-catalog/env 里，改动需要运维操作）。已记住时不回填
+      输入框（避免截屏/共享屏泄露），输入框与其 label 在已记住时隐藏，点
+      「更换」才显示——避免页面上留一个空框让人以为要在这里改服务器 token。
+
+   localStorage 存全权凭据是有意识取舍：portal 无第三方脚本、CSP 用
+   per-response nonce，XSS 面可控；localStorage 不可用（隐私模式）时静默
+   降级为「每次手输」，行为与改造前一致。 */
 const ADMIN_TOKEN_KEY = 'kiwi_admin_token';
+function normalizeTokenValue(v) {
+  // 去所有空白（含 NBSP / 全角空格等），token 里不可能有空白
+  return String(v == null ? '' : v).replace(/\\s+/g, '');
+}
 function storedAdminToken() {
-  try { return (window.localStorage.getItem(ADMIN_TOKEN_KEY) || '').trim(); } catch (e) { return ''; }
+  try { return normalizeTokenValue(window.localStorage.getItem(ADMIN_TOKEN_KEY) || ''); } catch (e) { return ''; }
 }
 function adminToken() {
   const el = document.getElementById('admin_token');
-  const typed = el ? el.value.trim() : '';
+  const typed = el ? normalizeTokenValue(el.value) : '';
   return typed || storedAdminToken();
 }
-function setTokenStatus(text, isErr) {
+function setTokenStatus(text, cls) {
   const s = document.getElementById('admin_token_status');
-  if (s) { s.textContent = text || ''; s.className = 'small' + (isErr ? ' err' : ' muted'); }
+  if (s) { s.textContent = text || ''; s.className = 'small ' + (cls || 'muted'); }
+}
+function adminTokenFields(show) {
+  const input = document.getElementById('admin_token');
+  const label = document.querySelector('label[for="admin_token"]');
+  if (input) { input.style.display = show ? '' : 'none'; }
+  if (label) { label.style.display = show ? '' : 'none'; }
+}
+function probeAdminToken(token) {
+  // true=服务端通过 / false=被拒 / null=无法判定（网络或服务问题——
+  // 不把"探不通"说成"token 无效"）。用最小窗口的 dashboard 端点，只读。
+  return getJson('/v1/admin/dashboard?days=1', token).then(
+    r => (r && r.ok === true) ? true : (r && r.error ? false : null),
+    () => null
+  );
 }
 function mountAdminTokenPanel() {
   const input = document.getElementById('admin_token');
@@ -272,26 +301,49 @@ function mountAdminTokenPanel() {
   panel.className = 'token-panel';
   panel.innerHTML = '<span id="admin_token_status" class="small muted"></span>'
     + '<button type="button" class="btn-mini" id="admin_token_remember">记住</button>'
-    + '<button type="button" class="btn-mini" id="admin_token_edit">修改</button>'
+    + '<button type="button" class="btn-mini" id="admin_token_edit">更换</button>'
     + '<button type="button" class="btn-mini" id="admin_token_clear">清除</button>';
   input.insertAdjacentElement('afterend', panel);
-  const refresh = () => setTokenStatus(storedAdminToken() ? '已记住 token（点「修改」可更换）' : '');
-  panel.querySelector('#admin_token_remember').addEventListener('click', () => {
-    const v = input.value.trim();
-    if (!v) { setTokenStatus('输入框为空，未记住', true); return; }
+  const rememberBtn = panel.querySelector('#admin_token_remember');
+  const editBtn = panel.querySelector('#admin_token_edit');
+  function showStoredState() {
+    const has = !!storedAdminToken();
+    adminTokenFields(!has);
+    rememberBtn.style.display = has ? 'none' : '';
+    editBtn.style.display = has ? '' : 'none';
+    if (has) { setTokenStatus('已记住 token（仅本浏览器）', 'muted'); }
+  }
+  rememberBtn.addEventListener('click', () => {
+    const v = normalizeTokenValue(input.value);
+    if (!v) { setTokenStatus('输入框为空，未记住', 'err'); return; }
     try { window.localStorage.setItem(ADMIN_TOKEN_KEY, v); }
-    catch (e) { setTokenStatus('本浏览器不允许记住（localStorage 不可用）', true); return; }
+    catch (e) { setTokenStatus('本浏览器不允许记住（localStorage 不可用）', 'err'); return; }
     input.value = '';
-    refresh();
+    showStoredState();
+    setTokenStatus('已记住，正在校验…', 'muted');
+    probeAdminToken(v).then(ok => {
+      if (ok === true) { setTokenStatus('已记住，校验通过（仅本浏览器）', 'muted'); }
+      else if (ok === false) { setTokenStatus('已记住，但服务端拒绝了这个 token（invalid）——请核对服务器上的 admin token 配置', 'err'); }
+      else { setTokenStatus('已记住，但校验请求没成功（网络或服务问题），有效性未确认', 'err'); }
+    });
   });
-  panel.querySelector('#admin_token_edit').addEventListener('click', () => {
-    input.value = ''; input.focus(); setTokenStatus('输入新 token 后点「记住」');
+  editBtn.addEventListener('click', () => {
+    adminTokenFields(true);
+    input.value = '';
+    input.focus();
+    rememberBtn.style.display = '';
+    editBtn.style.display = 'none';
+    setTokenStatus('输入 token 后点「记住」（只改本浏览器；服务器上的 token 不受影响）', 'muted');
   });
   panel.querySelector('#admin_token_clear').addEventListener('click', () => {
     try { window.localStorage.removeItem(ADMIN_TOKEN_KEY); } catch (e) { /* 忽略 */ }
-    setTokenStatus('已清除');
+    input.value = '';
+    adminTokenFields(true);
+    rememberBtn.style.display = '';
+    editBtn.style.display = 'none';
+    setTokenStatus('已清除（服务器上的 token 未受影响）', 'muted');
   });
-  refresh();
+  showStoredState();
 }
 mountAdminTokenPanel();
 """
@@ -1117,7 +1169,14 @@ function loadDashboard(token) {
 
 document.getElementById('load').addEventListener('click', () => {
   const token = adminToken();
-  if (token) loadDashboard(token);
+  if (!token) {
+    // 无 token 时此前是"点了没反应"——运维最容易读成"页面坏了"
+    const out = document.getElementById('out');
+    out.className = 'err';
+    out.textContent = '请先输入 admin token 并点「记住」，再点「加载」（没有 token 无法读取数据）';
+    return;
+  }
+  loadDashboard(token);
 });
 document.getElementById('apps').addEventListener('click', e => {
   const token = adminToken();
