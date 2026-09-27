@@ -30,8 +30,8 @@ fallback 栈渲染的轻量 HTML（零新依赖）：申请表单 / 审核后台
 
 from __future__ import annotations
 
+import html
 import os
-import json
 import secrets
 from typing import Any
 
@@ -2147,7 +2147,7 @@ def portal_enrollment_connect(enrollment_id: str) -> dict[str, Any]:
     GET 页面本身不批准任何请求。冻结预览由登录态 API 读取；用户需登录、
     核对来自 Runtime 的短配对码和公开内容，再显式点击一次授权发布。
     """
-    enrollment_json = json.dumps(str(enrollment_id)).replace("<", "\\u003c")
+    enrollment_id_attribute = html.escape(str(enrollment_id), quote=True)
     body = (
         _nav("account")
         + """
@@ -2156,7 +2156,7 @@ def portal_enrollment_connect(enrollment_id: str) -> dict[str, Any]:
   <h2>连接此服务并发布</h2>
   <p class="lead">请确认这是你刚才从商家 Runtime 发起的连接，并核对公开名片。确认后系统会自动完成绑定与发布，不会再要求你确认技术细节。</p>
   <div class="card form-card" style="max-width:720px">
-    <div id="connect_state"><p class="small muted">正在读取本次接入请求…</p></div>
+    <div id="connect_state" data-enrollment-id="__ENROLLMENT_ID__"><p class="small muted">正在读取本次接入请求…</p></div>
     <div id="connect_preview" style="display:none">
       <p><strong>商家</strong> <span id="connect_merchant"></span></p>
       <p><strong>配对码</strong> <span class="token-box" id="connect_code"></span></p>
@@ -2173,7 +2173,7 @@ def portal_enrollment_connect(enrollment_id: str) -> dict[str, Any]:
   <div class="notice"><strong>公网 HTTPS 要求</strong><br>买家 Agent 会直接连接你的商家服务。请确保服务有可从互联网访问的 HTTPS 地址，并保持在线。我们会在绑定时自动检查。</div>
 </div></section>
 <script>
-const enrollmentId = __ENROLLMENT_ID__;
+const enrollmentId = document.getElementById('connect_state').dataset.enrollmentId;
 const state = document.getElementById('connect_state');
 function connectMessage(text, kind) { state.className = kind || ''; state.textContent = text; }
 function showConnectError() { connectMessage('无法读取这次接入请求。请从 Runtime 重新打开授权页，或稍后重试。', 'err'); }
@@ -2240,7 +2240,7 @@ document.getElementById('connect_authorize').addEventListener('click', e => {
 });
 loadEnrollment();
 </script>
-""".replace("__ENROLLMENT_ID__", enrollment_json)
+""".replace("__ENROLLMENT_ID__", enrollment_id_attribute)
         + _FOOTER
     )
     return _page("连接此服务并发布", body)

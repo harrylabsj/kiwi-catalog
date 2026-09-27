@@ -44,6 +44,20 @@ class PortalConnectConfirmationTest(unittest.TestCase):
         self.assertIn("connect_authorize').disabled = !d.user_code", html)
         self.assertIn("addEventListener('click'", html)
 
+    def test_connect_page_html_escapes_enrollment_id_attribute(self) -> None:
+        html = portal.portal_enrollment_connect(
+            'bad" autofocus="true"><script>alert(1)</script>'
+        )["__html__"]
+        self.assertIn(
+            'data-enrollment-id="bad&quot; autofocus=&quot;true&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"',
+            html,
+        )
+        self.assertIn(
+            "const enrollmentId = document.getElementById('connect_state').dataset.enrollmentId;",
+            html,
+        )
+        self.assertNotIn('<script>alert(1)</script>', html)
+
     def test_connect_page_has_https_recovery_guidance(self) -> None:
         html = portal.portal_enrollment_connect("enroll-safe")["__html__"]
         self.assertIn("可从互联网访问的 HTTPS 地址", html)
