@@ -406,5 +406,67 @@ class Migration030BuyerSubscriptionsTest(unittest.TestCase):
             conn.close()
 
 
+class Migration038RuntimeBindingRequestsTest(unittest.TestCase):
+    """v38 待确认接入请求表（D1）：迁移链建表 + 幂等 + status CHECK + 不动既有 CHECK。"""
+
+    def test_table_created_with_indexes_and_idempotent(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import migration_038_runtime_binding_requests
+
+            migration_038_runtime_binding_requests(conn)
+            conn.commit()
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(runtime_binding_requests)").fetchall()
+            }
+            for expected in (
+                "binding_request_id",
+                "catalog_agent_id",
+                "merchant_id",
+                "runtime_origin",
+                "a2a_endpoint",
+                "key_id",
+                "key_thumbprint",
+                "key_jwk_json",
+                "generation",
+                "service_epoch",
+                "nonce",
+                "status",
+                "requested_at",
+                "expires_at",
+                "decided_at",
+                "decided_note",
+            ):
+                self.assertIn(expected, columns)
+            indexes = {
+                str(row[1])
+                for row in conn.execute("pragma index_list(runtime_binding_requests)").fetchall()
+            }
+            self.assertIn("idx_runtime_binding_requests_agent_status", indexes)
+            self.assertIn("idx_runtime_binding_requests_expires", indexes)
+            # status CHECK 兜底：非法值被拒绝
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into runtime_binding_requests("
+                    " binding_request_id, catalog_agent_id, merchant_id, runtime_origin,"
+                    " a2a_endpoint, key_id, key_thumbprint, key_jwk_json, generation,"
+                    " service_epoch, nonce, status, requested_at, expires_at)"
+                    " values ('breq_x', 'cagt_1', 'mkt_1', 'https://r.example',"
+                    " 'https://r.example/a2a', 'k1', 't1', '{}', 1, 1, 'n1', 'bogus', ?, ?)",
+                    (_TS, _TS),
+                )
+            conn.rollback()
+            # 附加式承诺：runtime_bindings 的 CHECK 原样（一次只有一个 active 的不变量不动）
+            sql = conn.execute(
+                "select sql from sqlite_master where type = 'table' and name = 'runtime_bindings'"
+            ).fetchone()[0]
+            self.assertIn("check(status in ('active','paused','revoked'))", sql)
+            # 幂等：再跑一次不报错（create table/index if not exists）
+            migration_038_runtime_binding_requests(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

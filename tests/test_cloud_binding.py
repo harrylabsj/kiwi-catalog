@@ -15,9 +15,11 @@
 """M3 Runtime 绑定与绑定声明（SIG-02 的 Catalog 侧 + 治理联动）。
 
 覆盖：
-  - 首次绑定：缺管理员闸门 → 403；持钥证明错误 → 403；齐备 → 创建成功（version 1）；
+  - 首次绑定（D1）：无 admin → 落待确认请求（公开读仍 404）；持钥证明错误 → 403；
+    admin + 持钥证明（运维兜底）→ 创建成功（version 1）；
   - `GET /runtime-binding`：返回 Catalog 签发的声明（用发行者公钥**真实验签**）、
-    绑定 TTL ≤ 15 分钟、scope/agent/key_thumbprint 一致；
+    绑定 TTL ≤ 15 分钟、scope/agent/key_thumbprint 一致；**已确认未发布** → 照常签发，
+    governance.publication_state = UNPUBLISHED（首绑确认后运行时靠它拿 binding_id）；
   - 轮换：用**旧绑定私钥**签名 → version 2，旧绑定立即 revoked；用旧私钥再签 → 403；
   - 撤回名片后**拒绝签发**（治理联动）；
   - 撤销绑定后拒绝签发；
@@ -292,9 +294,16 @@ class CloudBindingTest(unittest.TestCase):
 
     # ── 绑定创建 ──────────────────────────────────────────────
     def test_first_binding_requires_admin_gate_and_possession(self) -> None:
-        # 缺管理员闸门 → 403
+        # D1（2026-09-26）：首次绑定不再要求 admin token——无 admin 时落
+        # 「待确认接入请求」（pending_confirmation），不签发 active 绑定，
+        # 公开读 /runtime-binding 仍 404（Catalog 不提前背书）。
         status, payload = self._create_binding(admin=False)
-        self.assertEqual(status, 403, payload)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending_confirmation")
+        self.assertTrue(payload["binding_request_id"].startswith("breq_"), payload)
+        self.assertNotIn("binding_id", payload)
+        status, _ = self._read_claims()
+        self.assertEqual(status, 404, "未确认期间公开读不得出现绑定声明")
 
         # 冒名公钥（签名私钥与提交的 JWK 不匹配）→ 403
         other = Ed25519PrivateKey.generate()
@@ -309,7 +318,7 @@ class CloudBindingTest(unittest.TestCase):
         )
         self.assertEqual(status, 403, payload)
 
-        # 齐备 → 200，version 1
+        # admin + 持钥证明（运维兜底，旧语义）→ 200，version 1
         status, payload = self._create_binding()
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["binding_version"], 1)
@@ -499,9 +508,15 @@ class CloudBindingTest(unittest.TestCase):
         # 无绑定时读取 → 404
         self.assertEqual(self._read_claims()[0], 404)
         self.assertEqual(self._create_binding()[0], 200)
-        # 有绑定但无活动名片 → 拒绝签发（403）
+        # 有绑定但**从未发布**名片 → 照常签发（D1 首绑确认后即可读，否则运行时
+        # 拿不到 binding_id 无法签名首发——死锁）；治理态给诚实值 UNPUBLISHED，
+        # 无版本号/etag。SIG-02 拒签语义只覆盖 WITHDRAWN（见下条测试）。
         status, payload = self._read_claims()
-        self.assertEqual(status, 403, payload)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["claims"]["binding_id"], self.binding_id)
+        self.assertEqual(payload["governance"]["publication_state"], "UNPUBLISHED")
+        self.assertIsNone(payload["card_revision"])
+        self.assertIsNone(payload["card_etag"])
 
     def test_withdrawn_publication_refuses_claims(self) -> None:
         self.assertEqual(self._create_binding()[0], 200)

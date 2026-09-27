@@ -195,6 +195,20 @@ from kiwi_catalog.services.verification_stages import (
 )
 
 
+def _has_active_binding(conn: sqlite3.Connection, catalog_agent_id: str, now_ts: str) -> bool:
+    """D5 判定：该 agent 是否有**未过期**的活动运行时绑定（云商家）。"""
+    row = conn.execute(
+        "select expires_at from runtime_bindings"
+        " where catalog_agent_id = ? and status = 'active'"
+        " order by binding_version desc limit 1",
+        (catalog_agent_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    expires_at = str(row["expires_at"] or "")
+    return not expires_at or expires_at > now_ts
+
+
 class VerificationService:
     """Runs the §6 verification ladder against a single catalog agent.
 
@@ -283,6 +297,13 @@ class VerificationService:
                     "catalog_agent_stale",
                     {"reason": "profile freshness window expired", "actor_reason": reason},
                 )
+        # D5：有活动绑定的云商家跳过域所有权阶梯（不抓卡、不做同源判定）——
+        # 信任证据 = 绑定声明（确认时写入的 passed 证据行支撑级别）。
+        skipped = self._skip_ladder_for_cloud_binding(
+            agent, catalog_agent_id, previous, actor, reason
+        )
+        if skipped is not None:
+            return skipped
         stages: list[StageResult] = []
         try:
             profiles = self._load_profiles(catalog_agent_id)
@@ -376,6 +397,13 @@ class VerificationService:
             return VerificationResult(catalog_agent_id, current, current, ())
         target_state = self._admin_machine.transition(admin, SUSPENDED)
         self._apply_admin(agent, target_state)
+        # Governance changes invalidate every unconsumed enrollment. A worker
+        # retry cannot resurrect a suspended/rejected agent after reinstatement.
+        self._conn.execute(
+            "update enrollments set status='canceled', authorization_epoch=authorization_epoch+1 "
+            "where catalog_agent_id=? and status in ('ready_for_authorization','authorized','bound','published')",
+            (catalog_agent_id,),
+        )
         target = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
         self._write_audit(
             catalog_agent_id,
@@ -455,6 +483,12 @@ class VerificationService:
     def verify_profile(self, catalog_agent_id: str, *, actor: str = "verification_worker") -> VerificationResult:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         previous = agent["verification_status"]
+        # D5：有活动绑定的云商家跳过阶梯（不抓卡、不降级，停在 commerce_verified）
+        skipped = self._skip_ladder_for_cloud_binding(
+            agent, catalog_agent_id, previous, actor, "granular"
+        )
+        if skipped is not None:
+            return skipped
         current = agent["verification_level"]
         self._level_machine.transition(current, PROFILE_VALID)  # raises on illegal jump
         try:
@@ -508,6 +542,39 @@ class VerificationService:
         stage = self._stage_commerce(catalog_agent_id, current, actor, profiles)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
         return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
+
+    # ── D5：云商家阶梯短路 ─────────────────────────────────────────────────
+
+    def _skip_ladder_for_cloud_binding(
+        self,
+        agent: dict[str, Any],
+        catalog_agent_id: str,
+        previous: str,
+        actor: str,
+        reason: str,
+    ) -> VerificationResult | None:
+        """D5：有活动绑定的云商家跳过域所有权阶梯（不抓卡、不做同源判定）。
+
+        域所有权语义在云路径下不适用（卡片托管在 catalog 域、canonical_domain
+        是运行时域），硬跑阶梯必然 REJECTED 并触发证据重算降级——把商家从
+        commerce_verified 打回 DISCOVERED；而且那条路径会让 catalog 去抓
+        **自己**的公开读地址，无谓消耗匿名读预算。信任证据 = 绑定声明：
+        绑定确认时写入的两条 passed 证据行（agent_identity /
+        commerce_capability）支撑级别，任何一次重算都停在 commerce_verified，
+        reducer 无特例。返回 None 表示无活动绑定（走正常阶梯）。
+        """
+        if not _has_active_binding(self._conn, catalog_agent_id, self._now_iso()):
+            return None
+        self._apply_freshness(agent, FRESH)
+        self._apply_level(agent, COMMERCE_VERIFIED, last_verified_at=self._now_iso())
+        self._write_audit(
+            catalog_agent_id,
+            actor,
+            "catalog_agent_verification_skipped",
+            {"reason": "skipped: cloud binding", "actor_reason": reason},
+        )
+        status = require_catalog_agent(self._conn, catalog_agent_id)["verification_status"]
+        return VerificationResult(catalog_agent_id, previous, status, ())
 
     # ── Profile stage ──────────────────────────────────────────────────────
 

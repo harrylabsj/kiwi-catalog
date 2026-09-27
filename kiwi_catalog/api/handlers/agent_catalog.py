@@ -28,6 +28,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.a2a.request_signature import verify_runtime_request
 from kiwi_catalog.agent_catalog.freshness import agent_fresh_ttl_seconds
 from kiwi_catalog.agent_catalog.serializers import (
     catalog_agent_record,
@@ -628,16 +629,33 @@ def heartbeat_catalog_agent(
 
     与 refresh 的区别：心跳**不重新抓取 profile、不消耗验证队列**，只刷新
     last_seen_at（并在治理状态为 active 时把新鲜度复活为 fresh）。读侧据此
-    按 TTL 判定"可实时询价"（见 agent_catalog/freshness.py）。鉴权同其他
-    写端点：owner merchant / admin / verification worker。
+    按 TTL 判定"可实时询价"（见 agent_catalog/freshness.py）。
+
+    鉴权（D6）：三种凭据任一有效——**活动绑定的私钥签名**（云运行时心跳，
+    `x-kiwi-binding-jws`，与名片发布/绑定同一套 verify_runtime_request，
+    签名必须覆盖 agent_id；呈现签名就必须验过，错签名 403 不静默落到其他
+    分支）/ owner merchant token / admin / verification worker（旧路径不变，
+    direct 模式与过渡期商家在用）。
 
     心跳是高频幂等信号，**不写审计**（否则审计表会被心跳淹没）；下线/异常
-    由读侧 TTL 判定，不需要额外事件。
+    由读侧 TTL 判定，不需要额外事件。签名分支同样不写审计（保持一致）。
     """
     catalog_agent_id = str(catalog_agent_id).strip()
     with db_session(db_path) as conn:
         agent = require_catalog_agent(conn, catalog_agent_id)
-        actor = _require_catalog_write_auth(conn, agent, payload)
+        jws = str(payload.get("_binding_jws") or "").strip()
+        if jws:
+            # D6 签名分支：验签 + 绑定 active 未过期 + nonce 防重放全部由
+            # verify_runtime_request 承担（失败抛 PermissionDenied → 403）。
+            verified = verify_runtime_request(
+                conn,
+                catalog_agent_id=catalog_agent_id,
+                jws=jws,
+                expected_fields={"agent_id": catalog_agent_id},
+            )
+            actor = f"runtime:{verified.get('binding_id', '')}"
+        else:
+            actor = _require_catalog_write_auth(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, api_idempotency.catalog_write_actor_key(payload), _catalog_write_rate_limit_per_minute()
         )

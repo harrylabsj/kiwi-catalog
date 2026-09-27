@@ -28,9 +28,12 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api.handlers.common import require_field
+from kiwi_catalog.api.handlers.hosted_publication import hosted_base_url
 from kiwi_catalog.core.errors import AuthError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
+from kiwi_catalog.services import account_agents as account_agents_service
 from kiwi_catalog.services import accounts as accounts_service
+from kiwi_catalog.services import binding_requests as binding_requests_service
 from kiwi_catalog.services.rate_limit import (
     SQLiteRateLimitBackend,
     enforce_rate_limit,
@@ -363,8 +366,8 @@ def token_request(
 ) -> dict[str, Any]:
     """POST /v1/accounts/token-request（会话）——"我的"里申请 token。
 
-    已有 active → 返回现状；已有 pending → 提示等待；否则用本次填写的
-    商家基本信息（domain/agent_name）建工单。
+    已有 active → 返回现状；已有 pending → 提示等待；否则建 pending 工单。
+    domain/purpose 均选填（D7：门户已零输入，仅 CLI 与老调用方可能带）。
     """
     _ctx, conn, account = _require_session(db_path, payload)
     try:
@@ -425,3 +428,227 @@ def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, **view}
     finally:
         _ctx.__exit__(None, None, None)
+
+
+# ── 接入记录 / 名片只读（D3；设计 §4.3①/§5.2，门户不产出内容）──────────────
+
+
+def create_agent(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/accounts/agents（会话）——创建（或取回）我的接入记录。
+
+    幂等 upsert：已有记录原地返回（一商家一 agent）；否则新建
+    self_registered/direct、canonical_domain 留空。限流按账号（与
+    token-request 同一 env 值，0 = 禁用）。
+    """
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"agent-create:{str(account.get('id') or account.get('email') or 'unknown')}",
+                limit=limit,
+                window_seconds=900,
+                description=f"agent create ({limit}/15min per account)",
+            )
+        return account_agents_service.ensure_my_catalog_agent(
+            conn, account, base_url=hosted_base_url()
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def list_agents(
+    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/accounts/agents（会话）——我的接入记录列表（含名片状态/绑定摘要/稳定读地址）。"""
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        return account_agents_service.list_my_catalog_agents(
+            conn, account, base_url=hosted_base_url()
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def get_agent_card(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/accounts/agents/{cagt}/card（会话）——名片详情。
+
+    归属检查：会话 merchant_id 必须等于 agent 的 merchant_id，不一致一律
+    404（与不存在不可区分）。
+    """
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        return account_agents_service.get_my_agent_card(
+            conn, account, catalog_agent_id, base_url=hosted_base_url()
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def set_agent_card_state(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    payload: dict[str, Any],
+    query: dict[str, Any],
+    action: str,
+) -> dict[str, Any]:
+    """POST /v1/accounts/agents/{cagt}/card/{pause|resume|withdraw}（会话）——门户名片治理（P1）。
+
+    与运行时签名面（cloud_card）同一状态转移核心；CAS：body 带
+    `expected_revision`，不匹配 → 409；非本商家 → 404；限流按账号（与
+    token-request 同一 env 值，0 = 禁用）。防重放：会话通道与既有账号写端点
+    同一约定（SameSite=Lax cookie + 按账号限流），不引入新机制。
+    """
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"card-govern:{str(account.get('id') or account.get('email') or 'unknown')}",
+                limit=limit,
+                window_seconds=900,
+                description=f"card governance ({limit}/15min per account)",
+            )
+        return account_agents_service.set_my_card_state(
+            conn,
+            account,
+            catalog_agent_id,
+            action=action,
+            expected_revision=payload.get("expected_revision"),
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+# ── 绑定请求确认/拒绝（D1；设计 §4.3③，首次绑定两步闭环的门户侧）──────────
+
+
+def list_pending_bindings(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any], query: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/accounts/agents/{cagt}/bindings/pending（会话）——待确认接入请求列表。"""
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        return binding_requests_service.list_pending_requests(conn, account, catalog_agent_id)
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def decide_binding(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    binding_request_id: str,
+    payload: dict[str, Any],
+    query: dict[str, Any],
+    action: str,
+) -> dict[str, Any]:
+    """POST /v1/accounts/agents/{cagt}/bindings/{id}/confirm | /reject（会话）。
+
+    confirm：同一事务写 active 绑定 + 消费请求 + 同行其他未决失效 + D2 回填
+    canonical_domain；reject：带理由（body.note，必填）标记 rejected 留痕。
+    已决请求重复决策 → 409；非本商家 → 404；按账号限流（同 token-request
+    的 env 值，0 = 禁用）。
+    """
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"binding-decide:{str(account.get('id') or account.get('email') or 'unknown')}",
+                limit=limit,
+                window_seconds=900,
+                description=f"binding decision ({limit}/15min per account)",
+            )
+        if action == "confirm":
+            return binding_requests_service.confirm_request(
+                conn, account, catalog_agent_id, binding_request_id
+            )
+        return binding_requests_service.reject_request(
+            conn,
+            account,
+            catalog_agent_id,
+            binding_request_id,
+            note=str(payload.get("note") or ""),
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
+def enrollment_detail(db_path: str | Path, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from kiwi_catalog.services import enrollments as service
+    ctx, conn, account = _require_session(db_path, payload)
+    try:
+        backend = SQLiteRateLimitBackend(conn, table="merchant_application_limits", key_column="actor_key")
+        enforce_rate_limit(backend, key=f"enrollment-view:{account.get('account_id')}", limit=30,
+                           window_seconds=900, description="enrollment preview lookup")
+        result = service.public_enrollment(conn, enrollment_id)
+        row = conn.execute("select merchant_id from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        if row and row["merchant_id"] and row["merchant_id"] != account["merchant_id"]:
+            from kiwi_catalog.core.errors import NotFoundError
+            raise NotFoundError("enrollment not found")
+        result["merchant_name"] = account.get("merchant_name", "")
+        return result
+    finally:
+        ctx.__exit__(None, None, None)
+
+
+def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from kiwi_catalog.services import enrollments as service
+    from kiwi_catalog.api.handlers.hosted_publication import hosted_base_url
+    from kiwi_catalog.services.account_agents import ensure_my_catalog_agent
+    from kiwi_catalog.core.errors import PermissionDenied, NotFoundError
+    from urllib.parse import urlsplit
+    origin = str(payload.get("_origin") or "")
+    referer = str(payload.get("_referer") or "")
+    allowed = hosted_base_url().rstrip("/")
+    trusted = urlsplit(allowed)
+    try:
+        source = urlsplit(origin) if origin else urlsplit(referer)
+    except ValueError:
+        source = urlsplit("")
+    if (not (origin or referer) or source.scheme not in ("http", "https") or not source.netloc
+            or source.username or source.password or source.scheme != trusted.scheme or source.netloc.lower() != trusted.netloc.lower()):
+        raise PermissionDenied("same-origin request required")
+    if origin and (source.path or source.query or source.fragment):
+        raise PermissionDenied("Origin header must contain an origin only")
+    ctx, conn, account = _require_session(db_path, payload)
+    try:
+        backend = SQLiteRateLimitBackend(conn, table="merchant_application_limits", key_column="actor_key")
+        enforce_rate_limit(backend, key=f"enrollment-authorize:{account.get('account_id')}", limit=10,
+                           window_seconds=900, description="enrollment authorization")
+        row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("enrollment not found")
+        if (row["status"] not in ("ready_for_authorization", "authorized")
+                or (row["status"] == "ready_for_authorization" and row["expires_at"] <= now_iso())
+                or (row["status"] == "authorized" and row["grant_expires_at"] <= now_iso())
+                or str(row["user_code"]).upper() != str(payload.get("user_code", "")).strip().upper()
+                or (row["merchant_id"] and row["merchant_id"] != account["merchant_id"])):
+            from kiwi_catalog.core.errors import ConflictError
+            raise ConflictError("enrollment is not available for authorization")
+        agent = ensure_my_catalog_agent(conn, account, base_url=allowed)
+        grant = __import__("secrets").token_urlsafe(32)
+        result = service.authorize(conn, row, account, str(payload.get("user_code", "")),
+                                   str(agent["catalog_agent_id"]), grant)
+    except BaseException as exc:
+        ctx.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        ctx.__exit__(None, None, None)
+        return result

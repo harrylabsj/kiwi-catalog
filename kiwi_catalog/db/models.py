@@ -739,7 +739,40 @@ create table if not exists admin_credentials (
         rotated_by text not null default '',
         rotation_count integer not null default 1
     )
+    """,
+    # v38 — 首次绑定两步闭环（D1，设计 §4.3③）：待确认接入请求。DDL 与迁移链
+    # migration_038 逐字一致（test_shadow_tables 守护）。附加式新表，不动
+    # runtime_bindings 的 CHECK；未决请求带 TTL 与每 agent 未决上限，终态
+    # （confirmed/rejected/expired）留痕。
     """
+create table if not exists runtime_binding_requests (
+        binding_request_id text primary key,
+        catalog_agent_id text not null,
+        merchant_id text not null,
+        runtime_origin text not null,
+        a2a_endpoint text not null,
+        key_id text not null,
+        key_thumbprint text not null,
+        key_jwk_json text not null,
+        generation integer not null,
+        service_epoch integer not null,
+        nonce text not null,
+        status text not null
+            check(status in ('pending','confirmed','rejected','expired')),
+        requested_at text not null,
+        expires_at text not null,
+        decided_at text not null default '',
+        decided_note text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_runtime_binding_requests_agent_status
+        on runtime_binding_requests(catalog_agent_id, status)
+    """,
+    """
+create index if not exists idx_runtime_binding_requests_expires
+        on runtime_binding_requests(expires_at)
+    """,
 ]
 
 

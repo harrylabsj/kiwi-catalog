@@ -40,6 +40,7 @@ from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
+from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
 
 
@@ -56,6 +57,7 @@ class RouteEntry:
 
 _ROUTE_TABLE: tuple[RouteEntry, ...] = (
 RouteEntry({"GET"}, "/health", lambda db_path, payload, query, **kw: _health(db_path)),
+RouteEntry({"GET"}, "/v1/issuer-keys", lambda db_path, payload, query, **kw: enrollment_handlers.issuer_keys()),
 RouteEntry(
         {"GET"},
         "/v1/agent-catalog/agents",
@@ -387,6 +389,73 @@ RouteEntry(
         "/v1/accounts/profile",
         lambda db_path, payload, query, **kw: _v1_account_profile(db_path, payload),
     ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents",
+        lambda db_path, payload, query, **kw: _v1_account_create_agent(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/accounts/agents",
+        lambda db_path, payload, query, **kw: _v1_account_list_agents(db_path, payload, query),
+    ),
+RouteEntry({"GET"}, "/v1/accounts/enrollments/{enrollment_id}",
+          lambda db_path, payload, query, enrollment_id: accounts_handlers.enrollment_detail(db_path, enrollment_id, payload)),
+RouteEntry({"POST"}, "/v1/accounts/enrollments/{enrollment_id}/authorize",
+          lambda db_path, payload, query, enrollment_id: accounts_handlers.authorize_enrollment(db_path, enrollment_id, payload)),
+RouteEntry({"POST"}, "/v1/enrollments/device",
+          lambda db_path, payload, query, **kw: enrollment_handlers.create_device(db_path, payload)),
+RouteEntry({"POST"}, "/v1/enrollments/device/token",
+          lambda db_path, payload, query, **kw: enrollment_handlers.device_token(db_path, payload)),
+RouteEntry(
+        {"GET"},
+        "/v1/accounts/agents/{catalog_agent_id}/card",
+        lambda db_path, payload, query, catalog_agent_id: _v1_account_get_agent_card(
+            db_path, catalog_agent_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/card/pause",
+        lambda db_path, payload, query, catalog_agent_id: _v1_account_set_agent_card_state(
+            db_path, catalog_agent_id, payload, query, "pause"
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/card/resume",
+        lambda db_path, payload, query, catalog_agent_id: _v1_account_set_agent_card_state(
+            db_path, catalog_agent_id, payload, query, "resume"
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/card/withdraw",
+        lambda db_path, payload, query, catalog_agent_id: _v1_account_set_agent_card_state(
+            db_path, catalog_agent_id, payload, query, "withdraw"
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/accounts/agents/{catalog_agent_id}/bindings/pending",
+        lambda db_path, payload, query, catalog_agent_id: _v1_account_list_pending_bindings(
+            db_path, catalog_agent_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/confirm",
+        lambda db_path, payload, query, catalog_agent_id, binding_request_id: (
+            _v1_account_decide_binding(db_path, catalog_agent_id, binding_request_id, payload, query, "confirm")
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/reject",
+        lambda db_path, payload, query, catalog_agent_id, binding_request_id: (
+            _v1_account_decide_binding(db_path, catalog_agent_id, binding_request_id, payload, query, "reject")
+        ),
+    ),
     # ── /v1/merchant-publications（M0 商家公开资料，docs/accounts.md §publications）
     # 顺序约束：/search 与 /stats 静态段必须先于 /{publication_id} 参数段
     #（_match_path 顺序匹配；与 /v1/listings/search 先例一致）。
@@ -574,6 +643,8 @@ RouteEntry(
         "/portal/connect",
         lambda db_path, payload, query, **kw: _portal_connect(),
     ),
+RouteEntry({"GET"}, "/portal/connect/{enrollment_id}",
+          lambda db_path, payload, query, enrollment_id: portal_handlers.portal_enrollment_connect(enrollment_id)),
 RouteEntry(
         {"GET"},
         "/portal/reset-password",
@@ -588,6 +659,11 @@ RouteEntry(
         {"GET"},
         "/portal/account/profile",
         lambda db_path, payload, query, **kw: _portal_account_profile(),
+    ),
+RouteEntry(
+        {"GET"},
+        "/portal/account/card",
+        lambda db_path, payload, query, **kw: _portal_account_card(),
     ),
 RouteEntry(
         {"GET"},
@@ -829,6 +905,42 @@ def _v1_account_profile(db_path, payload):
     return accounts_handlers.profile(db_path, payload)
 
 
+def _v1_account_create_agent(db_path, payload, query):
+    return accounts_handlers.create_agent(db_path, payload, query or {})
+
+
+def _v1_account_list_agents(db_path, payload, query):
+    return accounts_handlers.list_agents(db_path, payload, query or {})
+
+
+def _v1_account_get_agent_card(db_path, catalog_agent_id, payload, query):
+    return accounts_handlers.get_agent_card(db_path, catalog_agent_id, payload, query or {})
+
+
+def _v1_account_set_agent_card_state(db_path, catalog_agent_id, payload, query, action):
+    return accounts_handlers.set_agent_card_state(
+        db_path, catalog_agent_id, payload, query or {}, action
+    )
+
+
+def _v1_account_list_pending_bindings(db_path, catalog_agent_id, payload, query):
+    return accounts_handlers.list_pending_bindings(db_path, catalog_agent_id, payload, query or {})
+
+
+def _v1_account_decide_binding(db_path, catalog_agent_id, binding_request_id, payload, query, action):
+    return accounts_handlers.decide_binding(
+        db_path, catalog_agent_id, binding_request_id, payload, query or {}, action
+    )
+
+
+def _v1_create_device_enrollment(db_path, payload):
+    return enrollment_handlers.create_device(db_path, payload)
+
+
+def _v1_device_enrollment_token(db_path, payload):
+    return enrollment_handlers.device_token(db_path, payload)
+
+
 # ── /v1/merchant-publications wrapper（M0 商家公开资料）──────────────────
 
 
@@ -992,6 +1104,10 @@ def _portal_account():
 
 def _portal_account_profile():
     return portal_handlers.portal_account_profile()
+
+
+def _portal_account_card():
+    return portal_handlers.portal_account_card()
 
 
 def _portal_publications():

@@ -23,14 +23,17 @@ complete → clear，参照 agent_catalog.py register_catalog_agent）；owner t
 from __future__ import annotations
 
 import sqlite3
+import base64
+import json
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
 from kiwi_catalog.api.handlers.common import result_limit
-from kiwi_catalog.core.errors import AuthError, ValidationError
+from kiwi_catalog.core.errors import AuthError, PermissionDenied, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.listings import sqlite_repository as repo
 from kiwi_catalog.listings.contracts import validate_publish_payload
@@ -49,6 +52,158 @@ from kiwi_catalog.services import buyer_search_events, buyer_stats, usage_metric
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
 REINSTATE_ENDPOINT = "/v1/listings/{id}/reinstate"
+_LISTINGS_APPROVAL_REQUIRED = (
+    "LISTINGS_APPROVAL_REQUIRED: an active approved owner token and a published binding are required"
+)
+
+
+def _runtime_listing_actor_key(agent_id: str, binding_id: str) -> str:
+    """Stable per-agent/per-binding idempotency and rate-limit bucket."""
+    from kiwi_catalog.core.tokens import token_digest
+
+    return "runtime-listing:" + token_digest(f"{agent_id}:{binding_id}")
+
+
+def _untrusted_jws_claims(jws: str) -> dict[str, Any]:
+    """Decode bounded JWS claims for pre-verification expiry rejection only."""
+    if not isinstance(jws, str) or len(jws) > 16_384 or jws.count(".") != 2:
+        raise PermissionDenied("invalid runtime listing signature")
+    try:
+        segment = jws.split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise PermissionDenied("invalid runtime listing signature") from exc
+    if not isinstance(payload, dict):
+        raise PermissionDenied("invalid runtime listing signature")
+    return payload
+
+
+def _validate_runtime_listing_exp(claims: dict[str, Any]) -> None:
+    try:
+        expires = datetime.fromisoformat(str(claims.get("exp", "")))
+    except ValueError as exc:
+        raise PermissionDenied("runtime listing signature has invalid exp") from exc
+    now = datetime.now(UTC)
+    if expires.tzinfo is None or expires <= now or expires > now + timedelta(minutes=2):
+        raise PermissionDenied("runtime listing signature expired or has excessive lifetime")
+
+
+def _verify_runtime_listing_signature(
+    conn: sqlite3.Connection,
+    *,
+    signature: str,
+    agent_id: str,
+    merchant_id: str,
+    signed_fields: dict[str, Any],
+) -> tuple[str, str, str]:
+    from kiwi_catalog.a2a.request_signature import verify_runtime_request
+
+    claims = _untrusted_jws_claims(signature)
+    _validate_runtime_listing_exp(claims)
+    agent = conn.execute(
+        "select merchant_id, administrative_state from catalog_agents where catalog_agent_id=?",
+        (agent_id,),
+    ).fetchone()
+    active = conn.execute(
+        "select * from runtime_bindings where catalog_agent_id=? and status='active' "
+        "order by binding_version desc limit 1",
+        (agent_id,),
+    ).fetchone()
+    if (agent is None or active is None or str(agent["merchant_id"] or "") != merchant_id
+            or str(active["merchant_id"] or "") != merchant_id
+            or str(agent["administrative_state"] or "active") != "active"):
+        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+    binding_id = str(active["binding_id"])
+    key_id = str(active["key_id"])
+    expected = {
+        "method": "POST",
+        "audience": "kiwi-catalog",
+        "agent_id": agent_id,
+        "merchant_id": merchant_id,
+        "binding_id": binding_id,
+        "key_id": key_id,
+        **signed_fields,
+    }
+    verify_runtime_request(
+        conn,
+        catalog_agent_id=agent_id,
+        jws=signature,
+        expected_fields=expected,
+    )
+
+    return f"runtime:{agent_id}:{binding_id}", _runtime_listing_actor_key(agent_id, binding_id), binding_id
+
+
+def _require_current_listing_entitlement(
+    conn: sqlite3.Connection, agent_id: str, merchant_id: str, binding_id: str
+) -> None:
+    """Derive listings:publish from the current enrollment and current admin grant."""
+    enrollment = conn.execute(
+        "select enrollment_id from enrollments where catalog_agent_id=? and merchant_id=? "
+        "and binding_id=? and status='published' order by authorized_at desc limit 1",
+        (agent_id, merchant_id, binding_id),
+    ).fetchone()
+    if enrollment is None:
+        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+
+    # Do not let a revoked token or a newer pending/rejected application inherit
+    # the old enrollment's grant. For account-backed merchants, application_id is
+    # the current admin-reviewed request; legacy merchants use their latest linked
+    # approved application.
+    token = conn.execute(
+        "select status from merchant_tokens where merchant_id=?", (merchant_id,)
+    ).fetchone()
+    if token is None or str(token["status"]) != "active":
+        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+    account = conn.execute(
+        "select application_id from merchant_accounts where merchant_id=? order by account_id limit 1",
+        (merchant_id,),
+    ).fetchone()
+    if account is not None and int(account["application_id"] or 0) > 0:
+        approval = conn.execute(
+            "select status, merchant_id from merchant_applications where application_id=?",
+            (int(account["application_id"]),),
+        ).fetchone()
+    else:
+        approval = conn.execute(
+            "select status, merchant_id from merchant_applications where merchant_id=? "
+            "order by application_id desc limit 1",
+            (merchant_id,),
+        ).fetchone()
+    if (approval is None or str(approval["status"]) != "approved"
+            or str(approval["merchant_id"] or "") != merchant_id):
+        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+    # `listings:publish`, self-read, and withdraw are derived per request from the current admin-approved,
+    # active owner token. It is deliberately not a persistent/general enrollment
+    # scope; revocation or a newer unapproved application removes it immediately.
+
+
+def _require_runtime_listing_grant(
+    conn: sqlite3.Connection,
+    payload: dict[str, Any],
+    canonical: dict[str, Any],
+    idempotency_key: str,
+) -> tuple[str, str, str]:
+    """Verify a signed listing publish and its live narrow entitlement."""
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    agent_id = str(canonical["owner_agent_id"])
+    merchant_id = str(canonical["merchant_id"])
+    if not idempotency_key:
+        raise ValidationError("Idempotency-Key is required for binding-signed listing publish")
+    actor, actor_key, binding_id = _verify_runtime_listing_signature(
+        conn,
+        signature=str(payload.get("_binding_jws") or "").strip(),
+        agent_id=agent_id,
+        merchant_id=merchant_id,
+        signed_fields={
+            "path": PUBLISH_ENDPOINT,
+            "listing_digest": canonical_digest(canonical),
+            "idempotency_key": idempotency_key,
+        },
+    )
+    _require_current_listing_entitlement(conn, agent_id, merchant_id, binding_id)
+    return actor, actor_key, binding_id
 
 
 def _write_rate_limit_per_minute() -> int:
@@ -223,15 +378,36 @@ def v1_list_agent_listings(
     # query 派生 auth 只认 owner_token（自查兼容）；admin 凭据不得出现在
     # query 派生的 auth 中——admin 只从 transport 的 _auth_token 读取。
     auth_payload = dict(auth_payload or {})
+    binding_signature = str(auth_payload.get("_binding_jws") or "").strip()
     q_owner_token = str(query.get("owner_token") or "").strip()
-    if q_owner_token:
+    if binding_signature and q_owner_token:
+        raise PermissionDenied("binding-signed self-list must not include owner_token in query")
+    if q_owner_token and not binding_signature:
         auth_payload["owner_token"] = q_owner_token
     with db_session(db_path) as conn:
         merchant_id = owner_agent_merchant_id(conn, owner_agent_id)
-        if merchant_id:
-            # 审查 P2：admin 豁免此前未生效——直接 require_owner_token 会用
-            # admin token 比对 HMAC 派生值恒 403，与 docstring「授权与
-            # withdraw/reinstate 一致（admin 豁免）」相悖；复用同一 helper。
+        if binding_signature:
+            from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+            signed_query = {
+                "limit": limit,
+                "cursor": str(query.get("cursor") or "").strip(),
+                "freshness_state": freshness_state or "",
+            }
+            _actor, actor_key, binding_id = _verify_runtime_listing_signature(
+                conn,
+                signature=binding_signature,
+                agent_id=owner_agent_id,
+                merchant_id=merchant_id,
+                signed_fields={
+                    "method": "GET",
+                    "path": f"/v1/agents/{owner_agent_id}/listings",
+                    "query_digest": canonical_digest(signed_query),
+                },
+            )
+            _require_current_listing_entitlement(conn, owner_agent_id, merchant_id, binding_id)
+        elif merchant_id:
+            # Direct publishers retain their historical owner/admin-token path.
             _require_owner_token_for_merchant(auth_payload, merchant_id, conn=conn)
         else:
             try:
@@ -269,18 +445,25 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     key（source_product_ref / publisher_listing_key）双轨（评审 P1-4/P2-8）。
     """
     canonical = validate_publish_payload(payload)
-    # 认证先行（fail-closed）：未认证 spam 不得消耗限流/幂等预算（历史教训：
-    # 先限流后鉴权让无 token 请求耗尽全体商户共享写预算）。actor_key 按
-    # owner_token 隔离——跨商户幂等键不再冲突（历史教训：匿名桶 409）。
-    actor = _require_owner_token_for_merchant(
-        payload, str(canonical.get("merchant_id") or ""), db_path=db_path
-    )
+    # Runtime proof is selected by header presence and can never fall back to a
+    # body owner token. Direct publishers retain the historical token path.
+    binding_signature = str(payload.get("_binding_jws") or "").strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = _listing_request_hash(canonical)
 
     response: dict[str, Any] = {}
     with db_session(db_path) as conn:
+        if binding_signature:
+            actor, actor_key, _binding_id = _require_runtime_listing_grant(
+                conn, payload, canonical, idempotency_key
+            )
+        else:
+            # Authentication remains before replay/rate budget consumption;
+            # the owner-token path and its actor partition are unchanged.
+            actor = _require_owner_token_for_merchant(
+                payload, str(canonical.get("merchant_id") or ""), conn=conn
+            )
+            actor_key = api_idempotency.catalog_write_actor_key(payload)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash
         )
@@ -334,8 +517,11 @@ def _publish_listing_inline(
 def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST /v1/listings/{id}/withdraw —— publisher 主动下架。"""
     listing_id = str(listing_id).strip()
-    # 认证先行（与 publish 一致）：行存在性 + owner token 校验都在限流/幂等
-    # 预算消耗之前，未认证/越权请求 fail-fast。
+    signature = str(payload.get("_binding_jws") or "").strip()
+    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
+    request_hash = _listing_request_hash({"listing_id": listing_id, "action": "withdraw"})
+
+    response: dict[str, Any] = {}
     with db_session(db_path) as conn:
         row = repo.get_listing(conn, listing_id)
         if row is None:
@@ -344,14 +530,35 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
             raise NotFoundError(f"Unknown listing: {listing_id}")
         merchant_id = str(row.get("merchant_id") or "")
         owner_agent_id = str(row.get("owner_agent_id") or "")
-    actor = _require_owner_token_for_merchant(payload, merchant_id, db_path=db_path)
+        if signature:
+            from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
 
-    idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
-    request_hash = _listing_request_hash({"listing_id": listing_id, "action": "withdraw"})
-
-    response: dict[str, Any] = {}
-    with db_session(db_path) as conn:
+            if not idempotency_key:
+                raise ValidationError("Idempotency-Key is required for binding-signed listing withdraw")
+            body_fields = {
+                key for key in payload
+                if key not in {"_binding_jws", "_auth_token", "_idempotency_key", "idempotency_key"}
+            }
+            if body_fields:
+                raise ValidationError("binding-signed listing withdraw body must be empty")
+            actor, actor_key, binding_id = _verify_runtime_listing_signature(
+                conn,
+                signature=signature,
+                agent_id=owner_agent_id,
+                merchant_id=merchant_id,
+                signed_fields={
+                    "method": "POST",
+                    "path": f"/v1/listings/{listing_id}/withdraw",
+                    "listing_id": listing_id,
+                    "body_digest": canonical_digest({}),
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            _require_current_listing_entitlement(conn, owner_agent_id, merchant_id, binding_id)
+        else:
+            # Existing direct owner/admin token policy remains unchanged.
+            actor = _require_owner_token_for_merchant(payload, merchant_id, conn=conn)
+            actor_key = api_idempotency.catalog_write_actor_key(payload)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, WITHDRAW_ENDPOINT, actor_key, idempotency_key, request_hash
         )

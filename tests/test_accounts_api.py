@@ -512,28 +512,24 @@ class AccountsApiTest(unittest.TestCase):
     def test_token_request_with_merchant_info(self) -> None:
         session, _ = self._register()
         cookie = f"kiwi_session={session}"
-        # 缺商家信息 → 400
-        status, payload, _ = _call_http(
-            self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
-        )
-        self.assertEqual(status, 400, payload)
-        # 带商家信息 → 建工单 pending
+        # 非法 domain → 400（非空仍走 canonical 校验）
         status, payload, _ = _call_http(
             self.app,
             "POST",
             "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
+            json.dumps({"domain": "https://x/y"}).encode(),
             cookie=cookie,
+        )
+        self.assertEqual(status, 400, payload)
+        # 空 body（D7：门户零输入）→ 建工单 pending
+        status, payload, _ = _call_http(
+            self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "pending")
         # 重复申请去重
         status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme Merchant", "agent_id": "merchant-001"}).encode(),
-            cookie=cookie,
+            self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "pending")
@@ -548,6 +544,65 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["status"], "active")
+
+    def test_token_request_without_domain_allowed(self) -> None:
+        """D7：domain 选填——空值申请建 pending 工单且 domain 存空。"""
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        status, payload, _ = _call_http(
+            self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "select domain from merchant_applications order by application_id desc limit 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(row["domain"], "")
+        # /me 回显工单，domain 为空
+        status, payload, _ = _call_http(self.app, "GET", "/v1/accounts/me", cookie=cookie)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["application"]["domain"], "")
+
+    def test_token_request_invalid_domain_rejected(self) -> None:
+        """非空 domain 仍走 canonical 校验：URL 形态 → 400，不落工单。"""
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "https://x/y"}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 400, payload)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            n = conn.execute("select count(*) from merchant_applications").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(n, 0)
+
+    def test_token_request_with_domain_still_accepted(self) -> None:
+        """老调用方带合法 domain 仍通过，且归一化落库（CLI/历史 API 兼容）。"""
+        session, _ = self._register()
+        cookie = f"kiwi_session={session}"
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/token-request",
+            json.dumps({"domain": "Acme.Example."}).encode(),
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "pending")
+        status, payload, _ = _call_http(self.app, "GET", "/v1/accounts/me", cookie=cookie)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["application"]["domain"], "acme.example")
 
     def test_me_roundtrips_agent_id_from_application(self) -> None:
         """「基本信息」页的 Agent ID 来自申请工单，/me 需回显（投影含 agent_id）。"""
@@ -817,8 +872,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("&lt;你的令牌&gt;", raw)
         self.assertIn('id="copy_env_line"', raw)
         self.assertNotIn("demo.html", raw)
-        self.assertIn("复制令牌", raw)  # 令牌态双按钮：复制令牌 + 申请令牌（静态模板）
-        self.assertIn("申请令牌", raw)
+        self.assertIn("复制令牌", raw)  # 令牌态双按钮：复制令牌 + 申请目录令牌（静态模板）
+        self.assertIn("申请目录令牌", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
         self.assertNotIn("/portal/status", raw)

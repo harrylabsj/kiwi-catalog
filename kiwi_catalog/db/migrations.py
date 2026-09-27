@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 37
+CURRENT_SCHEMA_VERSION = 39
 
 
 @dataclass(frozen=True)
@@ -1274,6 +1274,72 @@ def migration_037_admin_credentials(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_RUNTIME_BINDING_REQUESTS_DDL = [
+    """
+create table if not exists runtime_binding_requests (
+        binding_request_id text primary key,
+        catalog_agent_id text not null,
+        merchant_id text not null,
+        runtime_origin text not null,
+        a2a_endpoint text not null,
+        key_id text not null,
+        key_thumbprint text not null,
+        key_jwk_json text not null,
+        generation integer not null,
+        service_epoch integer not null,
+        nonce text not null,
+        status text not null
+            check(status in ('pending','confirmed','rejected','expired')),
+        requested_at text not null,
+        expires_at text not null,
+        decided_at text not null default '',
+        decided_note text not null default ''
+    )
+    """,
+    """
+create index if not exists idx_runtime_binding_requests_agent_status
+        on runtime_binding_requests(catalog_agent_id, status)
+    """,
+    """
+create index if not exists idx_runtime_binding_requests_expires
+        on runtime_binding_requests(expires_at)
+    """,
+]
+
+
+def migration_038_runtime_binding_requests(conn: sqlite3.Connection) -> None:
+    """首次绑定两步闭环（D1，设计 §4.3③）：待确认接入请求表。
+
+    附加式新表——不动 ``runtime_bindings`` 的 CHECK 与「一次只有一个 active
+    绑定」的既有不变量。未决请求带 TTL（默认 72h）与每 agent 未决上限
+    （默认 3 条）；confirmed/rejected/expired 为终态决策，留痕可追溯。
+    """
+    for statement in _RUNTIME_BINDING_REQUESTS_DDL:
+        conn.execute(statement)
+
+
+def migration_039_enrollments(conn: sqlite3.Connection) -> None:
+    """短期设备接入授权与一次业务确认；设备/grant 仅存摘要。"""
+    conn.execute("""
+        create table if not exists enrollments (
+          enrollment_id text primary key, device_code_hash text not null,
+          user_code text not null, status text not null check(status in
+          ('ready_for_authorization','authorized','verifying','bound','published','expired','canceled')),
+          key_id text not null, key_thumbprint text not null, key_jwk_json text not null,
+          runtime_origin text not null, a2a_endpoint text not null,
+          generation integer not null default 1, service_epoch integer not null default 1,
+          public_preview_json text not null, public_profile_revision text not null default '',
+          approved_card_digest text not null default '', merchant_id text not null default '',
+          catalog_agent_id text not null default '', grant_hash text not null default '',
+          scopes_json text not null default '[]', expected_binding_version integer not null default 1,
+          authorization_epoch integer not null default 1, binding_id text not null default '',
+          created_at text not null, expires_at text not null, grant_expires_at text not null default '',
+          authorized_at text not null default '', consumed_at text not null default '')
+    """)
+    conn.execute("create unique index if not exists idx_enrollments_user_code on enrollments(user_code)")
+    conn.execute("create index if not exists idx_enrollments_status_expiry on enrollments(status, expires_at)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1312,6 +1378,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(35, "runtime_management_declaration", migration_035_runtime_management_declaration),
     Migration(36, "publication_draft_isolation", migration_036_publication_draft_isolation),
     Migration(37, "admin_credentials", migration_037_admin_credentials),
+    Migration(38, "runtime_binding_requests", migration_038_runtime_binding_requests),
+    Migration(39, "enrollments", migration_039_enrollments),
 )
 
 

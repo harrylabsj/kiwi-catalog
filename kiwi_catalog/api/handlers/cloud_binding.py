@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,6 @@ from kiwi_catalog.api.auth import AuthError
 from kiwi_catalog.core.errors import (
     ConflictError,
     NotFoundError,
-    PermissionDenied,
     ValidationError,
 )
 from kiwi_catalog.db.session import db_session, now_iso
@@ -206,11 +206,91 @@ def _current_active_binding(conn, catalog_agent_id: str):
     ).fetchone()
 
 
+def _insert_active_binding(
+    conn: Any,
+    *,
+    agent: Any,
+    binding: dict[str, Any],
+    key_jwk: dict[str, Any],
+    thumbprint: str,
+    management: dict[str, Any],
+    existing: Any,
+    actor: str,
+) -> dict[str, Any]:
+    """落 active 绑定（首绑的 admin 兜底 / 轮换共用）：version 前进 + 旧绑定失效 + 审计。"""
+    agent_id = str(agent["catalog_agent_id"])
+    version = int(existing["binding_version"]) + 1 if existing is not None else 1
+    binding_id = str(binding.get("binding_id") or f"bind_{agent_id[-8:]}_{version}")
+    if conn.execute(
+        "select 1 from runtime_bindings where binding_id = ?", (binding_id,)
+    ).fetchone():
+        raise ConflictError(f"binding_id already exists: {binding_id}")
+    stamp = now_iso()
+    conn.execute(
+        "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+        " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+        " binding_version, service_epoch, status, expires_at, created_at, updated_at,"
+        " management_base_path, management_api_major, mcp_path)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+        (
+            binding_id,
+            agent_id,
+            str(agent["merchant_id"] or ""),
+            str(binding["runtime_origin"]),
+            str(binding["a2a_endpoint"]),
+            str(binding["key_id"]),
+            thumbprint,
+            json.dumps(key_jwk),
+            version,
+            int(binding["service_epoch"]),
+            str(binding.get("expires_at") or ""),
+            stamp,
+            stamp,
+            management["management_base_path"],
+            management["management_api_major"],
+            management["mcp_path"],
+        ),
+    )
+    if existing is not None:
+        # 轮换：旧绑定立即失效（旧私钥不能再签发布/轮换请求）。
+        conn.execute(
+            "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
+            (stamp, str(existing["binding_id"])),
+        )
+    # §4.5：轮换后 a2a 端点行指向新绑定（同事务、幂等）。
+    from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+    sync_cloud_endpoints(conn, agent_id, stamp)
+    append_catalog_audit(
+        conn,
+        catalog_agent_id=agent_id,
+        actor=actor,
+        event="runtime_binding_created",
+        details={"binding_id": binding_id, "binding_version": version, "key_thumbprint": thumbprint},
+    )
+    return {
+        "binding_id": binding_id,
+        "binding_version": version,
+        "key_thumbprint": thumbprint,
+        "superseded_binding_id": str(existing["binding_id"]) if existing is not None else None,
+    }
+
+
 def create_runtime_binding(
     db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """创建或轮换 Runtime 绑定（持钥证明 + 受控闸门）。"""
+    """创建或轮换 Runtime 绑定（持钥证明 + 受控闸门）。
+
+    **首次绑定（D1，设计 §4.3③）**：不再要求 admin token——既有闸门
+    （endpoint_policy → 持钥证明 → nonce 防重放）全部通过后落一条
+    **待确认接入请求**（runtime_binding_requests），由商家在门户确认后才
+    签发 active 绑定；确认前公开读 /runtime-binding 仍 404，Catalog 不提前
+    背书。admin token + 持钥证明仍可直接落 active 绑定（运维兜底，旧语义）。
+    **轮换**（已有 active 绑定）不受影响：现役私钥签或 admin。
+    """
     agent_id = str(catalog_agent_id or "").strip()
+    if payload.get("enrollment_id"):
+        return _create_enrollment_binding(db_path, agent_id, payload)
     binding = _binding_required(payload)
     jws = str(payload.get("_binding_jws") or "").strip()
     if not jws:
@@ -227,6 +307,7 @@ def create_runtime_binding(
         "generation": int(binding["generation"]),
         "service_epoch": int(binding["service_epoch"]),
     }
+    notify_request: dict[str, Any] | None = None
     with db_session(db_path) as conn:
         agent = conn.execute(
             "select * from catalog_agents where catalog_agent_id = ?", (agent_id,)
@@ -235,14 +316,36 @@ def create_runtime_binding(
             raise NotFoundError("catalog agent not found")
         existing = _current_active_binding(conn, agent_id)
         if existing is None:
-            # 首次绑定：持钥证明 + 管理员闸门（受控注册）。
-            admin_token = str(payload.get("admin_token") or "")
-            if not admin_token or not api_auth.admin_token_matches(admin_token, conn):
-                raise PermissionDenied("first runtime binding requires a valid admin token")
-            verify_binding_possession(
+            # 首次绑定：持钥证明（闸门不变）。
+            possession = verify_binding_possession(
                 jws=jws, public_jwk=key_jwk, expected_fields=signed_fields
             )
-            actor = f"admin+possession:{binding['key_id']}"
+            admin_token = str(payload.get("admin_token") or "")
+            if not (admin_token and api_auth.admin_token_matches(admin_token, conn)):
+                # D1：落「待确认接入请求」（不写 active 绑定，不提前背书）
+                from kiwi_catalog.services import binding_requests as binding_requests_service
+
+                result = binding_requests_service.create_request(
+                    conn,
+                    agent=agent,
+                    binding=binding,
+                    key_jwk=key_jwk,
+                    thumbprint=thumbprint,
+                    signed_payload=possession,
+                )
+                notify_request = result
+            else:
+                # 运维兜底：admin + 持钥证明直接落 active 绑定（旧语义保留）。
+                result = _insert_active_binding(
+                    conn,
+                    agent=agent,
+                    binding=binding,
+                    key_jwk=key_jwk,
+                    thumbprint=thumbprint,
+                    management=management,
+                    existing=None,
+                    actor=f"admin+possession:{binding['key_id']}",
+                )
         else:
             # 轮换：必须由**当前活动绑定**的私钥签名（或管理员）。
             admin_token = str(payload.get("admin_token") or "")
@@ -264,58 +367,174 @@ def create_runtime_binding(
                     },
                 )
                 actor = f"runtime:{existing['binding_id']}"
-
-        version = int(existing["binding_version"]) + 1 if existing is not None else 1
-        binding_id = str(binding.get("binding_id") or f"bind_{agent_id[-8:]}_{version}")
-        if conn.execute(
-            "select 1 from runtime_bindings where binding_id = ?", (binding_id,)
-        ).fetchone():
-            raise ConflictError(f"binding_id already exists: {binding_id}")
-        stamp = now_iso()
-        conn.execute(
-            "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
-            " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
-            " binding_version, service_epoch, status, expires_at, created_at, updated_at,"
-            " management_base_path, management_api_major, mcp_path)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-            (
-                binding_id,
-                agent_id,
-                str(agent["merchant_id"] or ""),
-                str(binding["runtime_origin"]),
-                str(binding["a2a_endpoint"]),
-                str(binding["key_id"]),
-                thumbprint,
-                json.dumps(key_jwk),
-                version,
-                int(binding["service_epoch"]),
-                str(binding.get("expires_at") or ""),
-                stamp,
-                stamp,
-                management["management_base_path"],
-                management["management_api_major"],
-                management["mcp_path"],
-            ),
-        )
-        if existing is not None:
-            # 轮换：旧绑定立即失效（旧私钥不能再签发布/轮换请求）。
-            conn.execute(
-                "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
-                (stamp, str(existing["binding_id"])),
+            result = _insert_active_binding(
+                conn,
+                agent=agent,
+                binding=binding,
+                key_jwk=key_jwk,
+                thumbprint=thumbprint,
+                management=management,
+                existing=existing,
+                actor=actor,
             )
-        append_catalog_audit(
-            conn,
+    if notify_request is not None:
+        # 邮件通知运营（D1）：旁路——必须在事务提交之后，发信失败不影响请求。
+        from kiwi_catalog.services import accounts as accounts_service
+
+        accounts_service.notify_admin_binding_request(
+            merchant_id=str(notify_request["merchant_id"]),
             catalog_agent_id=agent_id,
-            actor=actor,
-            event="runtime_binding_created",
-            details={"binding_id": binding_id, "binding_version": version, "key_thumbprint": thumbprint},
+            binding_request_id=str(notify_request["binding_request_id"]),
+            runtime_origin=str(notify_request["runtime_origin"]),
+            a2a_endpoint=str(notify_request["a2a_endpoint"]),
+            key_thumbprint=str(notify_request["key_thumbprint"]),
+            expires_at=str(notify_request["expires_at"]),
         )
-        return {
-            "binding_id": binding_id,
-            "binding_version": version,
-            "key_thumbprint": thumbprint,
-            "superseded_binding_id": str(existing["binding_id"]) if existing is not None else None,
-        }
+    return result
+
+
+def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """持 enrollment grant + 完整请求签名 + 外部端点挑战自动首绑。"""
+    import hashlib
+    import secrets
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+    from kiwi_catalog.a2a.request_signature import consume_request_nonce
+    from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher
+    from kiwi_catalog.discovery.trust import TrustPolicy
+    from kiwi_catalog.core.errors import PermissionDenied
+    from kiwi_catalog.services.enrollments import validate_public_jwk
+
+    binding = _binding_required(payload)
+    if not isinstance(binding.get("key_id"), str) or not binding["key_id"].strip():
+        raise ValidationError("binding.key_id must be a non-empty string")
+    for field in ("runtime_origin", "a2a_endpoint"):
+        if not isinstance(binding.get(field), str) or not binding[field].strip():
+            raise ValidationError(f"binding.{field} must be a non-empty string")
+    enrollment_id, grant = str(payload.get("enrollment_id") or ""), str(payload.get("grant") or "")
+    jws = str(payload.get("_binding_jws") or "")
+    if not enrollment_id or not grant or not jws:
+        raise ValidationError("enrollment_id, grant and x-kiwi-binding-jws are required")
+    body = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    with db_session(db_path) as conn:
+        row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
+        if row is None or agent is None or row["catalog_agent_id"] != agent_id:
+            raise NotFoundError("enrollment not found")
+        if row["status"] not in ("authorized", "bound") or (row["status"] == "authorized" and row["grant_expires_at"] <= now_iso()):
+            raise PermissionDenied("enrollment grant is expired or unavailable")
+        if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"]:
+            raise PermissionDenied("invalid enrollment grant")
+        if row["merchant_id"] != agent["merchant_id"] or str(binding["runtime_origin"]) != row["runtime_origin"] or str(binding["a2a_endpoint"]) != row["a2a_endpoint"]:
+            raise PermissionDenied("binding material does not match approved enrollment")
+        thumb = validate_public_jwk(dict(binding["key_jwk"]))
+        if thumb != row["key_thumbprint"] or str(binding["key_id"]) != row["key_id"]:
+            raise PermissionDenied("binding key does not match approved enrollment")
+        if int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]):
+            raise PermissionDenied("binding generation does not match approved enrollment")
+        if "runtime:bind" not in json.loads(row["scopes_json"]):
+            raise PermissionDenied("enrollment grant does not include runtime:bind")
+        signed = verify_binding_possession(jws=jws, public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
+            "method": "POST", "path": f"/v1/agents/{agent_id}/runtime-bindings", "audience": "kiwi-catalog",
+            "body_digest": canonical_digest(body), "enrollment_id": enrollment_id,
+            "grant_hash": hashlib.sha256(grant.encode()).hexdigest(), "catalog_agent_id": agent_id,
+            "key_id": row["key_id"],
+            "key_thumbprint": thumb, "runtime_origin": row["runtime_origin"], "a2a_endpoint": row["a2a_endpoint"],
+            "generation": int(binding["generation"]), "service_epoch": int(binding["service_epoch"]),
+            "authorization_epoch": int(row["authorization_epoch"]),
+        })
+        _check_enrollment_exp(signed)
+        consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(signed.get("nonce", "")), issued_at=str(signed.get("issued_at", "")))
+        if row["status"] == "bound" and row["binding_id"]:
+            active = conn.execute("select status from runtime_bindings where binding_id=?", (row["binding_id"],)).fetchone()
+            if active is None or active["status"] != "active" or agent["administrative_state"] != "active":
+                raise PermissionDenied("bound enrollment is no longer active")
+            return _enrollment_binding_result(conn, agent_id, row)
+        challenge = secrets.token_urlsafe(32)
+        origin = str(row["runtime_origin"]).rstrip("/")
+        challenge_request = {"enrollment_id": enrollment_id, "challenge": challenge, "origin": origin,
+            "key_thumbprint": thumb, "audience": "kiwi-catalog", "issued_at": now_iso(),
+            "expires_at": (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)).isoformat()}
+    # Network challenge outside SQL transaction. ProfileFetcher pins verified public IP, bounds body and rejects redirects.
+    try:
+        result = ProfileFetcher(TrustPolicy.defaults(), timeout=5).post_json(
+            origin + "/.well-known/kiwi-binding-challenge", challenge_request, timeout=5)
+    except FetchError as exc:
+        raise ConflictError("runtime endpoint challenge failed; retry when the public HTTPS service is reachable") from exc
+    if result.status_code != 200:
+        raise PermissionDenied("runtime endpoint challenge failed")
+    try:
+        response = json.loads(result.body)
+    except (ValueError, TypeError) as exc:
+        raise PermissionDenied("runtime endpoint challenge returned invalid JSON") from exc
+    if not isinstance(response, dict) or set(response) != {"enrollment_id", "challenge", "origin", "key_thumbprint", "audience", "issued_at", "expires_at", "key_id", "signature"}:
+        raise PermissionDenied("runtime endpoint challenge response shape is invalid")
+    for key, value in challenge_request.items():
+        if response.get(key) != value:
+            raise PermissionDenied("runtime endpoint challenge response mismatch")
+    if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
+        raise PermissionDenied("runtime endpoint challenge expired")
+    verify_binding_possession(jws=str(response["signature"]), public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
+        **{k: response[k] for k in challenge_request}, "key_id": row["key_id"], "purpose": "kiwi-binding-challenge"})
+    challenge_jws_payload = _read_jws_payload(str(response["signature"]))
+    _check_enrollment_exp({**challenge_jws_payload, "exp": response["expires_at"]})
+    with db_session(db_path) as conn:
+        row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
+        if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
+            raise PermissionDenied("runtime endpoint challenge expired")
+        if row is None or row["status"] != "authorized" or row["grant_expires_at"] <= now_iso() or row["merchant_id"] != agent["merchant_id"] or agent["administrative_state"] != "active":
+            raise PermissionDenied("enrollment authorization changed during endpoint challenge")
+        if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"] or int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]) or "runtime:bind" not in json.loads(row["scopes_json"]):
+            raise PermissionDenied("enrollment grant changed during endpoint challenge")
+        consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(challenge_jws_payload.get("nonce", "")), issued_at=str(challenge_jws_payload.get("issued_at", "")))
+        version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
+        if version != int(row["expected_binding_version"]):
+            raise ConflictError("binding version changed since enrollment authorization")
+        outcome = _insert_active_binding(conn, agent=agent, binding=binding, key_jwk=dict(binding["key_jwk"]),
+            thumbprint=thumb, management=_management_declaration(binding), existing=_current_active_binding(conn, agent_id), actor=f"enrollment:{enrollment_id}")
+        changed = conn.execute("update enrollments set status='bound',binding_id=?,consumed_at=? where enrollment_id=? and status='authorized'",
+                               (outcome["binding_id"], now_iso(), enrollment_id)).rowcount
+        if changed != 1:
+            raise ConflictError("enrollment grant was concurrently consumed")
+        from kiwi_catalog.discovery._validation import canonical_domain_of
+        conn.execute("update catalog_agents set canonical_domain=?, updated_at=? where catalog_agent_id=?",
+                     (canonical_domain_of(str(row["runtime_origin"])), now_iso(), agent_id))
+        from kiwi_catalog.services.binding_requests import record_active_binding_evidence
+        record_active_binding_evidence(
+            conn, catalog_agent_id=agent_id, binding_id=str(outcome["binding_id"]),
+            key_thumbprint=thumb, runtime_origin=str(row["runtime_origin"]),
+            a2a_endpoint=str(row["a2a_endpoint"]), checked_at=now_iso(),
+        )
+        return _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
+
+
+def _check_enrollment_exp(signed: dict[str, Any]) -> None:
+    try:
+        expires = datetime.fromisoformat(str(signed.get("exp", "")))
+        if expires.tzinfo is None or expires <= datetime.now(UTC) or expires > datetime.now(UTC) + timedelta(minutes=2):
+            raise ValidationError("request signature expired or has excessive lifetime")
+    except ValueError as exc:
+        raise ValidationError("request signature exp is missing or malformed") from exc
+
+
+def _read_jws_payload(jws: str) -> dict[str, Any]:
+    import base64
+    try:
+        segment = jws.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    except Exception as exc:
+        raise ValidationError("malformed possession JWS") from exc
+
+
+def _enrollment_binding_result(conn: Any, agent_id: str, row: Any, outcome: dict[str, Any] | None = None) -> dict[str, Any]:
+    binding_id = str(row["binding_id"])
+    binding = conn.execute("select * from runtime_bindings where binding_id=?", (binding_id,)).fetchone()
+    from kiwi_catalog.a2a.binding_claims import read_runtime_binding
+    declaration = read_runtime_binding(conn, agent_id)
+    return {"status": "bound", "enrollment_id": row["enrollment_id"], "binding_id": binding_id,
+        "binding_version": int(binding["binding_version"]), "key_thumbprint": row["key_thumbprint"],
+        "catalog_agent_id": agent_id, "binding_claim": declaration,
+        "superseded_binding_id": (outcome or {}).get("superseded_binding_id")}
 
 
 def revoke_runtime_binding(
@@ -356,6 +575,11 @@ def revoke_runtime_binding(
             "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
             (now_iso(), target),
         )
+        # §4.5：撤销后同步端点行——无其他活动绑定时 a2a 与 agent_card 行一并
+        # 删除（不再可被发现）；admin 撤销同路（同一函数）。
+        from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+        sync_cloud_endpoints(conn, agent_id, now_iso())
         append_catalog_audit(
             conn,
             catalog_agent_id=agent_id,
