@@ -31,7 +31,7 @@ class RouteInfo:
 
 
 def catalog_route_info() -> list[RouteInfo]:
-    """Route view for the kiwi-catalog standalone service (from app.py)."""
-    from kiwi_catalog.api.app import _ROUTE_TABLE
+    """Route view for the kiwi-catalog standalone service (base + extensions)."""
+    from kiwi_catalog.api.route_table import all_routes
 
-    return [RouteInfo(entry.path_template, set(entry.methods)) for entry in _ROUTE_TABLE]
+    return [RouteInfo(entry.path_template, set(entry.methods)) for entry in all_routes()]

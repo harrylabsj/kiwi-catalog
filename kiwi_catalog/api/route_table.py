@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.api.extensions import extension_route_specs
+
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
@@ -1140,11 +1142,27 @@ def _v1_reinstate_listing(db_path, listing_id, payload=None, query=None):
     return listings_handlers.v1_reinstate_listing(db_path, listing_id, payload or {})
 
 
+def all_routes() -> tuple[RouteEntry, ...]:
+    """基表 + 扩展路由（docs/extensions.md）。
+
+    无扩展时直接返回基表（零分配快路径）；扩展路由追加在基表之后，
+    模板冲突时基路由优先（resolve_route 顺序匹配先到先得）。
+    """
+    specs = extension_route_specs()
+    if not specs:
+        return _ROUTE_TABLE
+    extra = tuple(
+        RouteEntry(set(spec.methods), spec.path_template, spec.handler)
+        for spec in specs
+    )
+    return _ROUTE_TABLE + extra
+
+
 def resolve_route(
     method: str, path: str, routes: tuple[RouteEntry, ...] | list[Any] | None = None
 ) -> tuple[bool, bool]:
     """Return (path_known, method_allowed) without parsing the request body."""
-    table = _ROUTE_TABLE if routes is None else tuple(routes)
+    table = all_routes() if routes is None else tuple(routes)
     path_known = False
     for route in table:
         template = getattr(route, "path_template", None) or getattr(route, "path", "")

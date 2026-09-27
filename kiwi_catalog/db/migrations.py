@@ -1385,7 +1385,8 @@ def migration_041_free_listing_limit(conn: sqlite3.Connection) -> None:
     changed = conn.execute("""update listing_plans set active_limit=20, updated_at=?
         where plan_code='free' and active_limit=10
           and not exists (select 1 from listing_entitlement_audit
-                          where action='plan_limit_changed')""", (now,))
+                          where action='plan_limit_changed'
+                            and json_extract(detail_json, '$.plan_code')='free')""", (now,))
     if changed.rowcount:
         conn.execute("""insert into listing_entitlement_audit
             (merchant_id,actor,action,detail_json,created_at)

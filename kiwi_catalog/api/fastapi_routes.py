@@ -34,6 +34,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.api.extensions import run_fastapi_hooks
 from kiwi_catalog.api.route_table import (
     _activate_card_publication,
     _claim_catalog_agent,
@@ -1229,3 +1230,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/follows")
     def portal_follows_page() -> Response:
         return _portal_html(portal_handlers.portal_follows())
+
+    # 扩展路由挂钩（docs/extensions.md）：基表注册完再让扩展包挂自己的
+    # FastAPI 路由；fail-soft 由 run_fastapi_hooks 负责。
+    run_fastapi_hooks(app, db_path)
