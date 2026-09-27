@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Merchant 门户页面（docs/kiwi-catalog-token-portal-design-v0.1 §6）。
+"""Merchant 门户页面。商品名额自动开通，旧申请入口显示商家后台。
 
-fallback 栈渲染的轻量 HTML（零新依赖）：申请表单 / 审核后台 / 商家自查 /
+fallback 栈渲染的轻量 HTML（零新依赖）：审核后台 / 商家后台 /
 门户首页。样式与官网（kiwi 仓 docs/website/）完全一致——内联官网 style.css
 + 门户特有表单补充（主题变量同源，官网改样式时同步拷贝）。
 
@@ -471,118 +471,19 @@ _ADMIN_NAV = """
 
 _FOOTER = """
 <footer class="footer"><div class="footer-inner">
-  <p>Kiwi Merchant Portal · 登录后仅商家本人可查看或复制目录令牌 · 明文令牌不写入日志</p>
+  <p>Kiwi Merchant Portal · 注册后自动获得免费商品名额 · 商品发布由当前 Runtime 绑定签名</p>
 </div></footer>
 """
 
 
 def portal_home() -> dict[str, Any]:
-    """门户首页 = Token 申请（登录态一个按钮；未登录引导登录）。
-
-    D7：申请收成一个按钮「申请目录令牌」，不再收集域名（API 的 domain 参数
-    仍保留给 CLI 与老调用方）。邮箱/电话不需要填写——注册与账户基本信息已
-    提供，提交时自动带上。商家 ID（平台分配）与商家名称为只读展示（取自
-    /v1/accounts/me；名称在「基本信息」页修改）；未分配商家 ID 或未填写名称
-    时按钮灰化并引导先补全。四态：active 显示令牌 + 复制、pending 按钮禁用、
-    被拒显示理由 + 「重新申请」、无令牌无工单按钮可点。
-    """
-    body = (
-        _nav("portal")
-        + """
-<section class="section center-page"><div class="section-inner">
-  <div class="kicker">Token 申请</div>
-  <h2>Token 申请</h2>
-  <p class="lead">申请商家目录令牌，平台审核通过后签发。令牌会显示在「商家后台」里。</p>
-  <div class="card form-card">
-    <label for="t_merchant_id">商家 ID（平台分配，只读）</label>
-    <input id="t_merchant_id" readonly placeholder="加载中…">
-    <label for="t_name">商家名称（只读，可在<a href="/portal/account/profile">基本信息</a>页修改）</label>
-    <input id="t_name" readonly placeholder="加载中…">
-    <div id="t_state"></div>
-    <button class="btn-form" id="t_submit">申请目录令牌</button>
-    <div id="t_out"></div>
-  </div>
-</div></section>
-<script>
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-// 登录态检查：未登录进入登录流程（邮箱/电话自动从账户带出）
-fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
-  if (!r.ok) { window.location.href = '/portal/login'; return; }
-  document.getElementById('t_name').value = r.merchant_name || '';
-  document.getElementById('t_merchant_id').value = r.merchant_id || '';
-  const out = document.getElementById('t_out');
-  const state = document.getElementById('t_state');
-  const btn = document.getElementById('t_submit');
-  if (!r.merchant_id) {
-    // 未分配商家 ID：禁止提交，引导先完成注册（服务端 request_token 同样 fail-closed）
-    btn.disabled = true;
-    out.className = 'err';
-    out.innerHTML = '尚未分配商家 ID，请先<a href="/portal/register">完成注册</a>';
-    return;
-  }
-  if (!r.merchant_name) {
-    // 商家名称只读：为空时引导先去基本信息页补全（服务端要求 agent_name 非空）
-    btn.disabled = true;
-    out.className = 'err';
-    out.innerHTML = '尚未填写商家名称，请先在<a href="/portal/account/profile">基本信息</a>页补全';
-    return;
-  }
-  // 只陈述 Catalog 能观察到的审批/签发事实；不推断 Runtime 本地配置。
-  if (r.token && r.token.status === 'active') {
-    state.innerHTML = '<p class="ok"><strong>可发布（目录侧）</strong></p>'
-      + '<p class="small">Catalog 已确认审批通过且令牌有效。是否已配置到 Runtime 由 Catalog 无法观测。</p>'
-      + '<p class="small">商家令牌仅登录后向本人显示，请妥善保管。</p>'
-      + '<div class="token-box">' + esc(r.token.token) + '</div>'
-      + '<button type="button" class="btn-mini" id="t_copy_token">复制令牌</button>';
-    btn.disabled = true;
-    const copyBtn = document.getElementById('t_copy_token');
-    if (copyBtn) copyBtn.addEventListener('click', () => {
-      const box = state.querySelector('.token-box');
-      if (box && navigator.clipboard) navigator.clipboard.writeText((box.textContent || '').trim());
-    });
-  } else if (r.application && r.application.status === 'pending') {
-    state.innerHTML = '<p class="ok"><strong>审核中</strong>：目录令牌申请正在审核。</p>';
-    btn.disabled = true;
-  } else if (r.application && r.application.status === 'rejected') {
-    state.innerHTML = '<p class="err"><strong>未申请</strong>。上次申请未通过'
-      + (r.application.review_note ? '：' + esc(r.application.review_note) : '')
-      + '。可点击「重新申请」再次提交。</p>';
-    btn.textContent = '重新申请';
-  } else if (r.application && r.application.status === 'approved') {
-    state.innerHTML = '<p class="ok"><strong>待配置</strong>：申请已通过，请在 Runtime 的安全配置中设置目录令牌；Catalog 无法确认本地配置状态。</p>';
-    btn.disabled = true;
-  } else {
-    state.innerHTML = '<p class="small muted"><strong>未申请</strong>：目录商品 listings 需要审批通过的目录令牌。名片接入不受此审批影响。</p>';
-  }
-});
-document.getElementById('t_submit').addEventListener('click', () => {
-  const btn = document.getElementById('t_submit');
-  const out = document.getElementById('t_out');
-  btn.disabled = true;
-  // 申请已零输入（D7）——点击只建 pending 工单，不带任何字段
-  postJson('/v1/accounts/token-request', {}).then(r => {
-    if (r.ok) {
-      out.className = 'ok';
-      out.textContent = r.status === 'active' ? '你已有有效令牌，可在「商家后台」查看。' : '申请已提交，等待平台审核。';
-      setTimeout(() => go('/portal/account'), 1000);
-    } else {
-      out.className = 'err';
-      out.textContent = r.error || '提交失败';
-      btn.disabled = false;
-    }
-  });
-});
-</script>
-"""
-        + _FOOTER
-    )
-    return _account_page("Token 申请", body)
+    """商家入口直接展示自动开通的商品名额。"""
+    return portal_account()
 
 
 def portal_apply() -> dict[str, Any]:
-    """/portal/apply 兼容旧路径——与首页（Token 申请，D7 一个按钮）同内容。"""
+    """旧令牌申请链接转到商品名额页。"""
     return portal_home()
-
 
 
 def portal_admin() -> dict[str, Any]:
@@ -1352,8 +1253,7 @@ def _account_page(title: str, body: str) -> dict[str, Any]:
 def portal_register() -> dict[str, Any]:
     """注册页（商家名称 + 邮箱 + 密码）→ 邮箱验证码 → 验证后进入「我的」。
 
-    注册即成为商家（admin dashboard 无需审批即可见）；商家令牌仍在「我的」
-    申请工单、经审核后签发。
+    注册即成为商家并获得免费商品名额；邮箱验证后可连接 Runtime。
     """
     body = (
         _nav("portal")
@@ -1362,7 +1262,7 @@ def portal_register() -> dict[str, Any]:
   <div class="kicker">Register</div>
   <h2>注册商家账号</h2>
   <p class="lead">填写商家名称、邮箱、密码和联系电话即可注册成为商家（无需审核）。
-    微信选填。验证邮箱后，在「我的」里申请商家令牌。</p>
+    微信选填。验证邮箱后即可查看免费商品名额并连接 Runtime。</p>
   <div class="card form-card">
     <div id="step1">
       <label for="merchant_name">商家名称 <span class="req">*</span></label>
@@ -1728,7 +1628,7 @@ document.getElementById('reset').addEventListener('click', () => {
 
 
 def portal_account() -> dict[str, Any]:
-    """「我的」：工单状态 / 申请 token / 查看 token（明文，登录态）/ 状态查询。"""
+    """「我的」：展示自动开通的 Listings 方案和当前占用。"""
     body = (
         _nav("account")
         + """
@@ -1737,7 +1637,7 @@ def portal_account() -> dict[str, Any]:
   <h2>商家后台</h2>
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
-    <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="/portal/account"{sub_apply}>商品名额</a>
     <a href="/portal/account/card"{sub_card}>我的名片</a>
     <a href="/portal/publications">公开资料</a>
     <a href="/portal/follows">我的关注</a>
@@ -1746,106 +1646,37 @@ def portal_account() -> dict[str, Any]:
   <div id="out"></div>
   <div id="content" style="display:none">
     <div class="card form-card">
-  <p class="small">目录商品 listings 需要审批通过的目录令牌。名片绑定与发布不依赖该令牌。</p>
       <div id="profile"></div>
-      <div id="token_box"></div>
-      <div class="token-actions">
-        <button class="btn-mini" id="copy_token">复制令牌</button>
-        <button class="btn-mini" id="apply_token">申请目录令牌</button>
-      </div>
+      <div id="listing_capacity"></div>
     </div>
   </div>
 </div></section>
 <script>
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-function loadMe() {
-  fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
+fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
     if (!r.ok) {
-      // 未登录：直接进入登录流程（登录页含注册入口）
       window.location.href = '/portal/login';
       return;
     }
     document.getElementById('content').style.display = 'block';
     const p = document.getElementById('profile');
-    let html = '<h3>' + esc(r.email) + '</h3>';
-    html += '<p class="small">账号 ID ' + esc(r.account_id) + (r.merchant_id ? ' · 商家 ' + esc(r.merchant_id) : '') + '</p>';
-    if (r.application) {
-      html += '<p>申请状态：<strong>' + esc(r.application.status) + '</strong>'
-        + (r.application.status === 'rejected' && r.application.review_note ? '（' + esc(r.application.review_note) + '）' : '')
-        + ' · ' + esc(r.application.agent_name)
-        + (r.application.domain ? ' · ' + esc(r.application.domain) : '') + '</p>';
-    }
-    p.innerHTML = html;
-    const tb = document.getElementById('token_box');
-    const copyBtn = document.getElementById('copy_token');
-    const applyBtn = document.getElementById('apply_token');
-    // 仅在已认证的商家本人会话页回显令牌；公开预览及接入页绝不包含凭据。
-    if (r.token && r.token.status === 'active') {
-      tb.innerHTML = '<p class="ok"><strong>可发布（目录侧）</strong></p>'
-        + '<p class="small">Catalog 已确认审批通过且令牌有效。是否已配置到 Runtime 由 Catalog 无法观测。</p>'
-        + '<p class="small">商家令牌仅登录后向本人显示，请妥善保管。</p>'
-        + '<div class="token-box">' + esc(r.token.token) + '</div>'
-        + '<div style="margin-top:12px;border-left:3px solid var(--kiwi-600);padding-left:10px">'
-        + '<p class="small"><strong>下一步：把令牌填进你的 Kiwi Merchant</strong></p>'
-        + '<p class="small">① 自建实例：终端运行 <code>kiwi merchant init</code>，在第 4 个提示「商家令牌」处粘贴；'
-        + '或把下面这行写进 <code>~/.kiwi/credentials.env</code>（权限 0600）'
-        + ' <button type="button" class="btn-mini" id="copy_env_line">复制这一行</button><br>'
-        + '<code>KIWI_MERCHANT_TOKEN=&lt;你的令牌&gt;</code></p>'
-        + '<p class="small">② 填好后 <code>kiwi merchant publish</code>、<code>kiwi agent serve</code> '
-        + '等命令会自动读取（shopping-cli 不需要配这个令牌）。</p>'
-        + '<p class="small">③ WorkBuddy 云端应用：填入口在接入向导里。只是发布公开资料，现在不需要令牌。</p>'
-        + '</div>';
-      copyBtn.disabled = false;
-      const copyEnv = document.getElementById('copy_env_line');
-      if (copyEnv) copyEnv.addEventListener('click', () => {
-        const box = document.querySelector('#token_box .token-box');
-        if (box && navigator.clipboard) navigator.clipboard.writeText('KIWI_MERCHANT_TOKEN=' + (box.textContent || '').trim());
-      });
-      applyBtn.disabled = true;  // 有令牌：申请按钮变灰
-    } else if (r.application && r.application.status === 'pending') {
-      tb.innerHTML = '<p class="ok"><strong>审核中</strong>：目录令牌申请正在审核。</p>';
-      copyBtn.disabled = true;
-      applyBtn.disabled = true;
-    } else if (r.application && r.application.status === 'rejected') {
-      tb.innerHTML = '<p class="err"><strong>未申请</strong>。上次申请未通过'
-        + (r.application.review_note ? '：' + esc(r.application.review_note) : '')
-        + '。可点击「重新申请」再次提交（原工单保留为记录）。</p>';
-      copyBtn.disabled = true;
-      applyBtn.disabled = false;
-      applyBtn.textContent = '重新申请';
-    } else {
-      tb.innerHTML = r.application && r.application.status === 'approved'
-        ? '<p class="ok"><strong>待配置</strong>：申请已通过，请在 Runtime 的安全配置中设置目录令牌。Catalog 无法确认本地配置状态。</p>'
-        : '<p class="small muted"><strong>未申请</strong>：目录商品 listings 需要审批通过的目录令牌。名片绑定与发布不受此审批影响。</p>';
-      copyBtn.disabled = true;
-      applyBtn.disabled = false;
-    }
+    p.innerHTML = '<h3>' + esc(r.email) + '</h3><p class="small">商家 ' + esc(r.merchant_id) + '</p>';
+    const c = r.listing_capacity;
+    document.getElementById('listing_capacity').innerHTML = c
+      ? '<h3>商品名额：' + esc(c.active_used) + ' / ' + esc(c.active_limit) + '</h3>'
+        + '<p class="small">方案：' + esc(c.plan_code) + ' · 可用：' + esc(c.active_remaining) + '</p>'
+        + (c.status === 'active'
+          ? '<p class="small">验证邮箱并连接 Runtime、发布名片后，商品可自动同步。更新现有商品不占新名额。</p>'
+          : '<p class="err">商品发布已暂停，请联系平台处理；现有商品仍可下架。</p>')
+      : '<p class="err">商品方案尚未开通，请联系平台处理。</p>';
+  }).catch(() => {
+    document.getElementById('out').textContent = '无法加载商品名额，请稍后重试。';
   });
-}
-document.getElementById('copy_token').addEventListener('click', () => {
-  const box = document.querySelector('#token_box .token-box');
-  if (box && navigator.clipboard) navigator.clipboard.writeText((box.textContent || '').trim());
-});
-// 申请已零输入（D7）——点击只建 pending 工单；被拒后同一按钮即「重新申请」
-document.getElementById('apply_token').addEventListener('click', () => {
-  const btn = document.getElementById('apply_token');
-  btn.disabled = true;
-  postJson('/v1/accounts/token-request', {}).then(r => {
-    if (r.ok) { loadMe(); } else {
-      const out = document.getElementById('out');
-      out.className = 'err';
-      out.textContent = r.error || '申请失败';
-      btn.disabled = false;
-    }
-  });
-});
-// 退出登录已移至二级导航（nav_logout，见 _PORTAL_JS 共享 handler）
-loadMe();
 </script>
 """
         + _FOOTER
     )
-    # 二级导航高亮（申请令牌 = 本页）
+    # 二级导航高亮（商品名额 = 本页）
     body = (
         body.replace("{sub_apply}", ' class="active"')
         .replace("{sub_profile}", "")

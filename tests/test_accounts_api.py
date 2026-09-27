@@ -854,26 +854,15 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("merchants", raw)
         self.assertIn("developers", raw)
 
-    def test_account_page_tells_merchant_where_to_paste_token(self) -> None:
-        """令牌拿到手之后「填到哪里」必须写在页面上（2026-09-26）。
-
-        此前页面只给一串令牌 + 复制按钮，粘贴点（`kiwi merchant init` 的第 4 个提示 /
-        `~/.kiwi/credentials.env`）毫无提示——非技术商家会卡在这一步。
-        """
+    def test_account_page_shows_listing_capacity_without_token_setup(self) -> None:
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
-        self.assertIn("下一步：把令牌填进你的 Kiwi Merchant", raw)
-        self.assertIn("kiwi merchant init", raw)
-        self.assertIn("~/.kiwi/credentials.env", raw)
-        self.assertIn("KIWI_MERCHANT_TOKEN=", raw)
-        self.assertIn("shopping-cli 不需要配这个令牌", raw)
-        self.assertIn("只是发布公开资料，现在不需要令牌", raw)
-        # 静态 HTML 只放占位符：真令牌由 /v1/accounts/me 在登录态注入，页面源码里不得出现
-        self.assertIn("&lt;你的令牌&gt;", raw)
-        self.assertIn('id="copy_env_line"', raw)
+        self.assertIn("商品名额", raw)
+        self.assertIn("listing_capacity", raw)
+        self.assertNotIn("KIWI_MERCHANT_TOKEN=", raw)
+        self.assertNotIn('id="copy_env_line"', raw)
         self.assertNotIn("demo.html", raw)
-        self.assertIn("复制令牌", raw)  # 令牌态双按钮：复制令牌 + 申请目录令牌（静态模板）
-        self.assertIn("申请目录令牌", raw)
+        self.assertNotIn("申请目录令牌", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
         self.assertNotIn("/portal/status", raw)

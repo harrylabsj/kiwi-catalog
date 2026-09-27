@@ -124,6 +124,15 @@ def publish_listing(
             conn, listing_type, owner_agent_id, str(upsert_key)
         )
 
+    if existing is not None and int(existing.get("governance_hold") or 0) == 1:
+        raise PermissionDenied("LISTINGS_GOVERNANCE_HOLD: administrator release is required")
+    if actor.startswith("runtime:"):
+        from kiwi_catalog.services.listing_entitlements import require_publication_capacity
+        require_publication_capacity(
+            conn, merchant_id,
+            existing_state=str(existing["publication_state"]) if existing else None,
+        )
+
     digest = _compute_listing_digest(canonical)
     fresh_until = _default_fresh_until(listing_type, canonical.get("fresh_until"))
     timestamp = now_iso()
@@ -229,6 +238,13 @@ def reinstate_listing(
         raise PermissionDenied("listing is owned by a different merchant")
     if row.get("publication_state") != SUSPENDED:
         raise PermissionDenied(f"only SUSPENDED listings can be reinstated (got {row.get('publication_state')})")
+    if int(row.get("governance_hold") or 0) == 1 and actor != "admin":
+        raise PermissionDenied("LISTINGS_GOVERNANCE_HOLD: administrator release is required")
     _require_owner_active(conn, str(row.get("owner_agent_id") or ""), merchant_id)
+    if conn.execute("select 1 from merchant_accounts where merchant_id=?", (merchant_id,)).fetchone():
+        from kiwi_catalog.services.listing_entitlements import require_publication_capacity
+        require_publication_capacity(conn, merchant_id, existing_state="SUSPENDED")
+    if int(row.get("governance_hold") or 0) == 1:
+        conn.execute("update commerce_listings set governance_hold=0 where listing_id=?", (listing_id,))
     repo.set_publication_state(conn, listing_id, ACTIVE)
     return repo.get_listing(conn, listing_id) or row

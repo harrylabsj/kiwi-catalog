@@ -183,7 +183,7 @@ class AdminApiTest(unittest.TestCase):
                     **PRODUCT_PAYLOAD,
                     "merchant_id": mid,
                     "owner_agent_id": agent_id,
-                    "owner_token": token,
+                    "admin_token": ADMIN_TOKEN,
                 }
             ).encode(),
         )

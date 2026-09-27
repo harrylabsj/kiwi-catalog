@@ -108,7 +108,8 @@ class ListingsApiTest(unittest.TestCase):
         self.db_path = os.path.join(self.tmp, "catalog.sqlite")
         env_patch = mock.patch.dict(
             os.environ,
-            {"KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
+            {"KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+             "KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"},
             clear=False,
         )
         env_patch.start()
@@ -407,7 +408,7 @@ class ListingsApiTest(unittest.TestCase):
             ]
         self.assertEqual(states, ["SUSPENDED", "SUSPENDED"])
 
-    def test_publisher_can_reinstate_suspended_listing(self) -> None:
+    def test_governance_suspended_listing_requires_admin_reinstate(self) -> None:
         self._publish()
 
         with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
@@ -431,6 +432,12 @@ class ListingsApiTest(unittest.TestCase):
             f"/v1/listings/{listing_id}/reinstate",
             json.dumps({"owner_token": self.token}).encode(),
         )
+        self.assertEqual(status, 403, payload)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-tok"}):
+            status, payload = _call_http(
+                self.app, "POST", f"/v1/listings/{listing_id}/reinstate",
+                json.dumps({"admin_token": "admin-tok"}).encode(),
+            )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["listing"]["publication_state"], "ACTIVE")
 

@@ -211,7 +211,7 @@ class MerchantsApiTest(unittest.TestCase):
             **PRODUCT_PAYLOAD,
             "merchant_id": merchant_id,
             "owner_agent_id": agent_id,
-            "owner_token": token,
+            **({"admin_token": token} if token == ADMIN_TOKEN else {"owner_token": token}),
         }
         status, _ = _call_http(
             self.app, "POST", "/v1/listings/publish", json.dumps(publish_body).encode()
@@ -358,11 +358,11 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertIn("token_prefix", details)
         self.assertNotIn(issued["token"], json.dumps(details, ensure_ascii=False))
 
-    def test_approve_token_works_for_register_and_publish(self) -> None:
+    def test_approved_token_cannot_replace_runtime_binding_for_listing(self) -> None:
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         self.assertEqual(self._register(issued["merchant_id"], issued["token"]), 200)
-        self.assertEqual(self._publish(issued["merchant_id"], issued["token"]), 200)
+        self.assertEqual(self._publish(issued["merchant_id"], issued["token"]), 403)
 
     # ── reject ─────────────────────────────────────────────────────────────
 
@@ -392,7 +392,7 @@ class MerchantsApiTest(unittest.TestCase):
         _, issued = self._approve(applied["application_id"])
         old_token = issued["token"]
         mid = issued["merchant_id"]
-        self.assertEqual(self._publish(mid, old_token), 200)
+        self.assertEqual(self._publish(mid, old_token), 403)
 
         status, rotated = _call_http(
             self.app,
@@ -404,8 +404,8 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertNotEqual(rotated["token"], old_token)
         # 旧 token 失效
         self.assertEqual(self._publish(mid, old_token), 403)
-        # 新 token 生效
-        self.assertEqual(self._publish(mid, rotated["token"]), 200)
+        # 新 token 可用于旧账号能力，但不能代替 Runtime 绑定发布商品。
+        self.assertEqual(self._publish(mid, rotated["token"]), 403)
 
     def test_rotate_requires_admin(self) -> None:
         _, applied = self._apply()
@@ -421,7 +421,7 @@ class MerchantsApiTest(unittest.TestCase):
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         mid, token = issued["merchant_id"], issued["token"]
-        self.assertEqual(self._publish(mid, token), 200)
+        self.assertEqual(self._publish(mid, token), 403)
 
         status, payload = _call_http(
             self.app,
@@ -479,7 +479,9 @@ class MerchantsApiTest(unittest.TestCase):
         # 1) 无 token 记录的存量商户：HMAC 派生 token 仍可用（fallback 保留）
         legacy = "legacy-merchant"
         legacy_agent = _register_with_domain(legacy, owner_token(legacy), "legacy.example")
-        self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 200)
+        self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 403)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"}):
+            self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 200)
 
         # 2) 进入 token 体系（apply+approve 签发随机 token）后：HMAC 派生
         #    token 立即失效——凭证以 active 随机 token 为唯一权威
@@ -487,7 +489,7 @@ class MerchantsApiTest(unittest.TestCase):
         _, issued = self._approve(applied["application_id"])
         mid, random_token = issued["merchant_id"], issued["token"]
         mid_agent = _register_with_domain(mid, random_token, "onboarded.example")
-        self.assertEqual(_publish_with(mid, random_token, mid_agent), 200)
+        self.assertEqual(_publish_with(mid, random_token, mid_agent), 403)
         self.assertEqual(_publish_with(mid, owner_token(mid), mid_agent), 403)
 
         # 3) admin 吊销后：随机 token 与 HMAC 派生 token 双双失效
@@ -507,7 +509,7 @@ class MerchantsApiTest(unittest.TestCase):
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         self._register(issued["merchant_id"], issued["token"])
-        self._publish(issued["merchant_id"], issued["token"])
+        self._publish(issued["merchant_id"], ADMIN_TOKEN)
 
         status, payload = _call_http(
             self.app, "GET", "/v1/merchants/self?owner_token=" + issued["token"]
@@ -572,7 +574,9 @@ class MerchantsApiTest(unittest.TestCase):
         mid = "mrc_legacy"
         token = owner_token(mid)
         self.assertEqual(self._register(mid, token), 200)
-        self.assertEqual(self._publish(mid, token), 200)
+        self.assertEqual(self._publish(mid, token), 403)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"}):
+            self.assertEqual(self._publish(mid, token), 200)
         # self 自查对 HMAC 商家仍 403（token 不在 merchant_tokens 表——设计如此：
         # 自查只认落库随机 token）
         status, _ = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=" + token)[:2]
@@ -589,18 +593,14 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertIn("Kiwi", payload.get("_raw", ""))
 
     def test_portal_home_shows_readonly_merchant_id(self) -> None:
-        """Token 申请（D7 一个按钮）：只读商家 ID/名称 + 未分配时灰化并引导注册。"""
+        """商家入口展示自动开通的商品名额。"""
         status, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
         self.assertEqual(status, 200, payload)
-        self.assertIn('id="t_merchant_id" readonly', raw)
+        self.assertIn("商品名额", raw)
         self.assertIn("r.merchant_id", raw)
-        self.assertIn("尚未分配商家 ID", raw)
-        self.assertIn("/portal/register", raw)
-        # 商家名称只读（基本信息页修改）；申请收成一个按钮，无域名输入框
-        self.assertIn('id="t_name" readonly', raw)
         self.assertIn("基本信息", raw)
-        self.assertIn("申请目录令牌", raw)
+        self.assertNotIn("申请目录令牌", raw)
         self.assertNotIn("t_domain", raw)
         self.assertNotIn("店铺域名", raw)
         self.assertNotIn("商家域名", raw)

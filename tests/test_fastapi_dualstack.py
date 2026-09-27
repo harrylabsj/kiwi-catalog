@@ -38,6 +38,9 @@ def _has_fastapi() -> bool:
 @unittest.skipUnless(_has_fastapi(), "fastapi not installed")
 class FastApiDualStackTest(unittest.TestCase):
     def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.db_file = Path(self.tmp.name) / "catalog.sqlite"
         self.app = app_module.create_catalog_app(self.db_file)
