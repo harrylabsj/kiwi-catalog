@@ -25,6 +25,7 @@ under ``python3 -m unittest discover`` in a no-fastapi environment.
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -71,14 +72,9 @@ def test_route_table_covers_expected_route_groups() -> None:
         "/v1/listings/{listing_id}/withdraw",
         "/v1/merchants/applications",
         "/v1/merchants/self",
-        "/v1/merchants/{merchant_id}/rotate",
         "/v1/accounts/register",
         "/v1/accounts/login",
         "/v1/accounts/me",
-        "/v1/admin/dashboard",
-        "/v1/admin/merchants/{merchant_id}/report",
-        "/v1/admin/access-log",
-        "/v1/admin/access-insights",
         "/portal",
         "/portal/apply",
         "/portal/account",
@@ -96,12 +92,6 @@ def test_static_paths_precede_parameter_siblings() -> None:
     )
     assert _path_index("/v1/agents/search") < _path_index("/v1/agents/{catalog_agent_id}")
     assert _path_index("/v1/listings/search") < _path_index("/v1/listings/{listing_id}")
-    assert _path_index("/v1/merchants/applications") < _path_index(
-        "/v1/merchants/{merchant_id}/rotate"
-    )
-    assert _path_index("/v1/merchants/applications") < _path_index(
-        "/v1/merchants/{merchant_id}/revoke"
-    )
 
 
 def test_route_methods_are_pinned() -> None:
@@ -109,13 +99,13 @@ def test_route_methods_are_pinned() -> None:
     assert by_path["/health"].methods == {"GET"}
     assert by_path["/v1/agents/register"].methods == {"POST"}
     assert by_path["/v1/listings/search"].methods == {"GET"}
-    # /v1/merchants/applications 拆成 POST 与 GET 两条 RouteEntry（方法不同）
+    # /v1/merchants/applications 只剩会话鉴权的 POST（GET 审核列表移私有仓）
     applications = [
         entry.methods
         for entry in _ROUTE_TABLE
         if entry.path_template == "/v1/merchants/applications"
     ]
-    assert applications == [{"POST"}, {"GET"}]
+    assert applications == [{"POST"}]
 
 
 def test_resolve_route_known_path_and_method() -> None:
@@ -166,3 +156,32 @@ def test_route_entry_is_frozen() -> None:
     entry = RouteEntry({"GET"}, "/x", lambda **kw: None)
     with pytest.raises(FrozenInstanceError):
         entry.path_template = "/y"  # type: ignore[misc]
+
+
+def test_admin_surface_absent_from_open_source_package() -> None:
+    """负向守卫：运营/审核后台已移至私有扩展 kiwi-catalog-admin
+    （docs/extensions.md），开源包不得再出现其路由或代码痕迹。"""
+    # 1) 路由表：无 /v1/admin/*、无后台页面路径
+    paths = {entry.path_template for entry in _ROUTE_TABLE}
+    forbidden_prefixes = ("/v1/admin",)
+    forbidden_paths = {
+        "/portal/admin",
+        "/portal/admin/searches",
+        "/portal/admin/buyer-stats",
+        "/portal/dashboard",
+        "/portal/merchant/{merchant_id}",
+        "/portal/day/{day}",
+    }
+    leaked = {p for p in paths if p.startswith(forbidden_prefixes) or p in forbidden_paths}
+    assert leaked == set(), f"admin 路由回流开源仓: {leaked}"
+
+    # 2) handlers：无 admin handler 模块、无 admin_reports 引用
+    handlers_dir = Path(__file__).resolve().parent.parent / "kiwi_catalog" / "api" / "handlers"
+    assert not (handlers_dir / "admin.py").exists(), "handlers/admin.py 不应在开源仓"
+    for path in handlers_dir.glob("*.py"):
+        assert "admin_reports" not in path.read_text(encoding="utf-8"), path
+
+    # 3) 门户页：无 admin 面板 JS（localStorage key 不回流）
+    portal_src = (handlers_dir / "portal.py").read_text(encoding="utf-8")
+    assert "ADMIN_TOKEN_KEY" not in portal_src
+    assert "kiwi_admin_token" not in portal_src

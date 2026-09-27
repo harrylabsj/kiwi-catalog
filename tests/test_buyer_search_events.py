@@ -16,22 +16,18 @@
 
 - 服务层：record_search_event / list_recent_search_events（往返 + 有界保留）；
 - 搜索 handler：search_agent_catalog / v1_search_agents / v1_search_listings 埋点；
-- admin API：search_events 需 admin token，返回最近事件；
-- portal 页：portal_admin_searches 在开关开启时返回 HTML。
+- admin 查询端点/后台页已移至私有扩展 kiwi-catalog-admin；本文件只测
+  埋点写入与派生服务。
 """
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
-from kiwi_catalog.api.handlers.portal import portal_admin_searches
-from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services import buyer_search_events
 
@@ -221,30 +217,6 @@ class BuyerSearchEventsHandlersTest(unittest.TestCase):
         self.assertEqual(events[0]["search_type"], "listing")
 
 
-class BuyerSearchEventsAdminTest(unittest.TestCase):
-    def setUp(self) -> None:
-        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = "test-admin"
-        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
-
-    def test_admin_searches_requires_token_and_returns_events(self) -> None:
-        db = _make_db()
-        conn = open_connection(db)
-        buyer_search_events.record_search_event(conn, search_type="listing", query="咖啡")
-        conn.commit()
-        conn.close()
-        with self.assertRaises(AuthError):
-            admin_handlers.search_events(db, {}, {})
-        res = admin_handlers.search_events(db, {"_auth_token": "test-admin"}, {})
-        self.assertTrue(res["ok"])
-        self.assertEqual(len(res["results"]), 1)
-        self.assertEqual(res["results"][0]["query"], "咖啡")
-
-    def test_portal_searches_page(self) -> None:
-        os.environ["KIWI_CATALOG_PORTAL_ADMIN_ENABLED"] = "1"
-        self.addCleanup(os.environ.pop, "KIWI_CATALOG_PORTAL_ADMIN_ENABLED", None)
-        page = portal_admin_searches()
-        self.assertIn("__html__", page)
-        self.assertIn("买家搜索事件", page["__html__"])
 
 
 if __name__ == "__main__":

@@ -503,25 +503,17 @@ class AccessLogMiddlewareFallbackTest(unittest.TestCase):
         status, _ = _call_http(
             self.app,
             "POST",
-            "/v1/merchants/mkt_1/rotate",
+            "/v1/listings/publish",
             body=b"{}",
             headers={"Authorization": "Bearer mkt-tok-1"},
         )
-        # 非 admin 商家写端点 → fail-closed 403；访问日志仍记录（actor=merchant）
-        self.assertEqual(status, 403)
+        # 商家写端点：空 body 先触发 400 校验（校验先于鉴权）；访问日志仍记录
+        # 中间件按路径+方法分类（actor=merchant），与最终状态码无关
+        self.assertEqual(status, 400)
         rows = self._rows(surface=access_log.SURFACE_MERCHANT_WRITE)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["actor_kind"], access_log.ACTOR_MERCHANT)
         self.assertEqual(rows[0]["actor_key"], hashlib.sha256(b"mkt-tok-1").hexdigest()[:12])
-
-    def test_admin_endpoint_with_token_is_admin(self) -> None:
-        _call_http(
-            self.app, "GET", "/v1/admin/dashboard",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        rows = self._rows(surface=access_log.SURFACE_ADMIN)
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["actor_kind"], access_log.ACTOR_ADMIN)
 
     def test_query_summary_scrubs_credentials_on_wire(self) -> None:
         _call_http(
@@ -690,179 +682,6 @@ class AccessLogMiddlewareFastApiTest(unittest.TestCase):
 # ── admin 端点 GET /v1/admin/access-log ────────────────────────────────────
 
 
-class AccessLogAdminTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.db_path = os.path.join(self.tmp.name, "catalog.sqlite")
-        env_patch = mock.patch.dict(
-            os.environ,
-            {"KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN, "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
-            clear=False,
-        )
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
-        self.addCleanup(self.tmp.cleanup)
-        self.app = create_catalog_app(self.db_path)
-
-    def _seed(self, rows: list[tuple[str, str]]) -> None:
-        conn = open_connection(self.db_path)
-        for surface, actor in rows:
-            access_log.record_access(
-                conn, method="GET", path="/seed", surface=surface, actor_kind=actor
-            )
-        conn.commit()
-        conn.close()
-
-    def test_requires_admin_token(self) -> None:
-        status, payload = _call_http(self.app, "GET", "/v1/admin/access-log")
-        self.assertEqual(status, 403, payload)
-        self.assertIn("admin token", payload.get("error", ""))
-
-    def test_returns_rows_time_desc_with_surface_filter(self) -> None:
-        self._seed(
-            [
-                (access_log.SURFACE_BUYER_SEARCH, access_log.ACTOR_ANONYMOUS),
-                (access_log.SURFACE_BUYER_DETAIL, access_log.ACTOR_ANONYMOUS),
-                (access_log.SURFACE_MERCHANT_WRITE, access_log.ACTOR_MERCHANT),
-            ]
-        )
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 3)
-        # 时间倒序：最近的在最前（同刻按 id 倒序保证稳定）
-        surfaces = [r["surface"] for r in payload["results"]]
-        self.assertEqual(
-            surfaces,
-            [
-                access_log.SURFACE_MERCHANT_WRITE,
-                access_log.SURFACE_BUYER_DETAIL,
-                access_log.SURFACE_BUYER_SEARCH,
-            ],
-        )
-        # surface 过滤
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log?surface=buyer_search",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(len(payload["results"]), 1)
-        self.assertEqual(payload["results"][0]["surface"], access_log.SURFACE_BUYER_SEARCH)
-
-    def test_limit_and_days_clamped(self) -> None:
-        # surface 过滤隔离种子行——admin 访问日志请求自身也会落一行（surface=admin）
-        self._seed([(access_log.SURFACE_BUYER_DETAIL, access_log.ACTOR_ANONYMOUS)] * 5)
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log?surface=buyer_detail&limit=2",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 2)
-        # limit 超上限钳制到 500（不报错）
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log?surface=buyer_detail&limit=9999",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 5)
-        # days=0 钳制到最小 1；全部 5 行都是今天 → 返回
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log?surface=buyer_detail&days=0",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 5)
-
-    def test_response_contains_no_credentials(self) -> None:
-        # 带 Bearer token 的搜索请求 → access_log 记录 actor_key（哈希），无原文
-        _call_http(
-            self.app,
-            "GET",
-            "/v1/agents/search",
-            headers={"Authorization": "Bearer super-secret-token"},
-        )
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-log",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 1)
-        raw = json.dumps(payload)
-        self.assertNotIn("super-secret-token", raw)
-        self.assertEqual(
-            payload["results"][0]["actor_key"],
-            hashlib.sha256(b"super-secret-token").hexdigest()[:12],
-        )
-
-    def test_access_insights_requires_admin_token(self) -> None:
-        status, payload = _call_http(self.app, "GET", "/v1/admin/access-insights")
-        self.assertEqual(status, 403, payload)
-        self.assertIn("admin token", payload.get("error", ""))
-
-    def test_access_insights_returns_funnel_and_login_failure_signal(self) -> None:
-        conn = open_connection(self.db_path)
-        for _ in range(2):
-            access_log.record_access(
-                conn,
-                method="GET",
-                path="/v1/agents/search",
-                surface=access_log.SURFACE_BUYER_SEARCH,
-                actor_kind=access_log.ACTOR_ANONYMOUS,
-                status=200,
-            )
-        access_log.record_access(
-            conn,
-            method="GET",
-            path="/v1/agents/cagt_1",
-            surface=access_log.SURFACE_BUYER_DETAIL,
-            actor_kind=access_log.ACTOR_ANONYMOUS,
-            target_id="cagt_1",
-            status=200,
-        )
-        access_log.record_access(
-            conn,
-            method="POST",
-            path="/v1/accounts/login",
-            surface=access_log.SURFACE_ACCOUNT_PORTAL,
-            actor_kind=access_log.ACTOR_ANONYMOUS,
-            ip_prefix="203.0.113.0",
-            status=401,
-        )
-        conn.commit()
-        conn.close()
-
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/admin/access-insights?days=7",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-
-        self.assertEqual(status, 200, payload)
-        self.assertTrue(payload["ok"])
-        self.assertEqual(payload["days"], 7)
-        self.assertEqual(payload["funnel"]["total_searches"], 2)
-        self.assertEqual(payload["funnel"]["total_detail_views"], 1)
-        self.assertEqual(payload["funnel"]["conversion"], 0.5)
-        self.assertEqual(payload["top_viewed_agents"][0]["target_id"], "cagt_1")
-        self.assertEqual(payload["login_failures"]["today"], 1)
-        self.assertEqual(
-            payload["login_failures"]["by_ip_prefix"][0],
-            {"ip_prefix": "203.0.113.0", "failures": 1},
-        )
 
 
 if __name__ == "__main__":

@@ -141,14 +141,13 @@ class AccountsApiTest(unittest.TestCase):
         return set_cookie.split(";")[0].split("=", 1)[1], code
 
     def _approve_application_by_id(self, app_id: int) -> dict:
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        return payload
+        # HTTP 审核端点已移私有仓；service 层与本地 CLI 同一实现
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            issued = tokens_service.approve_application(conn, app_id)
+        return {"ok": True, **issued}
 
     def _request_token(self, session: str) -> None:
         """用商家信息申请令牌（建工单）。"""
@@ -164,6 +163,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def _approve_first_application(self) -> dict:
         from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
 
         with db_session(self.db_path) as conn:
             row = conn.execute(
@@ -171,14 +171,9 @@ class AccountsApiTest(unittest.TestCase):
                 " order by application_id limit 1"
             ).fetchone()
         app_id = row["application_id"]
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        return payload
+        with db_session(self.db_path) as conn:
+            issued = tokens_service.approve_application(conn, app_id)
+        return {"ok": True, **issued}
 
     # ── 注册 ───────────────────────────────────────────────────────────────
 
@@ -645,13 +640,11 @@ class AccountsApiTest(unittest.TestCase):
             app_id = conn.execute(
                 "select application_id from merchant_applications order by application_id limit 1"
             ).fetchone()["application_id"]
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/reject",
-            json.dumps({"admin_token": ADMIN_TOKEN, "review_note": "domain unverifiable"}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            tokens_service.reject_application(conn, app_id, "domain unverifiable")
         # 重新申请 → 新 pending 工单（非 409）
         status, payload, _ = _call_http(
             self.app,
@@ -694,14 +687,12 @@ class AccountsApiTest(unittest.TestCase):
         merchant_id = first["merchant_id"]
         self.assertTrue(merchant_id.startswith("mkt_"))
 
-        # 吊销（token 失效，merchant_id 保留）
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{merchant_id}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
+        # 吊销（token 失效，merchant_id 保留）——service 层（与 CLI 同一实现）
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            tokens_service.revoke_token(conn, merchant_id)
 
         # 重新申请 → 批准 → 同一 merchant_id（复用而非新建）
         status, payload, _ = _call_http(

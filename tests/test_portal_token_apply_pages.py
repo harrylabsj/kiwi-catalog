@@ -17,37 +17,24 @@
 覆盖：
 - /portal（portal_home）与 /portal/apply（同内容）及 /portal/account（「我的」）：
   申请区没有任何非只读 input，只有按钮「申请目录令牌」；
-- 四态分支关键文案/按钮存在：无令牌无工单（按钮可点）、pending（申请审核中）、
-  active（token-box + 复制令牌）、被拒（review_note 理由 + 重新申请）；
-- 点击直接 postJson('/v1/accounts/token-request', {})，不再带 domain；
-- dashboard 待审列表 domain 空值显示「（未填）」。
+- 点击直接 postJson('/v1/accounts/token-request', {})，不再带 domain。
+（dashboard 待审列表渲染断言随运营后台移至私有仓 kiwi-catalog-admin。）
 """
 
 from __future__ import annotations
 
-import os
 import re
 import unittest
-from unittest import mock
 
 from kiwi_catalog.api.handlers.portal import (
     portal_account,
     portal_apply,
-    portal_dashboard,
     portal_home,
 )
 
-_ENABLED = {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}
-
-
-def _inputs(html: str) -> list[str]:
-    return re.findall(r"<input[^>]*>", html)
-
 
 def _page_inputs(html: str) -> list[str]:
-    # _PORTAL_JS 共享脚本里的 admin token 轮换模板（admin_new_token）是 JS 字符串，
-    # 只在 admin 页挂载，不属于本页 markup——排除后再看页面自身的 input。
-    return [t for t in _inputs(html) if "admin_new_token" not in t]
+    return re.findall(r"<input[^>]*>", html)
 
 
 class TokenApplyPageTest(unittest.TestCase):
@@ -72,11 +59,6 @@ class TokenApplyPageTest(unittest.TestCase):
         account_html = self._html(portal_account)
         self.assertIn("商品名额", account_html)
         self.assertNotIn("申请目录令牌", account_html)
-
-    def test_dashboard_pending_list_placeholder_for_empty_domain(self) -> None:
-        with mock.patch.dict(os.environ, _ENABLED, clear=False):
-            html = self._html(portal_dashboard)
-        self.assertIn("a.domain || '(未填)'", html)
 
 
 if __name__ == "__main__":

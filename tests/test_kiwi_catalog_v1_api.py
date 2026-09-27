@@ -598,13 +598,12 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, applied)
         app_id = applied["application_id"]
-        status, issued = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": "test-admin"}).encode(),
-        )
-        self.assertEqual(status, 200, issued)
+        # HTTP 审核端点已移私有仓；service 层与本地 CLI 同一实现
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            issued = {"ok": True, **tokens_service.approve_application(conn, app_id)}
         self.assertTrue(issued["merchant_id"].startswith("mkt_"))
         return issued["merchant_id"], issued["token"]
 

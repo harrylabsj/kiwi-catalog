@@ -12,19 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Merchant token 分发 API（docs/kiwi-catalog-token-portal-design-v0.1 §4）。
+"""Merchant token 自查 API（docs/kiwi-catalog-token-portal-design-v0.1 §4）。
 
-6 条路由：applications 列表（admin）/ approve（admin 签发，明文 token 仅此
-一次）/ reject（admin）；merchant token rotate / revoke（admin）；
-/v1/merchants/self 自查（token 即身份）。
+/v1/merchants/self 自查（token 即身份）。申请提交
+（POST /v1/merchants/applications）2026-08-12 起为会话鉴权——匿名公开通道
+被滥用（假邮箱直接提交工单）关闭，路由指向 accounts handlers 的
+token_request（与 /v1/accounts/token-request 同一处理函数），本模块不承载
+提交逻辑。
 
-申请提交（POST /v1/merchants/applications）2026-08-12 起改为会话鉴权——
-匿名公开通道被滥用（假邮箱直接提交工单），路由改指向 accounts handlers 的
-token_request（与 /v1/accounts/token-request 同一处理函数），本模块不再
-承载提交逻辑。
+admin 审核/签发端点（applications 列表、approve/reject、token rotate/
+revoke）已移至私有扩展 kiwi-catalog-admin（docs/extensions.md）；本地运营
+走 CLI（与 services/merchant_tokens.py 直连，见 cli_merchant_commands.py）。
 
 薄封装：admin 校验（fail-closed，无默认 token 未配置即拒绝）+ 响应组织；
-核心数据操作在 services/merchant_tokens.py（本地 CLI 直连同一 service）。
+核心数据操作在 services/merchant_tokens.py。
 明文 token 永不落库、不进审计（审计只记 merchant_id + token_prefix 指纹）。
 """
 
@@ -35,99 +36,10 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api import auth as api_auth
-from kiwi_catalog.core.errors import AuthError, ValidationError
+from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import merchant_tokens as tokens_service
 from kiwi_catalog.services import usage_metrics
-from kiwi_catalog.services.merchant_tokens import APPLICATION_STATUSES
-
-
-def list_applications(
-    db_path: str | Path, payload: dict[str, Any], query: dict[str, Any]
-) -> dict[str, Any]:
-    """GET /v1/merchants/applications?status=…（admin）。
-
-    供门户后台渲染待审列表；status 过滤可选，不传返回全部（倒序）。
-    admin token 只经 Authorization header（KC-SEC-02：凭据不得进 query——
-    会落入访问日志/浏览器历史；fallback 栈已合并 header 为 _auth_token）。
-    """
-    api_auth.require_admin_token(payload, db_path)
-    status = str(query.get("status") or "").strip()
-    if status and status not in APPLICATION_STATUSES:
-        raise ValidationError(f"status must be one of {APPLICATION_STATUSES}")
-    limit = min(int(query.get("limit") or "50"), 100)
-    with db_session(db_path) as conn:
-        results = tokens_service.list_applications(conn, status=status, limit=limit)
-        return {"ok": True, "results": results}
-
-
-def approve_application(
-    db_path: str | Path, application_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """POST /v1/merchants/applications/{id}/approve（admin 签发）。
-
-    原子完成见 services.merchant_tokens.approve_application；响应含明文
-    token —— 仅此一次。重复 approve → 409（ConflictError）。
-    """
-    api_auth.require_admin_token(payload, db_path)
-    try:
-        app_id = int(str(application_id).strip())
-    except ValueError as exc:
-        raise ValidationError("application_id must be an integer") from exc
-    with db_session(db_path) as conn:
-        issued = tokens_service.approve_application(conn, app_id)
-        return {"ok": True, **issued}
-
-
-def reject_application(
-    db_path: str | Path, application_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """POST /v1/merchants/applications/{id}/reject（admin）。"""
-    api_auth.require_admin_token(payload, db_path)
-    try:
-        app_id = int(str(application_id).strip())
-    except ValueError as exc:
-        raise ValidationError("application_id must be an integer") from exc
-    review_note = str(payload.get("review_note") or "").strip()
-    if len(review_note) > 2000:
-        raise ValidationError("review_note exceeds size limit")
-    with db_session(db_path) as conn:
-        tokens_service.reject_application(conn, app_id, review_note)
-        return {"ok": True, "application_id": app_id, "status": "rejected"}
-
-
-def rotate_token(
-    db_path: str | Path, merchant_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """POST /v1/merchants/{merchant_id}/rotate（admin）。
-
-    新随机 token 覆盖（旧 hash 作废），明文 token 仅此一次。故意走 admin
-    （泄露场景下旧 token 可能在攻击者手里，自助轮换 = 攻击者也能轮换）。
-    """
-    api_auth.require_admin_token(payload, db_path)
-    merchant_id = str(merchant_id).strip()
-    if not merchant_id:
-        raise ValidationError("merchant_id is required")
-    with db_session(db_path) as conn:
-        rotated = tokens_service.rotate_token(conn, merchant_id)
-        return {"ok": True, **rotated}
-
-
-def revoke_token(
-    db_path: str | Path, merchant_id: str, payload: dict[str, Any]
-) -> dict[str, Any]:
-    """POST /v1/merchants/{merchant_id}/revoke（admin）。
-
-    active 行置 revoked；之后所有带该 token 的写请求 fail-closed。已
-    revoked 重复吊销幂等返回 ok（不报错）。
-    """
-    api_auth.require_admin_token(payload, db_path)
-    merchant_id = str(merchant_id).strip()
-    if not merchant_id:
-        raise ValidationError("merchant_id is required")
-    with db_session(db_path) as conn:
-        token_status = tokens_service.revoke_token(conn, merchant_id)
-        return {"ok": True, "merchant_id": merchant_id, "token_status": token_status}
 
 
 def self_status(

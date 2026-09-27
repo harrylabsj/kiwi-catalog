@@ -38,15 +38,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_handlers
 from kiwi_catalog.api.handlers import listings as listings_handlers
-from kiwi_catalog.api.handlers.portal import portal_admin_buyer_stats, portal_dashboard
-from kiwi_catalog.core.errors import AuthError
 from kiwi_catalog.db.session import now_iso, open_connection
 from kiwi_catalog.services import buyer_stats, usage_metrics
 
-ADMIN_TOKEN = "test-admin"
 AGENT = usage_metrics.METRIC_BUYER_AGENT_SEARCH
 LISTING = usage_metrics.METRIC_BUYER_LISTING_SEARCH
 
@@ -362,53 +358,6 @@ class BuyerStatsHandlersTest(unittest.TestCase):
         self.assertEqual(series[-1]["distinct_buyers"][AGENT], 0)
 
 
-class BuyerStatsAdminTest(unittest.TestCase):
-    def setUp(self) -> None:
-        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = ADMIN_TOKEN
-        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
-
-    def test_requires_admin_token(self) -> None:
-        db = _make_db()
-        with self.assertRaises(AuthError):
-            admin_handlers.buyer_stats(db, {}, {})
-
-    def test_response_shape_and_unidentified_derivation(self) -> None:
-        db = _make_db()
-        conn = open_connection(db)
-        # 买家 b1 搜 agent ×2、匿名搜 agent ×1、买家 b2 搜 listing ×1
-        buyer_stats.record_buyer_search(conn, AGENT, "b1")
-        buyer_stats.record_buyer_search(conn, AGENT, "b1")
-        buyer_stats.record_buyer_search(conn, LISTING, "b2")
-        usage_metrics.record_usage(conn, AGENT)
-        usage_metrics.record_usage(conn, AGENT)
-        usage_metrics.record_usage(conn, AGENT)
-        usage_metrics.record_usage(conn, LISTING)
-        conn.commit()
-        conn.close()
-
-        res = admin_handlers.buyer_stats(db, {"_auth_token": ADMIN_TOKEN}, {})
-        self.assertTrue(res["ok"])
-        self.assertEqual(res["days"], 14)
-        self.assertEqual(len(res["series"]), 14)
-        today = res["today"]
-        self.assertEqual(today["day"], _today())
-        self.assertEqual(today["distinct_buyers"], {AGENT: 1, LISTING: 1})
-        self.assertEqual(today["identified_events"], {AGENT: 2, LISTING: 1})
-        self.assertEqual(today["total_events"], {AGENT: 3, LISTING: 1})
-        self.assertEqual(today["unidentified_events"], {AGENT: 1, LISTING: 0})
-        self.assertEqual(res["series"][-1], today)
-
-    def test_days_query_validation(self) -> None:
-        from kiwi_catalog.core.errors import ValidationError
-
-        db = _make_db()
-        with self.assertRaises(ValidationError):
-            admin_handlers.buyer_stats(db, {"_auth_token": ADMIN_TOKEN}, {"days": "abc"})
-        res = admin_handlers.buyer_stats(db, {"_auth_token": ADMIN_TOKEN}, {"days": "7"})
-        self.assertEqual(res["days"], 7)
-        self.assertEqual(len(res["series"]), 7)
-
-
 class BuyerStatsHttpTest(unittest.TestCase):
     """端到端（ASGI 双栈共用路由表）：X-Buyer-Id / Authorization 头经 transport
     合并进 payload，搜索埋点见到买家身份。"""
@@ -418,11 +367,6 @@ class BuyerStatsHttpTest(unittest.TestCase):
 
         self.tmp = tempfile.mkdtemp()
         self.db_path = os.path.join(self.tmp, "catalog.sqlite")
-        env_patch = mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN}, clear=False
-        )
-        env_patch.start()
-        self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
     def _get(
@@ -463,7 +407,7 @@ class BuyerStatsHttpTest(unittest.TestCase):
         }
         return start.get("status", 500), payload, headers
 
-    def test_search_with_buyer_id_header_then_admin_stats(self) -> None:
+    def test_search_with_buyer_id_header_records_buyers(self) -> None:
         # 买家 b1（X-Buyer-Id）搜 agent ×2、搜 listing ×1；匿名搜 listing ×1
         for _ in range(2):
             status, _, _ = self._get("/v1/agents/search?q=x", headers={"X-Buyer-Id": "b1"})
@@ -473,35 +417,30 @@ class BuyerStatsHttpTest(unittest.TestCase):
         # legacy 搜索面同样埋点
         self._get("/v1/agent-catalog/agents/search?q=z", headers={"X-Buyer-Id": "b2"})
 
-        status, res, _ = self._get(
-            "/v1/admin/buyer-stats?days=1",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, res)
-        today = res["today"]
+        from kiwi_catalog.db.session import open_connection as _open
+
+        conn = _open(self.db_path)
+        today = buyer_stats.buyer_daily_series(conn, days=1)[-1]
+        usage = usage_metrics.usage_series(conn, days=1)[-1]["counts"]
+        conn.close()
         # b1 × agent + b2 × legacy agent → 2 个去重买家 / 3 个已识别事件
         self.assertEqual(today["distinct_buyers"][AGENT], 2)
         self.assertEqual(today["identified_events"][AGENT], 3)
-        self.assertEqual(today["total_events"][AGENT], 3)
-        self.assertEqual(today["unidentified_events"][AGENT], 0)
-        # listing：b1 已识别 1 + 匿名 1 → distinct 1 / 未识别 1
+        self.assertEqual(usage[AGENT], 3)
+        # listing：b1 已识别 1 + 匿名 1 → distinct 1 / 总量 2
         self.assertEqual(today["distinct_buyers"][LISTING], 1)
         self.assertEqual(today["identified_events"][LISTING], 1)
-        self.assertEqual(today["total_events"][LISTING], 2)
-        self.assertEqual(today["unidentified_events"][LISTING], 1)
+        self.assertEqual(usage[LISTING], 2)
 
-    def test_admin_buyer_stats_requires_token_over_http(self) -> None:
-        status, payload, _ = self._get("/v1/admin/buyer-stats")
-        self.assertEqual(status, 403, payload)
 
     def test_bearer_token_counts_as_identity(self) -> None:
         self._get("/v1/agents/search?q=x", headers={"Authorization": "Bearer buyer-tok-9"})
-        status, res, _ = self._get(
-            "/v1/admin/buyer-stats?days=1",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, res)
-        self.assertEqual(res["today"]["distinct_buyers"][AGENT], 1)
+        from kiwi_catalog.db.session import open_connection as _open
+
+        conn = _open(self.db_path)
+        today = buyer_stats.buyer_daily_series(conn, days=1)[-1]
+        conn.close()
+        self.assertEqual(today["distinct_buyers"][AGENT], 1)
 
     def test_fallback_stack_merges_buyer_id_header(self) -> None:
         """fallback ASGI 栈（无 FastAPI 部署形态）同样合并 X-Buyer-Id。"""
@@ -509,81 +448,12 @@ class BuyerStatsHttpTest(unittest.TestCase):
 
         self.app = MarketplaceASGIApp(self.db_path)
         self._get("/v1/listings/search?q=x", headers={"X-Buyer-Id": "fb-buyer"})
-        status, res, _ = self._get(
-            "/v1/admin/buyer-stats?days=1",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )
-        self.assertEqual(status, 200, res)
-        self.assertEqual(res["today"]["distinct_buyers"][LISTING], 1)
+        from kiwi_catalog.db.session import open_connection as _open
 
-    def test_old_buyer_stats_page_redirects_to_dashboard(self) -> None:
-        """/portal/admin/buyer-stats 已并入 dashboard：开启时双栈 302 + Location。"""
-        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
-
-        with mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
-        ):
-            # FastAPI 栈（create_catalog_app 默认）
-            status, _, headers = self._get("/portal/admin/buyer-stats")
-            self.assertEqual(status, 302)
-            self.assertEqual(headers.get("location"), "/portal/dashboard")
-            # fallback 栈
-            self.app = MarketplaceASGIApp(self.db_path)
-            status, _, headers = self._get("/portal/admin/buyer-stats")
-            self.assertEqual(status, 302)
-            self.assertEqual(headers.get("location"), "/portal/dashboard")
-
-    def test_old_buyer_stats_page_hidden_by_default_over_http(self) -> None:
-        status, _, _ = self._get("/portal/admin/buyer-stats")
-        self.assertEqual(status, 404)
-
-
-class BuyerStatsPortalTest(unittest.TestCase):
-    def test_page_hidden_by_default(self) -> None:
-        env = {k: v for k, v in os.environ.items() if k != "KIWI_CATALOG_PORTAL_ADMIN_ENABLED"}
-        with mock.patch.dict(os.environ, env, clear=True):
-            page = portal_admin_buyer_stats()
-            self.assertEqual(page.get("__status__"), 404)
-
-    def test_page_enabled_redirects_to_dashboard(self) -> None:
-        """独立买家统计页已并入 /portal/dashboard（2026-08-22）：开启时 302 跳转。"""
-        with mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
-        ):
-            page = portal_admin_buyer_stats()
-            self.assertEqual(page, {"__redirect__": "/portal/dashboard"})
-
-    def test_dashboard_renders_merged_buyer_sections(self) -> None:
-        """合并后的运营 Dashboard 含买家搜索统计区块（KPI/柱状图/明细/关键词表）。"""
-        with mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
-        ):
-            page = portal_dashboard()
-            html = page["__html__"]
-            self.assertIn("运营 Dashboard", html)
-            self.assertIn("买家搜索统计", html)
-            self.assertIn("热门搜索关键词", html)
-            self.assertIn("未命中关键词", html)
-            self.assertIn("供需缺口", html)
-            self.assertIn("/v1/admin/buyer-stats", html)
-            self.assertIn("buyer_kpis", html)
-            # 关键词表：每关键词一行 + 类型分布窄列（找商家 N · 找商品 M）
-            self.assertIn("类型分布", html)
-            self.assertIn("找商家", html)
-            self.assertIn("找商品", html)
-            # 访问洞察区块（access_log v28：漏斗/热度榜/登录失败）并入 dashboard
-            self.assertIn("访问洞察", html)
-            self.assertIn("搜索→查看漏斗", html)
-            self.assertIn("funnel_kpis", html)
-            self.assertIn("funnel_usage", html)
-            self.assertIn("top_viewed", html)
-            self.assertIn("login_failures", html)
-            self.assertIn("renderAccessInsights", html)
-            self.assertIn("/v1/admin/access-insights?days=14", html)
-            self.assertIn("被查看最多的商家", html)
-            # 同一 token 输入解锁全页（buyer-stats 不再有独立 token 表单）
-            self.assertEqual(html.count('id="admin_token"'), 1)
-
+        conn = _open(self.db_path)
+        today = buyer_stats.buyer_daily_series(conn, days=1)[-1]
+        conn.close()
+        self.assertEqual(today["distinct_buyers"][LISTING], 1)
 
 class BuyerKeywordServiceTest(unittest.TestCase):
     def test_keyword_normalization(self) -> None:
@@ -783,53 +653,6 @@ class BuyerKeywordHandlersTest(unittest.TestCase):
         self.assertEqual(top[0]["zero_results"], 2)
         self.assertEqual(top[0]["agent_searches"], 1)
         self.assertEqual(top[0]["listing_searches"], 1)
-
-
-class BuyerKeywordAdminTest(unittest.TestCase):
-    def setUp(self) -> None:
-        os.environ["KIWI_CATALOG_ADMIN_TOKEN"] = ADMIN_TOKEN
-        # Phase 3 Step A：本类测旧聚合表数据源（回退开关）；access_log 派生的
-        # 端点形状由 test_keyword_derived_matches_table_double_write 覆盖。
-        os.environ["KIWI_CATALOG_KEYWORD_SOURCE"] = buyer_stats._KEYWORD_SOURCE_TABLE
-        self.addCleanup(os.environ.pop, "KIWI_CATALOG_ADMIN_TOKEN", None)
-        self.addCleanup(os.environ.pop, "KIWI_CATALOG_KEYWORD_SOURCE", None)
-
-    def test_response_includes_keyword_rankings(self) -> None:
-        db = _make_db()
-        conn = open_connection(db)
-        buyer_stats.record_buyer_keyword(conn, "agent", "保温杯", 0)
-        buyer_stats.record_buyer_keyword(conn, "agent", "保温杯", 1)
-        buyer_stats.record_buyer_keyword(conn, "listing", "咖啡机", 0)
-        conn.commit()
-        conn.close()
-        res = admin_handlers.buyer_stats(db, {"_auth_token": ADMIN_TOKEN}, {"days": "7"})
-        self.assertTrue(res["ok"])
-        top = res["top_keywords"]
-        self.assertEqual(
-            top,
-            [
-                {
-                    "keyword": "保温杯",
-                    "searches": 2,
-                    "zero_results": 1,
-                    "agent_searches": 2,
-                    "listing_searches": 0,
-                },
-                {
-                    "keyword": "咖啡机",
-                    "searches": 1,
-                    "zero_results": 1,
-                    "agent_searches": 0,
-                    "listing_searches": 1,
-                },
-            ],
-        )
-        zero_hits = res["zero_hit_keywords"]
-        self.assertEqual([k["keyword"] for k in zero_hits], ["保温杯", "咖啡机"])
-        # 原有字段保持（向后兼容，纯新增）
-        self.assertIn("series", res)
-        self.assertIn("today", res)
-        self.assertEqual(res["days"], 7)
 
 
 if __name__ == "__main__":
