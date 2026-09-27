@@ -34,6 +34,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.api.extensions import run_fastapi_hooks
 from kiwi_catalog.api.route_table import (
     _activate_card_publication,
     _claim_catalog_agent,
@@ -56,16 +57,6 @@ from kiwi_catalog.api.route_table import (
     _search_agent_catalog,
     _set_card_publication_state,
     _suspend_catalog_agent,
-    _v1_admin_access_insights,
-    _v1_admin_access_log,
-    _v1_admin_buyer_day,
-    _v1_admin_buyer_stats,
-    _v1_admin_dashboard,
-    _v1_admin_merchant_report,
-    _v1_admin_merchants,
-    _v1_admin_searches,
-    _v1_admin_token_rotate,
-    _v1_approve_application,
     _v1_claim_agent,
     _v1_create_connector_identity_request,
     _v1_create_merchant_publication,
@@ -81,7 +72,6 @@ from kiwi_catalog.api.route_table import (
     _v1_get_merchant_publication,
     _v1_list_agent_listings,
     _v1_list_agents,
-    _v1_list_applications,
     _v1_list_my_follows,
     _v1_merchant_publication_stats,
     _v1_merchant_self,
@@ -90,9 +80,6 @@ from kiwi_catalog.api.route_table import (
     _v1_revoke_connector_identity,
     _v1_register_agent,
     _v1_reinstate_listing,
-    _v1_reject_application,
-    _v1_revoke_token,
-    _v1_rotate_token,
     _v1_search_agents,
     _v1_search_listings,
     _v1_search_merchant_publications,
@@ -703,59 +690,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             ),
         )
 
-    @app.get("/v1/merchants/applications")
-    def v1_list_applications(request: _FastAPIRequest) -> dict[str, Any]:
-        # admin token 只经 Authorization header（KC-SEC-02，与 fallback 一致）
-        return _v1_list_applications(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.post("/v1/merchants/applications/{application_id}/approve")
-    def v1_approve_application(
-        application_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_approve_application(
-            db_path, application_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.post("/v1/merchants/applications/{application_id}/reject")
-    def v1_reject_application(
-        application_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_reject_application(
-            db_path, application_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.post("/v1/merchants/{merchant_id}/rotate")
-    def v1_rotate_token(
-        merchant_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_rotate_token(
-            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
-    @app.post("/v1/merchants/{merchant_id}/revoke")
-    def v1_revoke_token(
-        merchant_id: str,
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_revoke_token(
-            db_path, merchant_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
-        )
-
     def _merchant_payload_with_session(
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1057,87 +991,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _v1_unfollow_merchant(db_path, merchant_id, _account_payload(request, {}))
 
-    # ── /v1/admin（运营 dashboard，admin token 保护）──────────────────────
-    @app.get("/v1/admin/dashboard")
-    def v1_admin_dashboard(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_dashboard(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/merchants")
-    def v1_admin_merchants(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_merchants(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/merchants/{merchant_id}/report")
-    def v1_admin_merchant_report(
-        merchant_id: str, request: _FastAPIRequest
-    ) -> dict[str, Any]:
-        return _v1_admin_merchant_report(
-            db_path,
-            merchant_id,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/searches")
-    def v1_admin_searches(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_searches(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/buyer-stats")
-    def v1_admin_buyer_stats(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_buyer_stats(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/buyer-day")
-    def v1_admin_buyer_day(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_buyer_day(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/access-log")
-    def v1_admin_access_log(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_access_log(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.get("/v1/admin/access-insights")
-    def v1_admin_access_insights(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_admin_access_insights(
-            db_path,
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
-            _query_params_from_request(request),
-        )
-
-    @app.post("/v1/admin/token/rotate")
-    def v1_admin_token_rotate(
-        payload: dict[str, Any],
-        authorization: str = AUTHORIZATION_HEADER,
-    ) -> dict[str, Any]:
-        return _v1_admin_token_rotate(
-            db_path, api_auth.payload_with_auth(payload, authorization, "")
-        )
-
-    # ── /portal（门户 HTML 页；双栈都注册以保持 route 覆盖 parity）────────
-    from fastapi.responses import HTMLResponse, RedirectResponse
-
     _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
+
+    from fastapi.responses import HTMLResponse, RedirectResponse
 
     def _portal_html(result: dict[str, Any]) -> HTMLResponse | RedirectResponse:
         """门户 handler 结果 → HTMLResponse 或 RedirectResponse（2xx/302）；
@@ -1169,30 +1025,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/connect/{enrollment_id}")
     def portal_connect_page(enrollment_id: str) -> Response:
         return _portal_html(portal_handlers.portal_enrollment_connect(enrollment_id))
-
-    @app.get("/portal/admin")
-    def portal_admin_page() -> Response:
-        return _portal_html(portal_handlers.portal_admin())
-
-    @app.get("/portal/admin/searches")
-    def portal_admin_searches_page() -> Response:
-        return _portal_html(portal_handlers.portal_admin_searches())
-
-    @app.get("/portal/admin/buyer-stats")
-    def portal_admin_buyer_stats_page() -> Response:
-        return _portal_html(portal_handlers.portal_admin_buyer_stats())
-
-    @app.get("/portal/dashboard")
-    def portal_dashboard_page() -> Response:
-        return _portal_html(portal_handlers.portal_dashboard())
-
-    @app.get("/portal/merchant/{merchant_id}")
-    def portal_merchant_page(merchant_id: str) -> Response:
-        return _portal_html(portal_handlers.portal_merchant(merchant_id))
-
-    @app.get("/portal/day/{day}")
-    def portal_day_page(day: str) -> Response:
-        return _portal_html(portal_handlers.portal_day(day))
 
     @app.get("/portal/register")
     def portal_register_page() -> Response:
@@ -1229,3 +1061,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/follows")
     def portal_follows_page() -> Response:
         return _portal_html(portal_handlers.portal_follows())
+
+    # 扩展路由挂钩（docs/extensions.md）：基表注册完再让扩展包挂自己的
+    # FastAPI 路由；fail-soft 由 run_fastapi_hooks 负责。
+    run_fastapi_hooks(app, db_path)

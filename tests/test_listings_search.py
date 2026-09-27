@@ -88,7 +88,8 @@ class ListingsSearchTest(unittest.TestCase):
         self.db_path = os.path.join(self.tmp, "catalog.sqlite")
         env_patch = mock.patch.dict(
             os.environ,
-            {"KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
+            {"KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+             "KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"},
             clear=False,
         )
         env_patch.start()

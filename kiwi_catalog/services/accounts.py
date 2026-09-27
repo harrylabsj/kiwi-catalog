@@ -579,6 +579,8 @@ def register_account(
     # 影子 merchants 行由 ensure_merchant_id 同步创建——注册即商家，admin
     # dashboard 无需审批即可见。
     merchant_id = ensure_merchant_id(conn, account_id, merchant_name)
+    from kiwi_catalog.services.listing_entitlements import ensure_free_entitlement
+    ensure_free_entitlement(conn, merchant_id)
     # 审查 C-H2：注册即种入 revoked 占位行，使 require_merchant_token 的 HMAC
     # fallback 对新商户立即关闭——否则「已注册未签发」商户的凭证是对
     # merchant_id 确定的 HMAC，secret 泄露即可派生且无法吊销。approve 的
@@ -730,6 +732,7 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
         ).fetchone()
         counts = {"agents": int(agents["n"]), "listings": int(listings["n"])}
 
+    from kiwi_catalog.services.listing_entitlements import capacity
     return {
         "account_id": account["account_id"],
         "email": account["email"],
@@ -742,6 +745,7 @@ def account_view(conn: sqlite3.Connection, account: dict[str, Any]) -> dict[str,
         "token": token_info,
         "agents_count": counts["agents"],
         "listings_count": counts["listings"],
+        "listing_capacity": capacity(conn, merchant_id) if merchant_id else None,
     }
 
 

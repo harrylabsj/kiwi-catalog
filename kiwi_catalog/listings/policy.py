@@ -37,7 +37,7 @@ def suspend_owned_listings(conn: sqlite3.Connection, owner_agent_id: str) -> int
     Returns 受影响行数。幂等：已 SUSPENDED/WITHDRAWN 的不再触碰。
     """
     cursor = conn.execute(
-        "update commerce_listings set publication_state = ?, updated_at = ?"
+        "update commerce_listings set publication_state = ?, governance_hold = 1, updated_at = ?"
         " where owner_agent_id = ? and publication_state = 'ACTIVE'",
         (SUSPENDED, now_iso(), owner_agent_id),
     )

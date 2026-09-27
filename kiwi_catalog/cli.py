@@ -40,6 +40,8 @@ from kiwi_catalog.cli_agent_catalog_commands import (
 )
 from kiwi_catalog.cli_common import positive_int
 from kiwi_catalog.cli_merchant_commands import (
+    cmd_listing_merchant_limit,
+    cmd_listing_plan_limit,
     cmd_merchant_applications_approve,
     cmd_merchant_applications_list,
     cmd_merchant_applications_reject,
@@ -132,6 +134,18 @@ def build_parser() -> argparse.ArgumentParser:
     # 其一个子命令，再嵌套 applications/token/status 两级。
     merchant = agent_catalog_sub.add_parser("merchant", help="Merchant token distribution (applications / token / status)")
     merchant_cmd = merchant.add_subparsers(dest="merchant_command", required=True)
+    listing_plan = merchant_cmd.add_parser("listing-plan-limit", help="Set a listing plan's active slot limit")
+    listing_plan.add_argument("plan_code")
+    listing_plan.add_argument("active_limit", type=int)
+    listing_plan.add_argument("--format", choices=["text", "json"], default="text")
+    listing_plan.set_defaults(func=cmd_listing_plan_limit)
+    listing_limit = merchant_cmd.add_parser("listing-limit", help="Override or suspend a merchant's listing capacity")
+    listing_limit.add_argument("merchant_id")
+    listing_limit.add_argument("--active-limit", type=int, default=None)
+    listing_limit.add_argument("--use-plan", action="store_true")
+    listing_limit.add_argument("--status", choices=["active", "suspended"], default=None)
+    listing_limit.add_argument("--format", choices=["text", "json"], default="text")
+    listing_limit.set_defaults(func=cmd_listing_merchant_limit)
 
     applications = merchant_cmd.add_parser("applications", help="Application work queue (list/approve/reject)")
     applications_cmd = applications.add_subparsers(dest="applications_command", required=True)

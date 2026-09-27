@@ -141,14 +141,13 @@ class AccountsApiTest(unittest.TestCase):
         return set_cookie.split(";")[0].split("=", 1)[1], code
 
     def _approve_application_by_id(self, app_id: int) -> dict:
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        return payload
+        # HTTP 审核端点已移私有仓；service 层与本地 CLI 同一实现
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            issued = tokens_service.approve_application(conn, app_id)
+        return {"ok": True, **issued}
 
     def _request_token(self, session: str) -> None:
         """用商家信息申请令牌（建工单）。"""
@@ -164,6 +163,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def _approve_first_application(self) -> dict:
         from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
 
         with db_session(self.db_path) as conn:
             row = conn.execute(
@@ -171,19 +171,14 @@ class AccountsApiTest(unittest.TestCase):
                 " order by application_id limit 1"
             ).fetchone()
         app_id = row["application_id"]
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
-        return payload
+        with db_session(self.db_path) as conn:
+            issued = tokens_service.approve_application(conn, app_id)
+        return {"ok": True, **issued}
 
     # ── 注册 ───────────────────────────────────────────────────────────────
 
     def test_register_creates_account_no_application_yet(self) -> None:
-        """注册即商家：建账号即分配 merchant_id + 影子 merchants 行，商家工单在申请令牌时才创建。"""
+        """注册即商家：分配 merchant_id、影子行和 20 个免费商品名额。"""
         session, _ = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
@@ -192,6 +187,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(payload["email"], "ops@acme.example")
         self.assertIsNone(payload["application"])  # 未申请令牌，无工单
         self.assertIsNone(payload["token"])
+        self.assertEqual(payload["listing_capacity"]["active_limit"], 20)
+        self.assertEqual(payload["listing_capacity"]["active_used"], 0)
         # 注册完成即分配平台 merchant_id（与审批签发同一格式 mkt_<slug>_<rand>）
         self.assertRegex(payload["merchant_id"], r"^mkt_[a-z0-9-]+_.+")
         # 注册即商家：影子 merchants 行已创建（admin dashboard 无需审批即可见）
@@ -643,13 +640,11 @@ class AccountsApiTest(unittest.TestCase):
             app_id = conn.execute(
                 "select application_id from merchant_applications order by application_id limit 1"
             ).fetchone()["application_id"]
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/reject",
-            json.dumps({"admin_token": ADMIN_TOKEN, "review_note": "domain unverifiable"}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            tokens_service.reject_application(conn, app_id, "domain unverifiable")
         # 重新申请 → 新 pending 工单（非 409）
         status, payload, _ = _call_http(
             self.app,
@@ -692,14 +687,12 @@ class AccountsApiTest(unittest.TestCase):
         merchant_id = first["merchant_id"]
         self.assertTrue(merchant_id.startswith("mkt_"))
 
-        # 吊销（token 失效，merchant_id 保留）
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{merchant_id}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
+        # 吊销（token 失效，merchant_id 保留）——service 层（与 CLI 同一实现）
+        from kiwi_catalog.db.session import db_session as _db_session
+        from kiwi_catalog.services import merchant_tokens as tokens_service
+
+        with _db_session(self.db_path) as conn:
+            tokens_service.revoke_token(conn, merchant_id)
 
         # 重新申请 → 批准 → 同一 merchant_id（复用而非新建）
         status, payload, _ = _call_http(
@@ -854,26 +847,15 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("merchants", raw)
         self.assertIn("developers", raw)
 
-    def test_account_page_tells_merchant_where_to_paste_token(self) -> None:
-        """令牌拿到手之后「填到哪里」必须写在页面上（2026-09-26）。
-
-        此前页面只给一串令牌 + 复制按钮，粘贴点（`kiwi merchant init` 的第 4 个提示 /
-        `~/.kiwi/credentials.env`）毫无提示——非技术商家会卡在这一步。
-        """
+    def test_account_page_shows_listing_capacity_without_token_setup(self) -> None:
         _, payload, _ = _call_http(self.app, "GET", "/portal/account")
         raw = payload.get("_raw", "")
-        self.assertIn("下一步：把令牌填进你的 Kiwi Merchant", raw)
-        self.assertIn("kiwi merchant init", raw)
-        self.assertIn("~/.kiwi/credentials.env", raw)
-        self.assertIn("KIWI_MERCHANT_TOKEN=", raw)
-        self.assertIn("shopping-cli 不需要配这个令牌", raw)
-        self.assertIn("只是发布公开资料，现在不需要令牌", raw)
-        # 静态 HTML 只放占位符：真令牌由 /v1/accounts/me 在登录态注入，页面源码里不得出现
-        self.assertIn("&lt;你的令牌&gt;", raw)
-        self.assertIn('id="copy_env_line"', raw)
+        self.assertIn("商品名额", raw)
+        self.assertIn("listing_capacity", raw)
+        self.assertNotIn("KIWI_MERCHANT_TOKEN=", raw)
+        self.assertNotIn('id="copy_env_line"', raw)
         self.assertNotIn("demo.html", raw)
-        self.assertIn("复制令牌", raw)  # 令牌态双按钮：复制令牌 + 申请目录令牌（静态模板）
-        self.assertIn("申请目录令牌", raw)
+        self.assertNotIn("申请目录令牌", raw)
         self.assertNotIn(">API Token</a>", raw)
         self.assertNotIn(">令牌申请</a>", raw)
         self.assertNotIn("/portal/status", raw)

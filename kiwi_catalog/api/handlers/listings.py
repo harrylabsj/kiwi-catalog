@@ -52,8 +52,8 @@ from kiwi_catalog.services import buyer_search_events, buyer_stats, usage_metric
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
 REINSTATE_ENDPOINT = "/v1/listings/{id}/reinstate"
-_LISTINGS_APPROVAL_REQUIRED = (
-    "LISTINGS_APPROVAL_REQUIRED: an active approved owner token and a published binding are required"
+_LISTINGS_ENTITLEMENT_REQUIRED = (
+    "LISTINGS_ENTITLEMENT_REQUIRED: a verified account, listing plan and published binding are required"
 )
 
 
@@ -112,7 +112,7 @@ def _verify_runtime_listing_signature(
     if (agent is None or active is None or str(agent["merchant_id"] or "") != merchant_id
             or str(active["merchant_id"] or "") != merchant_id
             or str(agent["administrative_state"] or "active") != "active"):
-        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+        raise PermissionDenied(_LISTINGS_ENTITLEMENT_REQUIRED)
     binding_id = str(active["binding_id"])
     key_id = str(active["key_id"])
     expected = {
@@ -144,38 +144,10 @@ def _require_current_listing_entitlement(
         (agent_id, merchant_id, binding_id),
     ).fetchone()
     if enrollment is None:
-        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
+        raise PermissionDenied(_LISTINGS_ENTITLEMENT_REQUIRED)
 
-    # Do not let a revoked token or a newer pending/rejected application inherit
-    # the old enrollment's grant. For account-backed merchants, application_id is
-    # the current admin-reviewed request; legacy merchants use their latest linked
-    # approved application.
-    token = conn.execute(
-        "select status from merchant_tokens where merchant_id=?", (merchant_id,)
-    ).fetchone()
-    if token is None or str(token["status"]) != "active":
-        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
-    account = conn.execute(
-        "select application_id from merchant_accounts where merchant_id=? order by account_id limit 1",
-        (merchant_id,),
-    ).fetchone()
-    if account is not None and int(account["application_id"] or 0) > 0:
-        approval = conn.execute(
-            "select status, merchant_id from merchant_applications where application_id=?",
-            (int(account["application_id"]),),
-        ).fetchone()
-    else:
-        approval = conn.execute(
-            "select status, merchant_id from merchant_applications where merchant_id=? "
-            "order by application_id desc limit 1",
-            (merchant_id,),
-        ).fetchone()
-    if (approval is None or str(approval["status"]) != "approved"
-            or str(approval["merchant_id"] or "") != merchant_id):
-        raise PermissionDenied(_LISTINGS_APPROVAL_REQUIRED)
-    # `listings:publish`, self-read, and withdraw are derived per request from the current admin-approved,
-    # active owner token. It is deliberately not a persistent/general enrollment
-    # scope; revocation or a newer unapproved application removes it immediately.
+    from kiwi_catalog.services.listing_entitlements import capacity
+    capacity(conn, merchant_id)  # Existing entitlement; token state is irrelevant.
 
 
 def _require_runtime_listing_grant(
@@ -243,6 +215,16 @@ def _require_owner_token_for_merchant(
     else:
         api_auth.require_merchant_token(payload, merchant_id, None)
     return f"merchant:{merchant_id}"
+
+
+def _reject_account_owner_token_listing(conn: sqlite3.Connection, merchant_id: str, actor: str) -> None:
+    """Runtime binding is the default Listings identity; legacy is opt-in only."""
+    if actor == "admin":
+        return
+    import os
+    if (conn.execute("select 1 from merchant_accounts where merchant_id=?", (merchant_id,)).fetchone()
+            or os.environ.get("KIWI_CATALOG_ENABLE_LEGACY_LISTINGS", "").lower() != "on"):
+        raise PermissionDenied("LISTINGS_BINDING_REQUIRED: connect a Runtime; owner token cannot publish Listings")
 
 
 def _listing_request_hash(values: dict[str, Any]) -> str:
@@ -407,8 +389,9 @@ def v1_list_agent_listings(
             )
             _require_current_listing_entitlement(conn, owner_agent_id, merchant_id, binding_id)
         elif merchant_id:
-            # Direct publishers retain their historical owner/admin-token path.
-            _require_owner_token_for_merchant(auth_payload, merchant_id, conn=conn)
+            # Admin reads; accountless legacy token reads require an explicit migration switch.
+            actor = _require_owner_token_for_merchant(auth_payload, merchant_id, conn=conn)
+            _reject_account_owner_token_listing(conn, merchant_id, actor)
         else:
             try:
                 api_auth.require_admin_token(auth_payload, db_path)
@@ -446,23 +429,25 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     """
     canonical = validate_publish_payload(payload)
     # Runtime proof is selected by header presence and can never fall back to a
-    # body owner token. Direct publishers retain the historical token path.
+    # body owner token. Legacy token use is disabled by default.
     binding_signature = str(payload.get("_binding_jws") or "").strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     request_hash = _listing_request_hash(canonical)
 
     response: dict[str, Any] = {}
     with db_session(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         if binding_signature:
             actor, actor_key, _binding_id = _require_runtime_listing_grant(
                 conn, payload, canonical, idempotency_key
             )
         else:
             # Authentication remains before replay/rate budget consumption;
-            # the owner-token path and its actor partition are unchanged.
+            # accountless legacy migration may opt in; account merchants cannot.
             actor = _require_owner_token_for_merchant(
                 payload, str(canonical.get("merchant_id") or ""), conn=conn
             )
+            _reject_account_owner_token_listing(conn, str(canonical.get("merchant_id") or ""), actor)
             actor_key = api_idempotency.catalog_write_actor_key(payload)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash
@@ -556,8 +541,9 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
             )
             _require_current_listing_entitlement(conn, owner_agent_id, merchant_id, binding_id)
         else:
-            # Existing direct owner/admin token policy remains unchanged.
+            # Admin or explicitly enabled accountless migration only.
             actor = _require_owner_token_for_merchant(payload, merchant_id, conn=conn)
+            _reject_account_owner_token_listing(conn, merchant_id, actor)
             actor_key = api_idempotency.catalog_write_actor_key(payload)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, WITHDRAW_ENDPOINT, actor_key, idempotency_key, request_hash
@@ -609,6 +595,8 @@ def v1_reinstate_listing(db_path: str | Path, listing_id: str, payload: dict[str
         merchant_id = str(row.get("merchant_id") or "")
         owner_agent_id = str(row.get("owner_agent_id") or "")
     actor = _require_owner_token_for_merchant(payload, merchant_id, db_path=db_path)
+    with db_session(db_path) as conn:
+        _reject_account_owner_token_listing(conn, merchant_id, actor)
 
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
     actor_key = api_idempotency.catalog_write_actor_key(payload)

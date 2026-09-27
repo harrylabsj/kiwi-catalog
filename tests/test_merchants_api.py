@@ -17,15 +17,13 @@
 覆盖：
 - apply：会话鉴权（2026-08-12 关闭匿名公开通道，与 /v1/accounts/token-request
   同一处理函数）、字段校验、按账号限流；
-- list_applications：admin 必填（fail-closed）、status 过滤；
-- approve：admin 必填、签发 mkt_ merchant_id + 明文 token 仅一次、
-  重复 approve 409、审计不含明文；
-- reject：仅 pending 可拒、review_note；
-- rotate：admin、新 token 生效、旧 token 失效；
-- revoke：admin、吊销后 token 失效、重复吊销幂等；
+- approve/reject/rotate/revoke 语义（service 层，与本地 CLI 同一实现）：
+  签发 mkt_ merchant_id + 明文 token 仅一次、重复 approve 409、审计不含
+  明文、仅 pending 可拒、轮换后旧 token 失效、吊销幂等——HTTP 审核端点
+  已移至私有扩展 kiwi-catalog-admin（docs/extensions.md）；
 - self：token 即身份解析 merchant_id、吊销 token 403、admin 按 merchant_id 查；
 - 双路径：随机 token 可用于 register(带 merchant)/publish；HMAC 旧 token 兼容；
-- 门户页 GET 200 + text/html + no-store。
+- 门户页 GET 200 + text/html + no-store；审核后台路径恒 404。
 """
 
 from __future__ import annotations
@@ -38,7 +36,10 @@ import unittest
 from unittest import mock
 
 from kiwi_catalog.api.app import create_catalog_app
+from kiwi_catalog.db.session import db_session
+from kiwi_catalog.services import merchant_tokens as tokens_service
 from kiwi_catalog.api.auth import owner_token
+from kiwi_catalog.core.errors import ConflictError
 from kiwi_catalog.core.tokens import token_digest
 
 ADMIN_TOKEN = "admin-tok-123"
@@ -179,12 +180,31 @@ class MerchantsApiTest(unittest.TestCase):
         )[:2]
 
     def _approve(self, app_id: int) -> tuple[int, dict]:
-        return _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/approve",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        """service 层签发（HTTP 审核端点已移私有仓；与本地 CLI 同一实现）。"""
+        try:
+            with db_session(self.db_path) as conn:
+                issued = tokens_service.approve_application(conn, app_id)
+        except ConflictError as exc:
+            return 409, {"error": str(exc)}
+        return 200, {"ok": True, **issued}
+
+    def _reject(self, app_id: int, note: str = "") -> tuple[int, dict]:
+        try:
+            with db_session(self.db_path) as conn:
+                tokens_service.reject_application(conn, app_id, note)
+        except ConflictError as exc:
+            return 409, {"error": str(exc)}
+        return 200, {"ok": True}
+
+    def _rotate(self, merchant_id: str) -> tuple[int, dict]:
+        with db_session(self.db_path) as conn:
+            rotated = tokens_service.rotate_token(conn, merchant_id)
+        return 200, {"ok": True, **rotated}
+
+    def _revoke(self, merchant_id: str) -> tuple[int, dict]:
+        with db_session(self.db_path) as conn:
+            token_status = tokens_service.revoke_token(conn, merchant_id)
+        return 200, {"ok": True, "token_status": token_status}
 
     def _ensure_agent(self, merchant_id: str, token: str) -> str:
         """每 merchant 注册一次 agent（merchant 单 agent 约束 + domain 唯一），
@@ -211,7 +231,7 @@ class MerchantsApiTest(unittest.TestCase):
             **PRODUCT_PAYLOAD,
             "merchant_id": merchant_id,
             "owner_agent_id": agent_id,
-            "owner_token": token,
+            **({"admin_token": token} if token == ADMIN_TOKEN else {"owner_token": token}),
         }
         status, _ = _call_http(
             self.app, "POST", "/v1/listings/publish", json.dumps(publish_body).encode()
@@ -296,44 +316,15 @@ class MerchantsApiTest(unittest.TestCase):
             status, _ = self._apply(email="other@acme.example")
             self.assertEqual(status, 200)
 
-    # ── list_applications ──────────────────────────────────────────────────
-
-    def test_list_applications_requires_admin(self) -> None:
-        self._apply()
-        status, payload = _call_http(self.app, "GET", "/v1/merchants/applications")[:2]
-        self.assertEqual(status, 403, payload)
-        # KC-SEC-02：admin token 只经 Authorization header；query 携带被拒
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/merchants/applications?status=pending&admin_token=" + ADMIN_TOKEN,
-        )[:2]
-        self.assertEqual(status, 403, payload)
-        status, payload = _call_http(
-            self.app,
-            "GET",
-            "/v1/merchants/applications?status=pending",
-            headers={"Authorization": "Bearer " + ADMIN_TOKEN},
-        )[:2]
-        self.assertEqual(status, 200, payload)
-        self.assertEqual(len(payload["results"]), 1)
-        self.assertEqual(payload["results"][0]["status"], "pending")
-
     # ── approve ────────────────────────────────────────────────────────────
 
-    def test_approve_requires_admin_and_issues_token_once(self) -> None:
+    def test_approve_issues_token_once(self) -> None:
         _, applied = self._apply()
         app_id = applied["application_id"]
-        status, payload = _call_http(
-            self.app, "POST", f"/v1/merchants/applications/{app_id}/approve", b"{}"
-        )[:2]
-        self.assertEqual(status, 403, payload)
-
         status, issued = self._approve(app_id)
         self.assertEqual(status, 200, issued)
         self.assertTrue(issued["merchant_id"].startswith("mkt_"))
         self.assertTrue(issued["token"].startswith("mkt_"))
-        self.assertEqual(issued["token"], issued["token"])
 
         # 重复 approve → 409
         status, payload = self._approve(app_id)
@@ -358,31 +349,21 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertIn("token_prefix", details)
         self.assertNotIn(issued["token"], json.dumps(details, ensure_ascii=False))
 
-    def test_approve_token_works_for_register_and_publish(self) -> None:
+    def test_approved_token_cannot_replace_runtime_binding_for_listing(self) -> None:
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         self.assertEqual(self._register(issued["merchant_id"], issued["token"]), 200)
-        self.assertEqual(self._publish(issued["merchant_id"], issued["token"]), 200)
+        self.assertEqual(self._publish(issued["merchant_id"], issued["token"]), 403)
 
     # ── reject ─────────────────────────────────────────────────────────────
 
     def test_reject_pending_only(self) -> None:
         _, applied = self._apply()
         app_id = applied["application_id"]
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/reject",
-            json.dumps({"admin_token": ADMIN_TOKEN, "review_note": "domain unverifiable"}).encode(),
-        )[:2]
+        status, payload = self._reject(app_id, note="domain unverifiable")
         self.assertEqual(status, 200, payload)
         # 已拒再拒 → 409
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/applications/{app_id}/reject",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        status, payload = self._reject(app_id)
         self.assertEqual(status, 409, payload)
 
     # ── rotate ─────────────────────────────────────────────────────────────
@@ -392,28 +373,15 @@ class MerchantsApiTest(unittest.TestCase):
         _, issued = self._approve(applied["application_id"])
         old_token = issued["token"]
         mid = issued["merchant_id"]
-        self.assertEqual(self._publish(mid, old_token), 200)
+        self.assertEqual(self._publish(mid, old_token), 403)
 
-        status, rotated = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{mid}/rotate",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        status, rotated = self._rotate(mid)
         self.assertEqual(status, 200, rotated)
         self.assertNotEqual(rotated["token"], old_token)
         # 旧 token 失效
         self.assertEqual(self._publish(mid, old_token), 403)
-        # 新 token 生效
-        self.assertEqual(self._publish(mid, rotated["token"]), 200)
-
-    def test_rotate_requires_admin(self) -> None:
-        _, applied = self._apply()
-        _, issued = self._approve(applied["application_id"])
-        status, _ = _call_http(
-            self.app, "POST", f"/v1/merchants/{issued['merchant_id']}/rotate", b"{}"
-        )[:2]
-        self.assertEqual(status, 403)
+        # 新 token 可用于旧账号能力，但不能代替 Runtime 绑定发布商品。
+        self.assertEqual(self._publish(mid, rotated["token"]), 403)
 
     # ── revoke ─────────────────────────────────────────────────────────────
 
@@ -421,25 +389,15 @@ class MerchantsApiTest(unittest.TestCase):
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         mid, token = issued["merchant_id"], issued["token"]
-        self.assertEqual(self._publish(mid, token), 200)
+        self.assertEqual(self._publish(mid, token), 403)
 
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{mid}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        status, payload = self._revoke(mid)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["token_status"], "revoked")
         # 吊销后写请求 fail-closed
         self.assertEqual(self._publish(mid, token), 403)
         # 重复吊销幂等
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{mid}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        status, payload = self._revoke(mid)
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["token_status"], "revoked")
 
@@ -479,7 +437,9 @@ class MerchantsApiTest(unittest.TestCase):
         # 1) 无 token 记录的存量商户：HMAC 派生 token 仍可用（fallback 保留）
         legacy = "legacy-merchant"
         legacy_agent = _register_with_domain(legacy, owner_token(legacy), "legacy.example")
-        self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 200)
+        self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 403)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"}):
+            self.assertEqual(_publish_with(legacy, owner_token(legacy), legacy_agent), 200)
 
         # 2) 进入 token 体系（apply+approve 签发随机 token）后：HMAC 派生
         #    token 立即失效——凭证以 active 随机 token 为唯一权威
@@ -487,16 +447,11 @@ class MerchantsApiTest(unittest.TestCase):
         _, issued = self._approve(applied["application_id"])
         mid, random_token = issued["merchant_id"], issued["token"]
         mid_agent = _register_with_domain(mid, random_token, "onboarded.example")
-        self.assertEqual(_publish_with(mid, random_token, mid_agent), 200)
+        self.assertEqual(_publish_with(mid, random_token, mid_agent), 403)
         self.assertEqual(_publish_with(mid, owner_token(mid), mid_agent), 403)
 
         # 3) admin 吊销后：随机 token 与 HMAC 派生 token 双双失效
-        status, payload = _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{mid}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )[:2]
+        status, payload = self._revoke(mid)
         self.assertEqual(status, 200, payload)
         self.assertEqual(_publish_with(mid, random_token, mid_agent), 403)
         self.assertEqual(_publish_with(mid, owner_token(mid), mid_agent), 403)
@@ -507,7 +462,7 @@ class MerchantsApiTest(unittest.TestCase):
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         self._register(issued["merchant_id"], issued["token"])
-        self._publish(issued["merchant_id"], issued["token"])
+        self._publish(issued["merchant_id"], ADMIN_TOKEN)
 
         status, payload = _call_http(
             self.app, "GET", "/v1/merchants/self?owner_token=" + issued["token"]
@@ -542,12 +497,7 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertEqual(status, 403, payload)
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
-        _call_http(
-            self.app,
-            "POST",
-            f"/v1/merchants/{issued['merchant_id']}/revoke",
-            json.dumps({"admin_token": ADMIN_TOKEN}).encode(),
-        )
+        self._revoke(issued["merchant_id"])
         status, payload = _call_http(
             self.app, "GET", "/v1/merchants/self?owner_token=" + issued["token"]
         )[:2]
@@ -572,7 +522,9 @@ class MerchantsApiTest(unittest.TestCase):
         mid = "mrc_legacy"
         token = owner_token(mid)
         self.assertEqual(self._register(mid, token), 200)
-        self.assertEqual(self._publish(mid, token), 200)
+        self.assertEqual(self._publish(mid, token), 403)
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"}):
+            self.assertEqual(self._publish(mid, token), 200)
         # self 自查对 HMAC 商家仍 403（token 不在 merchant_tokens 表——设计如此：
         # 自查只认落库随机 token）
         status, _ = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=" + token)[:2]
@@ -589,51 +541,26 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertIn("Kiwi", payload.get("_raw", ""))
 
     def test_portal_home_shows_readonly_merchant_id(self) -> None:
-        """Token 申请（D7 一个按钮）：只读商家 ID/名称 + 未分配时灰化并引导注册。"""
+        """商家入口展示自动开通的商品名额。"""
         status, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
         self.assertEqual(status, 200, payload)
-        self.assertIn('id="t_merchant_id" readonly', raw)
+        self.assertIn("商品名额", raw)
         self.assertIn("r.merchant_id", raw)
-        self.assertIn("尚未分配商家 ID", raw)
-        self.assertIn("/portal/register", raw)
-        # 商家名称只读（基本信息页修改）；申请收成一个按钮，无域名输入框
-        self.assertIn('id="t_name" readonly', raw)
         self.assertIn("基本信息", raw)
-        self.assertIn("申请目录令牌", raw)
+        self.assertNotIn("申请目录令牌", raw)
         self.assertNotIn("t_domain", raw)
         self.assertNotIn("店铺域名", raw)
         self.assertNotIn("商家域名", raw)
 
-    def test_portal_admin_hidden_by_default(self) -> None:
-        """审核后台不对外公布：默认 404，页面不含审核表单。"""
-        status, payload, _ = _call_http(self.app, "GET", "/portal/admin")
-        self.assertEqual(status, 404, payload)
-        self.assertNotIn("id=\"admin_token\"", payload.get("_raw", ""))
-
-    def test_portal_admin_enabled_via_env(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
-        ):
-            status, payload, headers = _call_http(self.app, "GET", "/portal/admin")
-            self.assertEqual(status, 200, payload)
-            self.assertIn("text/html", headers.get("content-type", ""))
-            self.assertIn("admin_token", payload.get("_raw", ""))
-            self.assertIn("no-store", headers.get("cache-control", ""))
-
-    def test_portal_admin_escapes_api_values_and_keeps_token_out_of_query(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
-        ):
-            _, admin_payload, _ = _call_http(self.app, "GET", "/portal/admin")
-            admin_raw = admin_payload.get("_raw", "")
-            self.assertIn("function escHtml", admin_raw)
-            self.assertIn("escHtml(a.agent_name)", admin_raw)
-            self.assertIn("escHtml(a.purpose)", admin_raw)
-            _, dashboard_payload, _ = _call_http(self.app, "GET", "/portal/dashboard")
-            dashboard_raw = dashboard_payload.get("_raw", "")
-            self.assertIn("return getJson(path, token);", dashboard_raw)
-            self.assertNotIn("admin_token=' + encodeURIComponent(token)", dashboard_raw)
+    def test_portal_admin_paths_are_always_404(self) -> None:
+        """审核后台已移私有扩展：即使 env 开关开启也 404（路由不存在）。"""
+        for path in ("/portal/admin", "/portal/dashboard", "/portal/admin/searches"):
+            with mock.patch.dict(
+                os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
+            ):
+                status, _, _ = _call_http(self.app, "GET", path)
+            self.assertEqual(status, 404, path)
 
     def test_portal_pages_use_official_theme(self) -> None:
         """门户页与官网共用主题（nav/hero/section/card 类 + --kiwi-* 变量）。"""

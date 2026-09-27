@@ -167,7 +167,7 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 
 | token | 来源 | 用途 |
 | --- | --- | --- |
-| admin token | `KIWI_CATALOG_ADMIN_TOKEN` | suspend/reinstate/verify（moderation） |
+| admin token | `KIWI_CATALOG_ADMIN_TOKEN` | suspend/reinstate/verify（moderation）；运营后台/审核 API 在私有扩展 kiwi-catalog-admin |
 | catalog-owner token | `KIWI_CATALOG_OWNER_TOKEN_SECRET` 派生 HMAC | claim/refresh（owner 语义，请求体 `owner_token` 字段） |
 | verification worker token | `SHOPPING_VERIFICATION_WORKER_TOKEN` | 验证 worker 动作 |
 

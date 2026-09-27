@@ -15,13 +15,13 @@
 - 发现/搜索（`GET /v1/agent-catalog/agents/search`，CandidateAgent DTO；
   v1 面 `/v1/agents/search`：三态域——VerificationLevel / FreshnessState /
   AdministrativeState——与 KTH destination_type 词表过滤）
-- **Listing 域（v0.4）**：`/v1/listings/publish|withdraw|reinstate|search|get`
-  + publisher 自查 `/v1/agents/{id}/listings`（行级幂等 upsert、服务端
-  digest、fresh_until TTL、owner token 双路径认证）
+- **Listing 域**：`/v1/listings/publish|withdraw|reinstate|search|get`
+  + publisher 自查 `/v1/agents/{id}/listings`；已连接 Runtime 使用绑定签名，
+  注册商家自动获得可配置的免费商品名额（见 [商品名额说明](docs/listing-entitlements.md)）。
 - **商家接入（v0.5+）**：`/v1/merchants/*` token 申请/审批/恢复
   （Fernet 加密存储）+ `/v1/accounts/*` 与 `/portal` 商家门户（账号注册/
-  登录/Token 管理；**注册即商家**——商家名称 + 邮箱 + 密码注册即分配
-  merchant_id、admin dashboard 无需审批即可见，令牌仍单独申请/审批）
+  登录/商品名额；**注册即商家**——注册即分配 merchant_id 与免费方案，
+  邮箱验证和 Runtime 连接后可在额度内发布）
 - 治理（suspend/reinstate——owned Listings 联动置 SUSPENDED、双维度限流、
   审计、§24 runtime metrics）
 
@@ -29,7 +29,7 @@
 
 ```bash
 pip install -e '.[api]'
-export KIWI_CATALOG_ADMIN_TOKEN=change-me
+export KIWI_CATALOG_ADMIN_TOKEN=change-me   # moderation 用（运营后台在私有扩展里）
 export KIWI_CATALOG_OWNER_TOKEN_SECRET=change-me
 kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 ```
@@ -37,17 +37,17 @@ kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 ## 认证
 
 - **admin token**（`KIWI_CATALOG_ADMIN_TOKEN`）：moderation 动作
-  （suspend/reinstate）与 verify；
+  （suspend/reinstate）与 verify。运营/审核后台（`/portal/dashboard`、
+  `/v1/admin/*`、商家审核 HTTP API）**不在本包**——以私有扩展
+  `kiwi-catalog-admin` 经 `KIWI_CATALOG_EXTENSIONS` 挂载（docs/extensions.md）；
 - **catalog-owner token**（`KIWI_CATALOG_OWNER_TOKEN_SECRET` 派生 HMAC）：
   owner 语义（claim/refresh）——`kiwi_catalog.api.auth.owner_token(merchant_id)`
   生成，请求体 `owner_token` 字段携带。
 
 ## 架构要点
 
-- 独立 SQLite schema：**20 张表**（`db/models.py` 单一 SCHEMA 源：
-  catalog 域 6 + 治理域 4 + listing 域 + 商家接入/账号域 7 + 影子域 3），
-  `CURRENT_SCHEMA_VERSION = 16`（`db/migrations.py`，与 shopping-cli 各自
-  演化）；弱引用——对 merchants/agents 外部表无 FK；
+- 独立 SQLite schema；当前迁移版本为 `41`（`db/migrations.py`）。
+  Listings 方案、商家权益和额度审计由 schema 40 增加；schema 41 将免费默认额度调整为 20，与 shopping-cli 分别演化。
 - 账号与 Token：`merchant_accounts` / `account_sessions` / `merchant_tokens`
   （Fernet 加密 `token_encrypted`）/ `merchant_applications`（申请+审批），
   详见 `docs/accounts.md`；

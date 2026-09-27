@@ -348,6 +348,7 @@ create table if not exists commerce_listings (
         listing_digest text not null,
         publication_state text not null default 'ACTIVE'
             check(publication_state in ('ACTIVE','WITHDRAWN','SUSPENDED')),
+        governance_hold integer not null default 0,
         listing_freshness_state text not null default 'FRESH'
             check(listing_freshness_state in ('FRESH','STALE')),
         published_at text not null,
@@ -772,6 +773,28 @@ create index if not exists idx_runtime_binding_requests_agent_status
     """
 create index if not exists idx_runtime_binding_requests_expires
         on runtime_binding_requests(expires_at)
+    """,
+    # v40 — 商品名额与凭据解耦；迁移对存量账号回填免费方案。
+    """
+create table if not exists listing_plans (
+        plan_code text primary key, active_limit integer not null check(active_limit >= 0),
+        updated_at text not null
+    )
+    """,
+    """
+create table if not exists merchant_listing_entitlements (
+        merchant_id text primary key, plan_code text not null,
+        status text not null check(status in ('active','suspended')),
+        limit_override integer check(limit_override >= 0),
+        updated_at text not null
+    )
+    """,
+    """
+create table if not exists listing_entitlement_audit (
+        id integer primary key autoincrement, merchant_id text not null,
+        actor text not null, action text not null, detail_json text not null,
+        created_at text not null
+    )
     """,
 ]
 

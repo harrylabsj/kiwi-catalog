@@ -43,7 +43,7 @@ from kiwi_catalog.api.fastapi_routes import FastAPI, register_fastapi_routes
 from kiwi_catalog.api.limits import validate_payload
 from kiwi_catalog.api.request_dispatch import dispatch_request
 from kiwi_catalog.api.route_matching import match_path as _match_path
-from kiwi_catalog.api.route_table import _ROUTE_TABLE, RouteEntry, resolve_route
+from kiwi_catalog.api.route_table import _ROUTE_TABLE, RouteEntry, all_routes, resolve_route
 from kiwi_catalog.core.errors import (
     GoneError,
     AuthError,
@@ -87,7 +87,7 @@ def handle_request(
         # 顺序匹配路径模板、命中即调 handler，路径已知但方法不符抛 405，
         # 未知路径抛 404（与内联实现逐字一致）。
         result = dispatch_request(
-            _ROUTE_TABLE,
+            all_routes(),
             method,
             path,
             db_path,
@@ -134,7 +134,7 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     if FastAPI is None:
         return MarketplaceASGIApp(
             db_path,
-            route_provider=lambda: list(_ROUTE_TABLE),
+            route_provider=lambda: list(all_routes()),
             route_resolver=lambda method, path: resolve_route(method, path),
         )
 

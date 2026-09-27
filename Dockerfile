@@ -25,6 +25,7 @@ RUN mkdir -p /data && chown kiwi:kiwi /data
 
 # 敏感配置不落镜像层——运行时经 docker run -e 注入：
 #   -e KIWI_CATALOG_ADMIN_TOKEN=<admin> -e KIWI_CATALOG_OWNER_TOKEN_SECRET=<secret>
+# （admin token 供 moderation；运营后台为独立私有扩展，不随本镜像发布）
 # db 路径固定 /data/catalog.sqlite（VOLUME /data）。
 
 VOLUME ["/data"]

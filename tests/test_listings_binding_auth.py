@@ -103,6 +103,15 @@ class ListingsBindingAuthTest(unittest.TestCase):
         self.owner_token = "mkt_random_owner_token_for_test"
         now = now_iso()
         with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into merchant_accounts (email,password_hash,email_verified,merchant_name,merchant_id,created_at,updated_at)"
+                " values (?,'test',1,'Listing Binding Merchant',?,?,?)",
+                ("owner@example.test", self.merchant_id, now, now),
+            )
+            conn.execute(
+                "insert into merchant_listing_entitlements (merchant_id,plan_code,status,updated_at)"
+                " values (?,'free','active',?)", (self.merchant_id, now),
+            )
             upsert_catalog_agent(
                 conn, self.agent_id, merchant_id=self.merchant_id,
                 display_name="Listing Binding Merchant", canonical_domain="merchant.example",
@@ -178,11 +187,68 @@ class ListingsBindingAuthTest(unittest.TestCase):
         proof = signature or self._signature(actual, idempotency_key)
         return _call(self.app, actual, proof, idempotency_key)
 
-    def test_approved_active_owner_token_grants_runtime_listing_publish(self) -> None:
+    def test_registered_account_with_free_plan_grants_signed_publish(self) -> None:
         status, payload = self._publish()
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["listing"]["merchant_id"], self.merchant_id)
         self.assertEqual(payload["listing"]["owner_agent_id"], self.agent_id)
+
+    def test_configurable_capacity_counts_active_rows_not_retries(self) -> None:
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set limit_override=1 where merchant_id=?", (self.merchant_id,))
+        self.assertEqual(self._publish(idempotency_key="capacity-first")[0], 200)
+        self.assertEqual(self._publish(idempotency_key="capacity-update")[0], 200)
+        other = self._body(source_product_ref="SKU-APPROVED-2")
+        status, payload = self._publish(other, idempotency_key="capacity-second")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("LISTINGS_CAPACITY_EXCEEDED", payload["error"])
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set limit_override=2 where merchant_id=?", (self.merchant_id,))
+        self.assertEqual(self._publish(other, idempotency_key="capacity-second-retry")[0], 200)
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set limit_override=1 where merchant_id=?", (self.merchant_id,))
+            from kiwi_catalog.services.listing_entitlements import capacity
+            self.assertEqual(capacity(conn, self.merchant_id)["active_used"], 2)
+        self.assertEqual(self._publish(other, idempotency_key="capacity-existing-after-downgrade")[0], 200)
+        third = self._body(source_product_ref="SKU-APPROVED-3")
+        self.assertEqual(self._publish(third, idempotency_key="capacity-third-after-downgrade")[0], 403)
+
+    def test_email_verification_is_required_before_publication(self) -> None:
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_accounts set email_verified=0 where merchant_id=?", (self.merchant_id,))
+        status, payload = self._publish(idempotency_key="unverified-account")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("LISTINGS_ACCOUNT_NOT_READY", payload["error"])
+
+    def test_concurrent_distinct_products_cannot_exceed_one_slot(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set limit_override=1 where merchant_id=?", (self.merchant_id,))
+        barrier = Barrier(2)
+
+        def submit(number: int) -> int:
+            body = self._body(source_product_ref=f"SKU-CONCURRENT-{number}")
+            barrier.wait()
+            return self._publish(body, idempotency_key=f"concurrent-{number}")[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(pool.map(submit, (1, 2)))
+        self.assertEqual(sorted(statuses), [200, 403])
+        with db_session(self.db_path) as conn:
+            from kiwi_catalog.services.listing_entitlements import capacity
+            self.assertEqual(capacity(conn, self.merchant_id)["active_used"], 1)
+
+    def test_governance_hold_cannot_be_cleared_by_republish(self) -> None:
+        status, published = self._publish(idempotency_key="governance-first")
+        self.assertEqual(status, 200, published)
+        listing_id = published["listing"]["listing_id"]
+        with db_session(self.db_path) as conn:
+            conn.execute("update commerce_listings set publication_state='SUSPENDED',governance_hold=1 where listing_id=?", (listing_id,))
+        status, payload = self._publish(idempotency_key="governance-republish")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("LISTINGS_GOVERNANCE_HOLD", payload["error"])
 
     def test_changed_body_or_cross_merchant_claim_is_rejected(self) -> None:
         body = self._body()
@@ -226,21 +292,26 @@ class ListingsBindingAuthTest(unittest.TestCase):
             conn.execute("update enrollments set status='bound' where enrollment_id=?", (self.enrollment_id,))
         status, payload = self._publish()
         self.assertEqual(status, 403, payload)
-        self.assertIn("LISTINGS_APPROVAL_REQUIRED", payload.get("error", ""))
+        self.assertIn("LISTINGS_ENTITLEMENT_REQUIRED", payload.get("error", ""))
 
-    def test_revoked_owner_token_or_unapproved_current_application_denies_publish(self) -> None:
+    def test_owner_token_and_application_do_not_control_signed_publish(self) -> None:
         with db_session(self.db_path) as conn:
             conn.execute("update merchant_tokens set status='revoked' where merchant_id=?", (self.merchant_id,))
         status, payload = self._publish()
-        self.assertEqual(status, 403, payload)
-        self.assertIn("LISTINGS_APPROVAL_REQUIRED", payload.get("error", ""))
+        self.assertEqual(status, 200, payload)
 
         # Re-activate token but make its current admin-reviewed application pending.
         with db_session(self.db_path) as conn:
             conn.execute("update merchant_tokens set status='active' where merchant_id=?", (self.merchant_id,))
             conn.execute("update merchant_applications set status='pending' where merchant_id=?", (self.merchant_id,))
         status, payload = self._publish(idempotency_key="listing-idem-pending")
+        self.assertEqual(status, 200, payload)
+
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set status='suspended' where merchant_id=?", (self.merchant_id,))
+        status, payload = self._publish(idempotency_key="listing-idem-suspended")
         self.assertEqual(status, 403, payload)
+        self.assertIn("LISTINGS_ENTITLEMENT_SUSPENDED", payload.get("error", ""))
 
     def test_invalid_exp_and_nonce_replay_are_rejected_but_fresh_retry_replays(self) -> None:
         body = self._body()
@@ -300,6 +371,8 @@ class ListingsBindingAuthTest(unittest.TestCase):
         self.assertEqual(status, 200, published)
         listing_id = published["listing"]["listing_id"]
         idem = "listing-idem-withdraw"
+        with db_session(self.db_path) as conn:
+            conn.execute("update merchant_listing_entitlements set status='suspended' where merchant_id=?", (self.merchant_id,))
 
         def withdraw_signature(*, signed_listing_id: str = listing_id) -> str:
             claims = {
@@ -320,6 +393,9 @@ class ListingsBindingAuthTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["listing"]["publication_state"], "WITHDRAWN")
+        with db_session(self.db_path) as conn:
+            from kiwi_catalog.services.listing_entitlements import capacity
+            self.assertEqual(capacity(conn, self.merchant_id)["active_used"], 0)
 
         status, payload = _call_route(
             self.app, "POST", f"/v1/listings/{listing_id}/withdraw", {},
@@ -327,7 +403,7 @@ class ListingsBindingAuthTest(unittest.TestCase):
         )
         self.assertEqual(status, 403, payload)
 
-    def test_current_admin_approval_is_rechecked_for_self_list_and_withdraw(self) -> None:
+    def test_token_revocation_does_not_block_signed_self_list_or_withdraw(self) -> None:
         status, published = self._publish(idempotency_key="listing-idem-before-revocation")
         self.assertEqual(status, 200, published)
         listing_id = published["listing"]["listing_id"]
@@ -348,8 +424,7 @@ class ListingsBindingAuthTest(unittest.TestCase):
             self.app, "GET", f"/v1/agents/{self.agent_id}/listings",
             signature=self._compact_jws(read_claims), query_string="limit=20",
         )
-        self.assertEqual(status, 403, payload)
-        self.assertIn("LISTINGS_APPROVAL_REQUIRED", payload.get("error", ""))
+        self.assertEqual(status, 200, payload)
 
         idem = "listing-idem-withdraw-revoked"
         withdraw_claims = {
@@ -365,5 +440,4 @@ class ListingsBindingAuthTest(unittest.TestCase):
             self.app, "POST", f"/v1/listings/{listing_id}/withdraw", {},
             self._compact_jws(withdraw_claims), idem,
         )
-        self.assertEqual(status, 403, payload)
-        self.assertIn("LISTINGS_APPROVAL_REQUIRED", payload.get("error", ""))
+        self.assertEqual(status, 200, payload)

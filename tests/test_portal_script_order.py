@@ -23,6 +23,9 @@
 
 （这里用"定义位置 < 使用位置"这个安全近似：helper 块整体前置后，两者的相对顺序不再
 依赖页面作者是否记得把调用放进事件回调里。）
+
+管理端 `_PORTAL_JS_EXTRA` 的对应守卫随运营后台移至私有仓
+kiwi-catalog-admin。
 """
 
 from __future__ import annotations
@@ -156,13 +159,6 @@ class PortalScriptOrderTest(unittest.TestCase):
         # 顶层只剩函数声明（占位 `function(){}`），没有游离语句
         leftover = stripped.replace("function(){}", "").strip()
         self.assertEqual(leftover, "", f"head_js 顶层出现了非函数声明的语句：{leftover[:120]}")
-
-    def test_admin_dashboard_script_stays_after_body(self) -> None:
-        """反向确认：管理端 `_PORTAL_JS_EXTRA` 有 load 期 DOM 访问，**不得**前置。
-
-        这条防止后人"顺手"把它也挪到 head_js——那会让管理端页面直接报错。
-        """
-        self.assertIn("document.getElementById", portal._PORTAL_JS_EXTRA)
 
 
 if __name__ == "__main__":  # pragma: no cover

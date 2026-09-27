@@ -28,8 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.api.extensions import extension_route_specs
+
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
-from kiwi_catalog.api.handlers import admin as admin_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
@@ -302,39 +303,6 @@ RouteEntry(
     ),
 RouteEntry(
         {"GET"},
-        "/v1/merchants/applications",
-        lambda db_path, payload, query, **kw: _v1_list_applications(db_path, payload, query),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/merchants/applications/{application_id}/approve",
-        lambda db_path, payload, query, application_id: _v1_approve_application(
-            db_path, application_id, payload
-        ),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/merchants/applications/{application_id}/reject",
-        lambda db_path, payload, query, application_id: _v1_reject_application(
-            db_path, application_id, payload
-        ),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/merchants/{merchant_id}/rotate",
-        lambda db_path, payload, query, merchant_id: _v1_rotate_token(
-            db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/merchants/{merchant_id}/revoke",
-        lambda db_path, payload, query, merchant_id: _v1_revoke_token(
-            db_path, merchant_id, payload
-        ),
-    ),
-RouteEntry(
-        {"GET"},
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
     ),
@@ -549,54 +517,6 @@ RouteEntry(
             db_path, request_id, payload
         ),
     ),
-# ── /v1/admin（运营 dashboard，docs §dashboard；admin token 保护）────────
-RouteEntry(
-        {"GET"},
-        "/v1/admin/dashboard",
-        lambda db_path, payload, query, **kw: _v1_admin_dashboard(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/merchants",
-        lambda db_path, payload, query, **kw: _v1_admin_merchants(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/merchants/{merchant_id}/report",
-        lambda db_path, payload, query, merchant_id: _v1_admin_merchant_report(
-            db_path, merchant_id, payload, query
-        ),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/searches",
-        lambda db_path, payload, query, **kw: _v1_admin_searches(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/buyer-stats",
-        lambda db_path, payload, query, **kw: _v1_admin_buyer_stats(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/buyer-day",
-        lambda db_path, payload, query, **kw: _v1_admin_buyer_day(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/access-log",
-        lambda db_path, payload, query, **kw: _v1_admin_access_log(db_path, payload, query),
-    ),
-RouteEntry(
-        {"GET"},
-        "/v1/admin/access-insights",
-        lambda db_path, payload, query, **kw: _v1_admin_access_insights(db_path, payload, query),
-    ),
-RouteEntry(
-        {"POST"},
-        "/v1/admin/token/rotate",
-        lambda db_path, payload, query, **kw: _v1_admin_token_rotate(db_path, payload),
-    ),
 # ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
 RouteEntry(
         {"GET"},
@@ -607,26 +527,6 @@ RouteEntry(
         {"GET"},
         "/portal/apply",
         lambda db_path, payload, query, **kw: _portal_apply(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/admin",
-        lambda db_path, payload, query, **kw: _portal_admin(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/admin/searches",
-        lambda db_path, payload, query, **kw: _portal_admin_searches(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/admin/buyer-stats",
-        lambda db_path, payload, query, **kw: _portal_admin_buyer_stats(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/dashboard",
-        lambda db_path, payload, query, **kw: _portal_dashboard(),
     ),
 RouteEntry(
         {"GET"},
@@ -669,16 +569,6 @@ RouteEntry(
         {"GET"},
         "/portal/publications",
         lambda db_path, payload, query, **kw: _portal_publications(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/merchant/{merchant_id}",
-        lambda db_path, payload, query, merchant_id: _portal_merchant(merchant_id),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/day/{day}",
-        lambda db_path, payload, query, day: _portal_day(day),
     ),
 RouteEntry(
         {"GET"},
@@ -838,26 +728,6 @@ def _v1_submit_application(db_path, payload):
     return accounts_handlers.token_request(db_path, payload, {})
 
 
-def _v1_list_applications(db_path, payload, query):
-    return merchants_handlers.list_applications(db_path, payload, query or {})
-
-
-def _v1_approve_application(db_path, application_id, payload):
-    return merchants_handlers.approve_application(db_path, application_id, payload)
-
-
-def _v1_reject_application(db_path, application_id, payload):
-    return merchants_handlers.reject_application(db_path, application_id, payload)
-
-
-def _v1_rotate_token(db_path, merchant_id, payload):
-    return merchants_handlers.rotate_token(db_path, merchant_id, payload)
-
-
-def _v1_revoke_token(db_path, merchant_id, payload):
-    return merchants_handlers.revoke_token(db_path, merchant_id, payload)
-
-
 def _v1_merchant_self(db_path, payload, query):
     return merchants_handlers.self_status(db_path, payload, query or {})
 
@@ -1008,45 +878,6 @@ def _v1_revoke_connector_identity(db_path, payload):
     return connector_identity_handlers.revoke_identity_token(db_path, payload)
 
 
-# ── /v1/admin wrapper（运营 dashboard）────────────────────────────────────
-
-
-def _v1_admin_dashboard(db_path, payload, query):
-    return admin_handlers.dashboard(db_path, payload, query or {})
-
-
-def _v1_admin_merchants(db_path, payload, query):
-    return admin_handlers.merchant_list(db_path, payload, query or {})
-
-
-def _v1_admin_merchant_report(db_path, merchant_id, payload, query):
-    return admin_handlers.merchant_report(db_path, merchant_id, payload, query or {})
-
-
-def _v1_admin_searches(db_path, payload, query):
-    return admin_handlers.search_events(db_path, payload, query or {})
-
-
-def _v1_admin_buyer_stats(db_path, payload, query):
-    return admin_handlers.buyer_stats(db_path, payload, query or {})
-
-
-def _v1_admin_buyer_day(db_path, payload, query):
-    return admin_handlers.buyer_day(db_path, payload, query or {})
-
-
-def _v1_admin_access_log(db_path, payload, query):
-    return admin_handlers.access_log(db_path, payload, query or {})
-
-
-def _v1_admin_access_insights(db_path, payload, query):
-    return admin_handlers.access_insights(db_path, payload, query or {})
-
-
-def _v1_admin_token_rotate(db_path, payload):
-    return admin_handlers.rotate_admin_token(db_path, payload)
-
-
 # ── /portal wrapper（门户页面）────────────────────────────────────────────
 
 
@@ -1056,30 +887,6 @@ def _portal_home():
 
 def _portal_apply():
     return portal_handlers.portal_apply()
-
-
-def _portal_admin():
-    return portal_handlers.portal_admin()
-
-
-def _portal_admin_searches():
-    return portal_handlers.portal_admin_searches()
-
-
-def _portal_admin_buyer_stats():
-    return portal_handlers.portal_admin_buyer_stats()
-
-
-def _portal_dashboard():
-    return portal_handlers.portal_dashboard()
-
-
-def _portal_merchant(merchant_id: str):
-    return portal_handlers.portal_merchant(merchant_id)
-
-
-def _portal_day(day: str):
-    return portal_handlers.portal_day(day)
 
 
 def _portal_register():
@@ -1140,11 +947,27 @@ def _v1_reinstate_listing(db_path, listing_id, payload=None, query=None):
     return listings_handlers.v1_reinstate_listing(db_path, listing_id, payload or {})
 
 
+def all_routes() -> tuple[RouteEntry, ...]:
+    """基表 + 扩展路由（docs/extensions.md）。
+
+    无扩展时直接返回基表（零分配快路径）；扩展路由追加在基表之后，
+    模板冲突时基路由优先（resolve_route 顺序匹配先到先得）。
+    """
+    specs = extension_route_specs()
+    if not specs:
+        return _ROUTE_TABLE
+    extra = tuple(
+        RouteEntry(set(spec.methods), spec.path_template, spec.handler)
+        for spec in specs
+    )
+    return _ROUTE_TABLE + extra
+
+
 def resolve_route(
     method: str, path: str, routes: tuple[RouteEntry, ...] | list[Any] | None = None
 ) -> tuple[bool, bool]:
     """Return (path_known, method_allowed) without parsing the request body."""
-    table = _ROUTE_TABLE if routes is None else tuple(routes)
+    table = all_routes() if routes is None else tuple(routes)
     path_known = False
     for route in table:
         template = getattr(route, "path_template", None) or getattr(route, "path", "")
