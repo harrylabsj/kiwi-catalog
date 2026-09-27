@@ -29,7 +29,7 @@
 
 ```bash
 pip install -e '.[api]'
-export KIWI_CATALOG_ADMIN_TOKEN=change-me
+export KIWI_CATALOG_ADMIN_TOKEN=change-me   # moderation 用（运营后台在私有扩展里）
 export KIWI_CATALOG_OWNER_TOKEN_SECRET=change-me
 kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 ```
@@ -37,7 +37,9 @@ kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 ## 认证
 
 - **admin token**（`KIWI_CATALOG_ADMIN_TOKEN`）：moderation 动作
-  （suspend/reinstate）与 verify；
+  （suspend/reinstate）与 verify。运营/审核后台（`/portal/dashboard`、
+  `/v1/admin/*`、商家审核 HTTP API）**不在本包**——以私有扩展
+  `kiwi-catalog-admin` 经 `KIWI_CATALOG_EXTENSIONS` 挂载（docs/extensions.md）；
 - **catalog-owner token**（`KIWI_CATALOG_OWNER_TOKEN_SECRET` 派生 HMAC）：
   owner 语义（claim/refresh）——`kiwi_catalog.api.auth.owner_token(merchant_id)`
   生成，请求体 `owner_token` 字段携带。

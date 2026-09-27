@@ -79,24 +79,19 @@ owner token 双路径（`api/auth.py`）：
 | 路由 | 语义 |
 | --- | --- |
 | `POST /v1/merchants/applications` | 提交接入申请（**会话鉴权**：2026-08-12 起关闭匿名公开通道——假邮箱直接提交工单被滥用；与 `/v1/accounts/token-request` 同一处理函数，contact_email 取账号邮箱） |
-| `GET /v1/merchants/applications` | 列出申请（admin） |
-| `POST /v1/merchants/applications/{id}/approve` | 审批通过 → 签发随机 token（Fernet 加密落库），响应含 `token_prefix` |
-| `POST /v1/merchants/applications/{id}/reject` | 拒绝 |
-| `POST /v1/merchants/{merchant_id}/token/rotate` | 轮换 token（旧 token 失效） |
-| `POST /v1/merchants/{merchant_id}/token/revoke` | 吊销 token |
-| `POST /v1/merchants/{merchant_id}/token/recover` | 恢复 token（幂等重放路径，POST /merchants 幂等错误提示指引该端点） |
-| `GET /v1/merchants/{merchant_id}/agents` | 按商家列出 agents（owner/admin） |
+| `GET /v1/merchants/self` | 商家自查（token 即身份；`merchant_id` 参数走 admin 分支） |
 
-### 3.3 `/v1/admin/*`（运营 dashboard，admin token 保护）
+审核/签发端点（applications 列表、approve/reject、token rotate/revoke）
+已移至私有扩展 `kiwi-catalog-admin`（docs/extensions.md）；本地运营走 CLI
+（`catalog merchant applications approve/reject`、`catalog merchant token
+rotate/revoke`，与 `services/merchant_tokens.py` 直连）。
 
-应用列表/审批动作的管理视图。
+### 3.3 admin token 凭据口径（`/v1/admin/*` 已移出开源包）
 
-| 路由 | 说明 |
-| --- | --- |
-| `GET /v1/admin/*` | 只读聚合（dashboard / merchants / report / searches / buyer-stats / buyer-day / access-log / access-insights） |
-| `POST /v1/admin/token/rotate` | **轮换 admin token**（2026-09-26，迁移 v37）。必须带当前 token；body `new_token` 可选（≥24 字符、不含空白），缺省由服务端生成 43 字符；响应里的明文**只返回一次**；旧值立即失效 |
-
-**轮换语义与恢复**（`services/admin_credentials.py` + `db/session.py` 的迁移链）：
+`/v1/admin/*` 数据 API、`POST /v1/admin/token/rotate` 与后台页面已移至私有扩展
+`kiwi-catalog-admin`（docs/extensions.md）。**admin token 凭据口径保留在本包**——
+moderation 路径（agent_catalog suspend/reinstate/verify/claim、listings owner 豁免、
+cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据：
 
 - 表 `admin_credentials` 是**单例行**，只存 SHA-256 摘要；`env` 的
   `KIWI_CATALOG_ADMIN_TOKEN` 只作**首次引导**——一旦有行，旧配置值不再被接受
@@ -107,23 +102,15 @@ owner token 双路径（`api/auth.py`）：
 - **恢复路径**（丢失新 token / 需要交回配置管理时）：
   `sqlite3 <db> "delete from admin_credentials where credential_id = 1"` + 重启服务，
   env 引导值重新生效。
-- **回滚注意**：迁移 v37 会把 `meta.schema_version` 提到 37，而旧版本代码拒绝打开
-  "比自己新"的库（`RuntimeError: database schema version ... is newer`）。因此回滚旧包时
-  需一并把 `meta.schema_version` 改回 36（多出的空表对旧代码无害）或恢复部署前的库备份。
-- 轮换后发一封通知邮件（`KIWI_CATALOG_ADMIN_NOTIFY_EMAIL`，未配置则不发）：轮换会让旧值
-  立即失效，若是攻击者所为，这封信是运营唯一的即时信号。发信失败不回滚轮换。
-- 门户 `/portal/*` 的 admin 页都有 token 面板：「记住」把 token 存进**本浏览器**
-  （localStorage，已记住时校验一次并给出"通过/被拒/无法判定"）、「更换」只改本浏览器、
-  「轮换服务器 token」才真正改服务器（需当前 token 有效 + 二次确认）。
+- 轮换端点在私有扩展内，语义不变（必须带当前 token；`new_token` 可选 ≥24 字符；
+  明文只返回一次；轮换后发通知邮件，发信失败不回滚轮换）。
 
-### 3.4 `/portal/*`（HTML 门户，登录态）
+### 3.4 `/portal/*`（HTML 门户，登录态；运营/审核页面见私有扩展 kiwi-catalog-admin）
 
 | 路由 | 页面 |
 | --- | --- |
 | `/portal` | 商家后台／商品名额入口 |
 | `/portal/apply` | 旧链接，显示商家后台／商品名额 |
-| `/portal/admin` | admin 审批列表 |
-| `/portal/dashboard` | 商家仪表盘 |
 | `/portal/register` / `/portal/login` | 商家注册（**必填商家名称**，注册即商家）/ 登录 |
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + 商品名额（已用／总额），不展示 Listings owner-token 配置步骤 |
