@@ -591,6 +591,23 @@ class ProfileFetcher:
         record_profile_fetch(_time.monotonic() - start, ok=result.is_success or result.is_not_modified)
         return result
 
+    def post_json(self, url: str, body: dict[str, Any], *, timeout: float = 5.0) -> FetchResult:
+        """SSRF-safe bounded JSON POST; redirects are rejected for possession challenges."""
+        parsed = self._validate_url(url)
+        scheme, hostname = parsed.scheme, parsed.hostname
+        assert hostname is not None
+        port = _port_of(parsed, scheme)
+        if self._policy.require_https and scheme != "https":
+            raise SSRFBlockError("HTTPS is required")
+        _validate_port(port, self._policy.allowed_ports)
+        verified_ip = _resolve_and_validate(hostname, port)
+        payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(payload) > self._policy.max_profile_bytes:
+            raise FetchLimitError("POST body exceeds configured limit")
+        return self._make_request(url, str(verified_ip), hostname, port, None, None,
+                                  _time.time(), method="POST", data=payload,
+                                  timeout=min(float(timeout), self._timeout), redirect_limit=0)
+
     def _fetch(
         self,
         url: str,
@@ -701,6 +718,8 @@ class ProfileFetcher:
         etag: str | None,
         last_modified: str | None,
         fetched_at: float,
+        *, method: str = "GET", data: bytes | None = None, timeout: float | None = None,
+        redirect_limit: int | None = None,
     ) -> FetchResult:
         """Execute the HTTP request with all SSRF protections in place."""
         # Build request with conditional headers
@@ -708,22 +727,24 @@ class ProfileFetcher:
             "Accept": "application/json",
             "Host": hostname,
         }
+        if data is not None:
+            req_headers["Content-Type"] = "application/json"
         if etag:
             req_headers["If-None-Match"] = etag
         if last_modified:
             req_headers["If-Modified-Since"] = last_modified
 
-        request = urllib.request.Request(url, headers=req_headers)
+        request = urllib.request.Request(url, data=data, headers=req_headers, method=method)
 
         # Build opener with verified-IP connection
         redirect_validator = self._validate_redirect_target
         opener = _build_opener(
             verified_ip, hostname, port,
-            self._policy.redirect_limit, redirect_validator,
+            self._policy.redirect_limit if redirect_limit is None else redirect_limit, redirect_validator,
         )
 
         try:
-            with opener.open(request, timeout=self._timeout) as response:
+            with opener.open(request, timeout=timeout or self._timeout) as response:
                 # 审查 P3：response.geturl() 是重定向后的终址——此前传初请求
                 # URL，快照/审计记录的是跳转前地址。
                 return self._process_response(response, response.geturl(), fetched_at)

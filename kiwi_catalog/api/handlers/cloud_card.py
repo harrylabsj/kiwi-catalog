@@ -41,6 +41,21 @@ from kiwi_catalog.a2a.request_signature import verify_runtime_request
 from kiwi_catalog.agent_catalog.catalog_audit import append_catalog_audit
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
+from kiwi_catalog.core.errors import ConflictError
+
+
+def _enrollment_digest_guard(conn: Any, agent_id: str, binding_id: str, digest: str) -> Any:
+    """Enrollment scope freezes the first public card digest to the approved preview."""
+    row = conn.execute("select * from enrollments where catalog_agent_id=? and binding_id=?",
+                       (agent_id, binding_id)).fetchone()
+    if row is None:
+        return None  # pre-enrollment bindings retain their legacy publication flow
+    scopes = __import__("json").loads(row["scopes_json"])
+    agent = conn.execute("select administrative_state from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
+    if (row["status"] not in ("bound", "published") or agent is None or agent["administrative_state"] != "active"
+            or "card:publish" not in scopes or digest != row["approved_card_digest"]):
+        raise ConflictError("card digest or scope differs from merchant-approved enrollment")
+    return row
 
 SIGNATURE_HEADER = "x-kiwi-binding-jws"
 
@@ -115,6 +130,8 @@ def create_card_publication(
                 expected_fields=_signed_fields(payload, agent_id),
             )
             actor = f"runtime:{actor_payload.get('binding_id', '')}"
+            _enrollment_digest_guard(conn, agent_id, str(actor_payload.get("binding_id", "")),
+                                     str(publication.get("card_digest", "")))
             created = create_card_revision(
                 conn,
                 catalog_agent_id=agent_id,
@@ -167,6 +184,10 @@ def activate_card_publication(
             },
         )
         actor = f"runtime:{actor_payload.get('binding_id', '')}"
+        version = conn.execute("select digest from agent_card_versions where catalog_agent_id=? and card_revision=?",
+                               (agent_id, revision)).fetchone()
+        enrol = _enrollment_digest_guard(conn, agent_id, str(actor_payload.get("binding_id", "")),
+                                         str(version["digest"]) if version else "")
         result = activate_card(
             conn,
             catalog_agent_id=agent_id,
@@ -182,6 +203,9 @@ def activate_card_publication(
             event="card_publication_activated",
             details={"active_revision": result["active_revision"], "etag": result["etag"]},
         )
+        if enrol is not None:
+            conn.execute("update enrollments set status='published' where enrollment_id=? and status='bound'",
+                         (enrol["enrollment_id"],))
         return result
 
 

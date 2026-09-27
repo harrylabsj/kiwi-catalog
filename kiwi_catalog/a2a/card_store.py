@@ -325,6 +325,10 @@ def activate_card(
         if updated.rowcount != 1:
             # 并发激活：另一请求已把 active_revision 推走 → CAS 失败（旧版本不被覆盖）。
             raise ConflictError("concurrent activation detected (CAS failed)")
+    # §4.5：激活 = 可被发现——同事务同步端点行（agent_card 稳定读地址 + a2a）。
+    from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+    sync_cloud_endpoints(conn, catalog_agent_id, now)
     return {
         "catalog_agent_id": catalog_agent_id,
         "active_revision": int(revision),
@@ -360,6 +364,11 @@ def set_publication_state(
         " where catalog_agent_id = ? and active_revision = ?",
         (state, now, catalog_agent_id, int(expected_revision)),
     )
+    # §4.5：治理状态同步到端点行——暂停保留两行（公开信息保留）；撤回删两行
+    #（不再可被发现，与稳定地址 410 同口径）。同事务、幂等。
+    from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+    sync_cloud_endpoints(conn, catalog_agent_id, now)
     return {
         "catalog_agent_id": catalog_agent_id,
         "active_revision": int(current["active_revision"]),

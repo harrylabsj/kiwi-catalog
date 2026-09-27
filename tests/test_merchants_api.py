@@ -589,7 +589,7 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertIn("Kiwi", payload.get("_raw", ""))
 
     def test_portal_home_shows_readonly_merchant_id(self) -> None:
-        """Token 申请表单：只读商家 ID 字段 + 未分配时灰化提交并引导注册。"""
+        """Token 申请（D7 一个按钮）：只读商家 ID/名称 + 未分配时灰化并引导注册。"""
         status, payload, _ = _call_http(self.app, "GET", "/portal")
         raw = payload.get("_raw", "")
         self.assertEqual(status, 200, payload)
@@ -597,11 +597,13 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertIn("r.merchant_id", raw)
         self.assertIn("尚未分配商家 ID", raw)
         self.assertIn("/portal/register", raw)
-        # 商家名称只读（基本信息页修改）+ 「商家域名」标签
+        # 商家名称只读（基本信息页修改）；申请收成一个按钮，无域名输入框
         self.assertIn('id="t_name" readonly', raw)
         self.assertIn("基本信息", raw)
-        self.assertIn("商家域名", raw)
+        self.assertIn("申请目录令牌", raw)
+        self.assertNotIn("t_domain", raw)
         self.assertNotIn("店铺域名", raw)
+        self.assertNotIn("商家域名", raw)
 
     def test_portal_admin_hidden_by_default(self) -> None:
         """审核后台不对外公布：默认 404，页面不含审核表单。"""

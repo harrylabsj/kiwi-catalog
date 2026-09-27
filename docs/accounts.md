@@ -9,8 +9,9 @@
 商家在 kiwi-catalog 上的自助接入面：注册商家账号（**商家名称、电话必填**，
 邮箱 + 密码，微信选填）→ 邮箱验证 → 登录。**注册即成为商家**——分配平台
 merchant_id 并创建影子 `merchants` 行，admin dashboard **无需审批即可见**。
-商家令牌仍需单独申请：在「我的」提交 merchant 接入申请（**只需店铺域名**，
-商家名称/电话自动带出）→ admin 审批 → 获得**随机 owner token**（加密存储），
+商家令牌仍需单独申请：在「我的」点「申请目录令牌」提交 merchant 接入申请
+（**零输入**，D7：域名选填，商家名称/电话自动带出）→ admin 审批 → 获得
+**随机 owner token**（加密存储），
 用于 `/v1/listings/publish`、`/v1/agents/{id}/listings` 自查、
 `/v1/merchants/{id}/token/*` 等 owner 语义动作。
 
@@ -61,7 +62,7 @@ owner token 双路径（`api/auth.py`）：
 | `POST /v1/accounts/reset-password` | 重置码 + 新密码改密；账号不存在与码错误统一 403（不区分）；成功后该账号全部会话失效、邮箱标记已验证 |
 | `POST /v1/accounts/logout` | 吊销会话 |
 | `GET /v1/accounts/me` | 当前会话账号视图 |
-| `POST /v1/accounts/token-request` | 登录态提交 token 申请——**只需店铺域名**；商家名称/电话自动从账号（注册时填写）带出（`/v1/merchants/applications` 的 POST 与本端点同一处理函数） |
+| `POST /v1/accounts/token-request` | 登录态提交 token 申请——**零输入**（D7：`domain`/`purpose` 选填，仅 CLI 与老调用方可能带）；商家名称/电话自动从账号（注册时填写）带出（`/v1/merchants/applications` 的 POST 与本端点同一处理函数） |
 | `GET /v1/accounts/profile` | 会话账号 + 名下 merchants 状态 |
 
 限流：register/login 均 15min 窗口 per-email（`merchant_application_limits`）。

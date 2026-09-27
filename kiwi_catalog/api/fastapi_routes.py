@@ -69,6 +69,8 @@ from kiwi_catalog.api.route_table import (
     _v1_claim_agent,
     _v1_create_connector_identity_request,
     _v1_create_merchant_publication,
+    _v1_create_device_enrollment,
+    _v1_device_enrollment_token,
     _v1_decide_connector_identity_request,
     _v1_exchange_connector_identity,
     _v1_follow_merchant,
@@ -375,10 +377,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_heartbeat_catalog_agent(
         request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
+        # D6：心跳接受绑定私钥签名——x-kiwi-binding-jws 头必须透传（fallback
+        # 栈在 payload_with_auth 里对所有路由统一合并，这里对齐）。
         return _heartbeat_catalog_agent(
             db_path,
             catalog_agent_id,
-            api_auth.payload_with_auth(payload, request.headers.get("authorization", ""), ""),
+            api_auth.payload_with_auth(
+                payload,
+                request.headers.get("authorization", ""),
+                "",
+                request.headers.get(BINDING_JWS_HEADER_NAME, ""),
+            ),
         )
 
     @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/refresh")
@@ -626,28 +635,43 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path,
             catalog_agent_id,
             _query_params_from_request(request),
-            api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
+            api_auth.payload_with_auth(
+                {}, request.headers.get("authorization", ""), "",
+                request.headers.get(BINDING_JWS_HEADER_NAME, ""),
+            ),
         )
 
     @app.post("/v1/listings/publish")
     def v1_publish_listing(
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
         return _v1_publish_listing(
-            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path,
+            api_auth.payload_with_auth(
+                payload,
+                authorization,
+                idempotency_key,
+                request.headers.get(BINDING_JWS_HEADER_NAME, ""),
+            ),
         )
 
     @app.post("/v1/listings/{listing_id}/withdraw")
     def v1_withdraw_listing(
+        request: _FastAPIRequest,
         listing_id: str,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
         return _v1_withdraw_listing(
-            db_path, listing_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path, listing_id,
+            api_auth.payload_with_auth(
+                payload, authorization, idempotency_key,
+                request.headers.get(BINDING_JWS_HEADER_NAME, ""),
+            ),
         )
 
     @app.post("/v1/listings/{listing_id}/reinstate")
@@ -765,9 +789,13 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     def _account_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
         cookie = request.headers.get("cookie", "")
+        body = dict(body or {})
+        for reserved in ("_cookie", "_origin", "_referer"):
+            body.pop(reserved, None)
         if cookie:
-            body = dict(body or {})
             body["_cookie"] = cookie
+        body["_origin"] = request.headers.get("origin", "")
+        body["_referer"] = request.headers.get("referer", "")
         return body
 
     def _merchant_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
@@ -823,6 +851,99 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
         return accounts_handlers.profile(db_path, _account_payload(request, payload))
+
+    @app.post("/v1/accounts/agents")
+    def v1_account_create_agent(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.create_agent(db_path, _account_payload(request, payload), {})
+
+    @app.get("/v1/accounts/enrollments/{enrollment_id}")
+    def v1_account_enrollment(request: _FastAPIRequest, enrollment_id: str) -> dict[str, Any]:
+        return accounts_handlers.enrollment_detail(db_path, enrollment_id, _account_payload(request, {}))
+
+    @app.post("/v1/accounts/enrollments/{enrollment_id}/authorize")
+    def v1_account_authorize_enrollment(request: _FastAPIRequest, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.authorize_enrollment(db_path, enrollment_id, _account_payload(request, payload))
+
+    @app.post("/v1/enrollments/device")
+    def v1_create_device_enrollment(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        body = dict(payload or {})
+        body.pop("_client_ip", None)
+        client = getattr(request, "client", None)
+        body["_client_ip"] = resolve_client_ip(request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None)
+        return _v1_create_device_enrollment(db_path, api_auth.payload_with_auth(body, "", "", request.headers.get(BINDING_JWS_HEADER_NAME, "")))
+
+    @app.post("/v1/enrollments/device/token")
+    def v1_device_enrollment_token(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        body = dict(payload or {})
+        body.pop("_client_ip", None)
+        client = getattr(request, "client", None)
+        body["_client_ip"] = resolve_client_ip(request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None)
+        return _v1_device_enrollment_token(db_path, api_auth.payload_with_auth(body, "", "", request.headers.get(BINDING_JWS_HEADER_NAME, "")))
+
+    @app.get("/v1/issuer-keys")
+    def v1_issuer_keys() -> dict[str, Any]:
+        from kiwi_catalog.api.handlers.enrollments import issuer_keys
+        return issuer_keys()
+
+    @app.get("/v1/accounts/agents")
+    def v1_account_list_agents(request: _FastAPIRequest) -> dict[str, Any]:
+        return accounts_handlers.list_agents(db_path, _account_payload(request, {}), {})
+
+    @app.get("/v1/accounts/agents/{catalog_agent_id}/card")
+    def v1_account_get_agent_card(request: _FastAPIRequest, catalog_agent_id: str) -> dict[str, Any]:
+        return accounts_handlers.get_agent_card(
+            db_path, catalog_agent_id, _account_payload(request, {}), {}
+        )
+
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/card/pause")
+    def v1_account_pause_agent_card(
+        request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.set_agent_card_state(
+            db_path, catalog_agent_id, _account_payload(request, payload), {}, "pause"
+        )
+
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/card/resume")
+    def v1_account_resume_agent_card(
+        request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.set_agent_card_state(
+            db_path, catalog_agent_id, _account_payload(request, payload), {}, "resume"
+        )
+
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/card/withdraw")
+    def v1_account_withdraw_agent_card(
+        request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.set_agent_card_state(
+            db_path, catalog_agent_id, _account_payload(request, payload), {}, "withdraw"
+        )
+
+    @app.get("/v1/accounts/agents/{catalog_agent_id}/bindings/pending")
+    def v1_account_list_pending_bindings(
+        request: _FastAPIRequest, catalog_agent_id: str
+    ) -> dict[str, Any]:
+        return accounts_handlers.list_pending_bindings(
+            db_path, catalog_agent_id, _account_payload(request, {}), {}
+        )
+
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/confirm")
+    def v1_account_confirm_binding(
+        request: _FastAPIRequest, catalog_agent_id: str, binding_request_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.decide_binding(
+            db_path, catalog_agent_id, binding_request_id, _account_payload(request, payload), {}, "confirm"
+        )
+
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/reject")
+    def v1_account_reject_binding(
+        request: _FastAPIRequest, catalog_agent_id: str, binding_request_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.decide_binding(
+            db_path, catalog_agent_id, binding_request_id, _account_payload(request, payload), {}, "reject"
+        )
 
     # ── /v1/merchant-publications（M0 商家公开资料；会话 cookie 经 _account_payload 透传）
     @app.post("/v1/merchant-publications")
@@ -1045,6 +1166,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def portal_apply_page() -> Response:
         return _portal_html(portal_handlers.portal_apply())
 
+    @app.get("/portal/connect/{enrollment_id}")
+    def portal_connect_page(enrollment_id: str) -> Response:
+        return _portal_html(portal_handlers.portal_enrollment_connect(enrollment_id))
+
     @app.get("/portal/admin")
     def portal_admin_page() -> Response:
         return _portal_html(portal_handlers.portal_admin())
@@ -1078,7 +1203,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _portal_html(portal_handlers.portal_login())
 
     @app.get("/portal/connect")
-    def portal_connect_page() -> Response:
+    def portal_connector_connect_page() -> Response:
         return _portal_html(portal_handlers.portal_connect())
 
     @app.get("/portal/reset-password")
@@ -1092,6 +1217,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/portal/account/profile")
     def portal_account_profile_page() -> Response:
         return _portal_html(portal_handlers.portal_account_profile())
+
+    @app.get("/portal/account/card")
+    def portal_account_card_page() -> Response:
+        return _portal_html(portal_handlers.portal_account_card())
 
     @app.get("/portal/publications")
     def portal_publications_page() -> Response:

@@ -38,6 +38,7 @@ from kiwi_catalog.listings.domain import (
 _AUTH_FIELDS: frozenset[str] = frozenset({
     "owner_token",
     "_auth_token",
+    "_binding_jws",
     "admin_token",
     "idempotency_key",
     "_idempotency_key",

@@ -41,7 +41,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from kiwi_catalog.a2a.card_store import read_active_card
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
-from kiwi_catalog.core.errors import NotFoundError, PermissionDenied, ValidationError
+from kiwi_catalog.core.errors import GoneError, NotFoundError, PermissionDenied, ValidationError
 
 CLAIMS_SCHEMA_VERSION = "0.1.2"
 MAX_CLAIMS_TTL_SECONDS = 15 * 60
@@ -178,13 +178,21 @@ def read_runtime_binding(
     if expires_at and datetime.fromisoformat(expires_at) <= current:
         raise PermissionDenied("runtime binding expired; refusing to issue claims")
 
-    # 治理状态：撤回/无活动名片时**不签发**（§11.6 SIG-02）。
+    # 治理状态（§11.6 SIG-02 的撤回拒签语义不变，仅把「从未发布」拆出来）：
+    # - WITHDRAWN（撤回，read_active_card 抛 GoneError）→ 拒签（403）；
+    # - PAUSED → 公开信息保留，照常签发（现状不变）；
+    # - **从未发布**（NotFoundError：连 card_publications 行都没有或活动版本
+    #   缺失）→ 照常签发：绑定已由商家在门户确认背书（D1），首绑确认后、首次
+    #   发布前运行时必须能读到 binding_id 才能签名首发（否则死锁）。此时
+    #   governance.publication_state 给诚实值 "UNPUBLISHED"，顶层
+    #   card_revision/card_etag 为 None。买家侧无风险：发布激活前不会写
+    #   agent_card 端点行（§4.5），买家根本发现不了这个 agent。
     try:
         _card, _etag, publication_state = read_active_card(conn, catalog_agent_id)
-    except Exception as exc:  # NotFoundError / GoneError 都视为不可签发
-        raise PermissionDenied(f"agent is not publishable: {exc}") from exc
-    if publication_state == "WITHDRAWN":
-        raise PermissionDenied("publication withdrawn; refusing to issue claims")
+    except GoneError as exc:
+        raise PermissionDenied("publication withdrawn; refusing to issue claims") from exc
+    except NotFoundError:
+        publication_state = "UNPUBLISHED"
 
     # 纵深防御（T035）：即便库里存了一条不安全目标的绑定，也绝不签发给 Buyer。
     # 创建时已拦一次；签发是第二个出口，同样 fail-closed。

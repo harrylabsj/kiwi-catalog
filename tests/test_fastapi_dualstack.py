@@ -277,5 +277,151 @@ class FastApiDualStackTest(unittest.TestCase):
                 self.assertIn("events", body)
 
 
+    def test_account_agents_routes_in_both_stacks(self) -> None:
+        """P0 批次 B：接入记录 3 条 API + 「我的名片」页双栈注册（设计 §5.2）。
+
+        无会话一律 403（与 /v1/accounts/me 同一会话约定）；页面 200 HTML。
+        """
+        from fastapi.testclient import TestClient
+
+        new_paths = {
+            "/v1/accounts/agents",
+            "/v1/accounts/agents/{catalog_agent_id}/card",
+            "/v1/accounts/agents/{catalog_agent_id}/card/pause",
+            "/v1/accounts/agents/{catalog_agent_id}/card/resume",
+            "/v1/accounts/agents/{catalog_agent_id}/card/withdraw",
+            "/v1/accounts/agents/{catalog_agent_id}/bindings/pending",
+            "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/confirm",
+            "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/reject",
+            "/portal/account/card",
+        }
+        self.assertTrue(new_paths <= {entry.path_template for entry in app_module._ROUTE_TABLE})
+        with TestClient(self.app) as client:
+            resp = client.post("/v1/accounts/agents", json={})
+            self.assertEqual(resp.status_code, 403, resp.text)
+            resp = client.get("/v1/accounts/agents")
+            self.assertEqual(resp.status_code, 403, resp.text)
+            resp = client.get("/v1/accounts/agents/cagt_x/card")
+            self.assertEqual(resp.status_code, 403, resp.text)
+            for action in ("pause", "resume", "withdraw"):
+                resp = client.post(
+                    f"/v1/accounts/agents/cagt_x/card/{action}", json={"expected_revision": 1}
+                )
+                self.assertEqual(resp.status_code, 403, (action, resp.text))
+            resp = client.get("/v1/accounts/agents/cagt_x/bindings/pending")
+            self.assertEqual(resp.status_code, 403, resp.text)
+            for action in ("confirm", "reject"):
+                resp = client.post(
+                    f"/v1/accounts/agents/cagt_x/bindings/breq_x/{action}", json={}
+                )
+                self.assertEqual(resp.status_code, 403, (action, resp.text))
+
+    def test_heartbeat_accepts_binding_signature_in_fastapi(self) -> None:
+        """D6：FastAPI 栈的心跳也必须透传 x-kiwi-binding-jws（fallback 在全路由
+        统一合并该头，FastAPI 路由要显式取——漏了就是 500/403 的双栈漂移）。
+
+        全链路：注册 → 门户建接入记录 → admin 直绑 → 绑定私钥签名心跳 → 200。
+        """
+        import base64 as _b64
+        import json as _json
+        import uuid as _uuid
+        from datetime import datetime, timezone
+
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+            PublicFormat,
+        )
+        from fastapi.testclient import TestClient
+
+        from kiwi_catalog.a2a.binding_claims import jwk_thumbprint
+
+        def b64url(raw: bytes) -> str:
+            return _b64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+        key = Ed25519PrivateKey.generate()
+        pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode()
+        jwk = {
+            "kty": "OKP", "crv": "Ed25519",
+            "x": b64url(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)),
+        }
+
+        def jws(kid: str, fields: dict) -> str:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+            header = {"alg": "EdDSA", "kid": kid}
+            body = {
+                **fields,
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "nonce": f"nonce-{_uuid.uuid4().hex}",
+            }
+            h = b64url(_json.dumps(header, separators=(",", ":")).encode())
+            p = b64url(_json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode())
+            k = load_pem_private_key(pem.encode(), password=None)
+            return f"{h}.{p}.{b64url(k.sign(f'{h}.{p}'.encode('ascii')))}"
+
+        origin = "https://hb-fastapi.example.app.workbuddy.host"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_ADMIN_TOKEN": "admin-tok",
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret",
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+            },
+            clear=False,
+        ):
+            with TestClient(self.app) as client:
+                resp = client.post("/v1/accounts/register", json={
+                    "merchant_name": "HB 商贸", "email": "hb@acme.example",
+                    "password": "strong-pw-123", "phone": "+86 138 0000 0000",
+                })
+                self.assertEqual(resp.status_code, 200, resp.text)
+                resp = client.post("/v1/accounts/verify-email", json={
+                    "email": "hb@acme.example", "code": resp.json()["verification_code"],
+                })
+                self.assertEqual(resp.status_code, 200, resp.text)
+                # TestClient 的 cookie jar 不会把 Secure cookie 回传给 http://testserver
+                # ——手动从 Set-Cookie 提取并显式传递（与 fallback 测试同法）。
+                session = resp.headers["set-cookie"].split(";")[0].split("=", 1)[1]
+                cookie = {"cookie": f"kiwi_session={session}"}
+                resp = client.post("/v1/accounts/agents", json={}, headers=cookie)
+                self.assertEqual(resp.status_code, 200, resp.text)
+                cagt = resp.json()["catalog_agent_id"]
+                # admin 直绑（运维兜底路径）拿活动绑定
+                bind_body = {
+                    "binding": {
+                        "runtime_origin": origin, "a2a_endpoint": f"{origin}/a2a",
+                        "key_jwk": jwk, "key_id": origin, "generation": 1, "service_epoch": 7,
+                    },
+                    "admin_token": "admin-tok",
+                }
+                bind_sig = jws(origin, {
+                    "agent_id": cagt, "key_id": origin,
+                    "key_thumbprint": jwk_thumbprint(jwk),
+                    "runtime_origin": origin, "a2a_endpoint": f"{origin}/a2a",
+                    "generation": 1, "service_epoch": 7,
+                })
+                resp = client.post(
+                    f"/v1/agents/{cagt}/runtime-bindings",
+                    json=bind_body, headers={"x-kiwi-binding-jws": bind_sig},
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                binding_id = resp.json()["binding_id"]
+                # 绑定签名心跳（无 cookie、无 owner token——只带签名头）
+                hb_sig = jws(origin, {"agent_id": cagt, "binding_id": binding_id})
+                resp = client.post(
+                    f"/v1/agent-catalog/agents/{cagt}/heartbeat",
+                    json={}, headers={"x-kiwi-binding-jws": hb_sig},
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertEqual(resp.json()["actor"], f"runtime:{binding_id}")
+                self.assertEqual(resp.json()["freshness_state"], "fresh")
+            resp = client.get("/portal/account/card")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertIn("我的名片", resp.text)
+
+
 if __name__ == "__main__":
     unittest.main()

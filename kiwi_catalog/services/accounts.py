@@ -47,10 +47,10 @@ from typing import Any
 
 from kiwi_catalog.core.errors import ConflictError, ShoppingCliError, ValidationError
 from kiwi_catalog.core.tokens import token_digest, token_matches
-
-_LOGGER = logging.getLogger(__name__)
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
+
+_LOGGER = logging.getLogger(__name__)
 
 _SESSION_TTL_DAYS = 7
 _PBKDF2_ITERATIONS = 200_000
@@ -340,6 +340,44 @@ def notify_admin_new_application(
         return True
     except Exception as exc:  # noqa: BLE001 —— 旁路：任何发信失败都不得影响申请
         _LOGGER.warning("admin application notification failed: %r", exc)
+        return False
+
+
+def notify_admin_binding_request(
+    *,
+    merchant_id: str,
+    catalog_agent_id: str,
+    binding_request_id: str,
+    runtime_origin: str,
+    a2a_endpoint: str,
+    key_thumbprint: str,
+    expires_at: str = "",
+) -> bool:
+    """运行时**首次绑定请求**（待商家门户确认，D1）落库时通知运营邮箱。
+
+    与 notify_admin_new_application 同一旁路语义：收件人取 env
+    ``KIWI_CATALOG_ADMIN_NOTIFY_EMAIL``，未配置 → False；**不抛异常**——
+    发信失败绝不能影响绑定请求。调用方应在**事务提交之后**调用。
+    """
+    to = (os.environ.get(_ADMIN_NOTIFY_EMAIL_ENV) or "").strip()
+    if not to:
+        return False
+    body = (
+        "新的运行时绑定请求（待商家在门户确认）：\n\n"
+        f"merchant_id：{merchant_id or '(未分配)'}\n"
+        f"catalog_agent_id：{catalog_agent_id}\n"
+        f"请求单号：{binding_request_id}\n"
+        f"运行时地址：{runtime_origin or '(未知)'}\n"
+        f"A2A 端点：{a2a_endpoint or '(未知)'}\n"
+        f"密钥指纹：{key_thumbprint or '(未知)'}\n"
+        f"请求过期时间：{expires_at or '(未知)'}\n\n"
+        f"运营可见性与撤销入口：{_ADMIN_PORTAL_URL}\n"
+    )
+    try:
+        _send_email(to, f"[Kiwi] 新运行时绑定请求：{runtime_origin or catalog_agent_id}", body)
+        return True
+    except Exception as exc:  # noqa: BLE001 —— 旁路：任何发信失败都不得影响请求
+        _LOGGER.warning("binding request notification failed: %r", exc)
         return False
 
 
@@ -720,7 +758,7 @@ def request_token(
     """"我的"里申请 token：已有 active → 返回现状；已有 pending 工单 →
     提示等待；被拒后可重新申请（新建 pending 工单，原被拒工单保留为
     审计记录）；否则用商家信息建工单——商家名称/电话从账号（注册时填写）
-    自动带出，页面只需填店铺域名。"""
+    自动带出，页面零输入（D7：申请收成一个按钮，不再收集域名）。"""
     # fail-closed 纵深防御（2026-08-12 关闭匿名申请通道）：申请必须绑定已
     # 分配 merchant_id 的账号；正常路径 resolve_session 已懒回填，为空说明
     # 账号未完成注册，直接拒绝。
@@ -731,9 +769,13 @@ def request_token(
         return {"status": "active", "message": "token already issued", **view}
     if view["application"] and view["application"]["status"] == "pending":
         return {"status": "pending", "message": "application pending review", **view}
-    from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
+    # domain 选填（D7：无域名商家也可申请）：空值直接存空；非空仍走
+    # canonical 校验，非法值照旧 ValidationError → 400。
+    domain = str(domain or "").strip()
+    if domain:
+        from kiwi_catalog.services.agent_catalog_writes import normalize_canonical_domain
 
-    domain = normalize_canonical_domain(domain)
+        domain = normalize_canonical_domain(domain)
     agent_id = str(agent_id or "").strip()
     # 商家名称/电话从账号（注册时填写）自动带出；agent_name/phone 参数仅
     # 历史 API 调用方兼容（页面已不再收集）。

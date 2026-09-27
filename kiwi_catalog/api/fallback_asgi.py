@@ -179,6 +179,7 @@ class MarketplaceASGIApp:
                 await _capture_send({"type": "http.response.body", "body": body})
                 return
             payload = decoded_payload
+            payload.pop("_cookie", None)
             payload = api_auth.payload_with_auth(
                 payload,
                 authorization=headers.get("authorization", ""),
@@ -189,6 +190,8 @@ class MarketplaceASGIApp:
             cookie = headers.get("cookie", "")
             if cookie:
                 payload["_cookie"] = cookie
+            payload["_origin"] = headers.get("origin", "")
+            payload["_referer"] = headers.get("referer", "")
             # 买家身份头（每日去重买家统计，services/buyer_stats.py）：buyer agent
             # 自选标识；只以日作用域 HMAC hash 落库，原始值不出传输层。
             buyer_id = headers.get("x-buyer-id", "")

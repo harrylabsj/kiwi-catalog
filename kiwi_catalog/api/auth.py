@@ -75,6 +75,10 @@ def payload_with_auth(
     M3 控制面写接口用它替代 owner token（设计 §14.1：不在 JSON 里放 owner token）。
     """
     merged = dict(payload or {})
+    # These values are transport credentials/metadata, never JSON fields. Strip
+    # client supplied copies before injecting values from actual HTTP headers.
+    for reserved in ("_auth_token", "_binding_jws", "_origin", "_referer"):
+        merged.pop(reserved, None)
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()

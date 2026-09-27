@@ -119,6 +119,62 @@ class M3ContractSchemaTest(unittest.TestCase):
                     f"https://catalog.example/v1/agents/{agent_id}/agent-card.json",
                 )
 
+    def test_unpublished_binding_before_first_card_satisfies_document_contract(self) -> None:
+        """The first binding is readable before publication without implying sellability."""
+        import tempfile
+
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+        )
+
+        from kiwi_catalog.a2a.binding_claims import read_runtime_binding
+        from kiwi_catalog.agent_catalog.sqlite_repository import (
+            new_catalog_agent_id,
+            upsert_catalog_agent,
+        )
+        from kiwi_catalog.db.session import db_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            issuer_path = Path(tmp) / "issuer.pem"
+            issuer_path.write_bytes(
+                Ed25519PrivateKey.generate().private_bytes(
+                    Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+                )
+            )
+            env = {
+                "KIWI_CATALOG_ISSUER_KEY_FILE": str(issuer_path),
+                "KIWI_CATALOG_ISSUER_KID": "kid_unpublished_contract",
+                "KIWI_CATALOG_PUBLIC_ORIGIN": "https://catalog.example",
+            }
+            agent_id = new_catalog_agent_id()
+            with db_session(Path(tmp) / "catalog.sqlite") as conn:
+                upsert_catalog_agent(
+                    conn,
+                    agent_id,
+                    merchant_id="mkt_contract_unpublished",
+                    display_name="Unpublished Contract Merchant",
+                    canonical_domain="merchant.example",
+                )
+                conn.execute(
+                    "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+                    " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+                    " binding_version, service_epoch, status, expires_at, created_at, updated_at)"
+                    " values ('binding_contract_unpublished', ?, 'mkt_contract_unpublished',"
+                    " 'https://pilot.example.host', 'https://pilot.example.host/a2a',"
+                    " 'https://pilot.example.host', ?, '{}', 1, 1, 'active', '', '', '')",
+                    (agent_id, "sha256:" + "a" * 64),
+                )
+                document = read_runtime_binding(
+                    conn, agent_id, now=datetime.now(timezone.utc), env=env
+                )
+                self.assertEqual(document["governance"]["publication_state"], "UNPUBLISHED")
+                self.assertIsNone(document["card_revision"])
+                self.assertIsNone(document["card_etag"])
+                jsonschema.validate(document, self.document_schema)
+
     def test_claims_schema_rejects_the_shapes_we_deliberately_exclude(self) -> None:
         base = {
             "schema_version": "0.1.2",

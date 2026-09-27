@@ -158,7 +158,15 @@ def _purge_stale_profile_endpoints(conn: Any, catalog_agent_id: str, canonical: 
     换域名后旧端点在注册事务内立即清除，验证阶段不会再抓取旧域名 profile，
     也不残留指向旧域名的路由端点。本次注册提供的、位于新域名（或其子域）
     下的端点保留。
+
+    豁免（§4.5）：本机 ``hosted_base_url()`` 下的云名片稳定读地址
+    （``/v1/agents/{cagt}/agent-card.json``）**保留**——它跨权威域是设计事实
+    （卡片托管在 catalog 域、canonical_domain 是运行时域），不是待清理的
+    陈旧端点；删掉它云端商家会从目录里静默消失。
     """
+    from kiwi_catalog.services.agent_endpoints import cloud_card_url
+
+    exempt_url = cloud_card_url(catalog_agent_id)
     rows = conn.execute(
         "select endpoint_id, url from agent_endpoints where catalog_agent_id = ?",
         (catalog_agent_id,),
@@ -169,6 +177,8 @@ def _purge_stale_profile_endpoints(conn: Any, catalog_agent_id: str, canonical: 
         if not url or not is_http_url(url):
             stale.append((int(r["endpoint_id"]),))
             continue
+        if url == exempt_url:
+            continue  # §4.5 豁免：云名片稳定读地址（见 docstring）
         if not is_same_authority(canonical_domain_of(url), canonical):
             stale.append((int(r["endpoint_id"]),))
     if stale:
@@ -395,6 +405,13 @@ def register_catalog_agent(
                 ],
             },
         )
+    # §4.5：注册事务结束前同步云端点行——云商家的端点行在任何注册路径下都
+    # 正确（幂等：有活动绑定 → 写/刷新 a2a 行，有非撤回卡 → 写稳定读地址行；
+    # direct 商家无绑定 → 不影响其自管理端点）。
+    from kiwi_catalog.db.session import now_iso
+    from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+    sync_cloud_endpoints(conn, catalog_agent_id, now_iso())
     # §24 funnel: a successful registration is the discovery event.
     record_funnel("discovery")
     return get_catalog_agent_write_detail(conn, catalog_agent_id)

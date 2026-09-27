@@ -31,6 +31,7 @@ fallback 栈渲染的轻量 HTML（零新依赖）：申请表单 / 审核后台
 from __future__ import annotations
 
 import os
+import json
 import secrets
 from typing import Any
 
@@ -470,18 +471,20 @@ _ADMIN_NAV = """
 
 _FOOTER = """
 <footer class="footer"><div class="footer-inner">
-  <p>Kiwi Merchant Portal · 登录后可查看当前令牌，遗失或疑似泄露请联系运营轮换 · 明文令牌永不出现在日志中</p>
+  <p>Kiwi Merchant Portal · 登录后仅商家本人可查看或复制目录令牌 · 明文令牌不写入日志</p>
 </div></footer>
 """
 
 
 def portal_home() -> dict[str, Any]:
-    """门户首页 = Token 申请（登录态表单；未登录引导登录）。
+    """门户首页 = Token 申请（登录态一个按钮；未登录引导登录）。
 
-    邮箱/电话不需要填写——注册与账户基本信息已提供，提交时自动带上。
-    商家 ID（平台分配）与商家名称均为只读展示（取自 /v1/accounts/me；
-    名称在「基本信息」页修改）；未分配商家 ID 或未填写名称时提交按钮
-    灰化并引导先补全。
+    D7：申请收成一个按钮「申请目录令牌」，不再收集域名（API 的 domain 参数
+    仍保留给 CLI 与老调用方）。邮箱/电话不需要填写——注册与账户基本信息已
+    提供，提交时自动带上。商家 ID（平台分配）与商家名称为只读展示（取自
+    /v1/accounts/me；名称在「基本信息」页修改）；未分配商家 ID 或未填写名称
+    时按钮灰化并引导先补全。四态：active 显示令牌 + 复制、pending 按钮禁用、
+    被拒显示理由 + 「重新申请」、无令牌无工单按钮可点。
     """
     body = (
         _nav("portal")
@@ -489,47 +492,78 @@ def portal_home() -> dict[str, Any]:
 <section class="section center-page"><div class="section-inner">
   <div class="kicker">Token 申请</div>
   <h2>Token 申请</h2>
-  <p class="lead">申请商家令牌，平台审核通过后签发。令牌会显示在「我的」里。</p>
+  <p class="lead">申请商家目录令牌，平台审核通过后签发。令牌会显示在「商家后台」里。</p>
   <div class="card form-card">
     <label for="t_merchant_id">商家 ID（平台分配，只读）</label>
     <input id="t_merchant_id" readonly placeholder="加载中…">
     <label for="t_name">商家名称（只读，可在<a href="/portal/account/profile">基本信息</a>页修改）</label>
     <input id="t_name" readonly placeholder="加载中…">
-    <label for="t_domain">商家域名（如 acme.example）</label>
-    <input id="t_domain" placeholder="acme.example" autocomplete="off">
-    <button class="btn-form" id="t_submit">提交申请</button>
+    <div id="t_state"></div>
+    <button class="btn-form" id="t_submit">申请目录令牌</button>
     <div id="t_out"></div>
   </div>
 </div></section>
 <script>
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 // 登录态检查：未登录进入登录流程（邮箱/电话自动从账户带出）
 fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(r => {
   if (!r.ok) { window.location.href = '/portal/login'; return; }
   document.getElementById('t_name').value = r.merchant_name || '';
   document.getElementById('t_merchant_id').value = r.merchant_id || '';
   const out = document.getElementById('t_out');
+  const state = document.getElementById('t_state');
+  const btn = document.getElementById('t_submit');
   if (!r.merchant_id) {
     // 未分配商家 ID：禁止提交，引导先完成注册（服务端 request_token 同样 fail-closed）
-    document.getElementById('t_submit').disabled = true;
+    btn.disabled = true;
     out.className = 'err';
     out.innerHTML = '尚未分配商家 ID，请先<a href="/portal/register">完成注册</a>';
-  } else if (!r.merchant_name) {
+    return;
+  }
+  if (!r.merchant_name) {
     // 商家名称只读：为空时引导先去基本信息页补全（服务端要求 agent_name 非空）
-    document.getElementById('t_submit').disabled = true;
+    btn.disabled = true;
     out.className = 'err';
     out.innerHTML = '尚未填写商家名称，请先在<a href="/portal/account/profile">基本信息</a>页补全';
+    return;
+  }
+  // 只陈述 Catalog 能观察到的审批/签发事实；不推断 Runtime 本地配置。
+  if (r.token && r.token.status === 'active') {
+    state.innerHTML = '<p class="ok"><strong>可发布（目录侧）</strong></p>'
+      + '<p class="small">Catalog 已确认审批通过且令牌有效。是否已配置到 Runtime 由 Catalog 无法观测。</p>'
+      + '<p class="small">商家令牌仅登录后向本人显示，请妥善保管。</p>'
+      + '<div class="token-box">' + esc(r.token.token) + '</div>'
+      + '<button type="button" class="btn-mini" id="t_copy_token">复制令牌</button>';
+    btn.disabled = true;
+    const copyBtn = document.getElementById('t_copy_token');
+    if (copyBtn) copyBtn.addEventListener('click', () => {
+      const box = state.querySelector('.token-box');
+      if (box && navigator.clipboard) navigator.clipboard.writeText((box.textContent || '').trim());
+    });
+  } else if (r.application && r.application.status === 'pending') {
+    state.innerHTML = '<p class="ok"><strong>审核中</strong>：目录令牌申请正在审核。</p>';
+    btn.disabled = true;
+  } else if (r.application && r.application.status === 'rejected') {
+    state.innerHTML = '<p class="err"><strong>未申请</strong>。上次申请未通过'
+      + (r.application.review_note ? '：' + esc(r.application.review_note) : '')
+      + '。可点击「重新申请」再次提交。</p>';
+    btn.textContent = '重新申请';
+  } else if (r.application && r.application.status === 'approved') {
+    state.innerHTML = '<p class="ok"><strong>待配置</strong>：申请已通过，请在 Runtime 的安全配置中设置目录令牌；Catalog 无法确认本地配置状态。</p>';
+    btn.disabled = true;
+  } else {
+    state.innerHTML = '<p class="small muted"><strong>未申请</strong>：目录商品 listings 需要审批通过的目录令牌。名片接入不受此审批影响。</p>';
   }
 });
 document.getElementById('t_submit').addEventListener('click', () => {
   const btn = document.getElementById('t_submit');
   const out = document.getElementById('t_out');
   btn.disabled = true;
-  postJson('/v1/accounts/token-request', {
-    domain: document.getElementById('t_domain').value.trim(),
-  }).then(r => {
+  // 申请已零输入（D7）——点击只建 pending 工单，不带任何字段
+  postJson('/v1/accounts/token-request', {}).then(r => {
     if (r.ok) {
       out.className = 'ok';
-      out.textContent = r.status === 'active' ? '你已有有效令牌，可在「我的」查看。' : '申请已提交，等待平台审核。';
+      out.textContent = r.status === 'active' ? '你已有有效令牌，可在「商家后台」查看。' : '申请已提交，等待平台审核。';
       setTimeout(() => go('/portal/account'), 1000);
     } else {
       out.className = 'err';
@@ -546,7 +580,7 @@ document.getElementById('t_submit').addEventListener('click', () => {
 
 
 def portal_apply() -> dict[str, Any]:
-    """/portal/apply 兼容旧路径——与首页（Token 申请）同内容。"""
+    """/portal/apply 兼容旧路径——与首页（Token 申请，D7 一个按钮）同内容。"""
     return portal_home()
 
 
@@ -1177,7 +1211,7 @@ function renderApps(token, apps) {
   const el = document.getElementById('apps');
   if (!apps.length) { el.innerHTML = '<p class="small muted">没有待审申请</p>'; return; }
   el.innerHTML = '<table><tr><th>#</th><th>名称</th><th>域名</th><th>Agent</th><th>邮箱</th><th>用途</th><th></th></tr>' +
-    apps.map(a => '<tr><td>' + escHtml(a.application_id) + '</td><td>' + escHtml(a.agent_name) + '</td><td class="mono">' + escHtml(a.domain) +
+    apps.map(a => '<tr><td>' + escHtml(a.application_id) + '</td><td>' + escHtml(a.agent_name) + '</td><td class="mono">' + escHtml(a.domain || '(未填)') +
       '</td><td>' + escHtml(a.agent_id || '-') + '</td><td>' + escHtml(a.contact_email) + '</td><td class="small muted">' + escHtml(a.purpose || '-') + '</td><td>' +
       '<button class="btn-mini" data-app="' + escHtml(a.application_id) + '">批准</button>' +
       '<button class="btn-mini" data-rej="' + escHtml(a.application_id) + '">拒绝</button></td></tr>').join('') + '</table>';
@@ -1704,6 +1738,7 @@ def portal_account() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="/portal/account/card"{sub_card}>我的名片</a>
     <a href="/portal/publications">公开资料</a>
     <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
@@ -1711,20 +1746,12 @@ def portal_account() -> dict[str, Any]:
   <div id="out"></div>
   <div id="content" style="display:none">
     <div class="card form-card">
-      <p class="small">接入发现网络需要商家令牌——在本页申请，平台审核通过后签发；
-        令牌同时也是你的 Agent 接入 API 的凭据。</p>
+  <p class="small">目录商品 listings 需要审批通过的目录令牌。名片绑定与发布不依赖该令牌。</p>
       <div id="profile"></div>
       <div id="token_box"></div>
       <div class="token-actions">
         <button class="btn-mini" id="copy_token">复制令牌</button>
-        <button class="btn-mini" id="show_apply">申请令牌</button>
-      </div>
-      <div id="apply_form" style="display:none">
-        <label for="a_name_display">商家名称（注册时填写，只读）</label>
-        <input id="a_name_display" readonly placeholder="加载中…">
-        <label for="a_domain">店铺域名（如 acme.example）</label>
-        <input id="a_domain" placeholder="acme.example" autocomplete="off">
-        <button class="btn-form" id="request_token">申请令牌</button>
+        <button class="btn-mini" id="apply_token">申请目录令牌</button>
       </div>
     </div>
   </div>
@@ -1745,76 +1772,65 @@ function loadMe() {
     if (r.application) {
       html += '<p>申请状态：<strong>' + esc(r.application.status) + '</strong>'
         + (r.application.status === 'rejected' && r.application.review_note ? '（' + esc(r.application.review_note) + '）' : '')
-        + ' · ' + esc(r.application.agent_name) + ' · ' + esc(r.application.domain) + '</p>';
+        + ' · ' + esc(r.application.agent_name)
+        + (r.application.domain ? ' · ' + esc(r.application.domain) : '') + '</p>';
     }
     p.innerHTML = html;
-    // 商家名称注册时已填写——申请表单只读自动加载，申请只需填店铺域名
-    document.getElementById('a_name_display').value = r.merchant_name || '';
     const tb = document.getElementById('token_box');
     const copyBtn = document.getElementById('copy_token');
-    const applyBtn = document.getElementById('show_apply');
+    const applyBtn = document.getElementById('apply_token');
+    // 仅在已认证的商家本人会话页回显令牌；公开预览及接入页绝不包含凭据。
     if (r.token && r.token.status === 'active') {
-      tb.innerHTML = '<p class="small">商家令牌（仅你可见，请妥善保存）</p>'
+      tb.innerHTML = '<p class="ok"><strong>可发布（目录侧）</strong></p>'
+        + '<p class="small">Catalog 已确认审批通过且令牌有效。是否已配置到 Runtime 由 Catalog 无法观测。</p>'
+        + '<p class="small">商家令牌仅登录后向本人显示，请妥善保管。</p>'
         + '<div class="token-box">' + esc(r.token.token) + '</div>'
-        + '<p class="small">签发 ' + esc((r.token.issued_at || '').slice(0, 10))
-        + (r.token.rotated_at ? ' · 最近轮换 ' + esc(r.token.rotated_at.slice(0, 10)) : '')
-        + (r.token.revoked_at ? ' · 已吊销 ' + esc(r.token.revoked_at.slice(0, 10)) : '')
-        + '</p><p class="small">Agent ' + r.agents_count + ' · 商品 ' + r.listings_count + '</p>'
-        // 下一步指引（2026-09-26）：令牌拿到手之后**填到哪里**此前页面上没有任何提示，
-        // 而粘贴点是 `kiwi merchant init` 的第 4 个提示 / ~/.kiwi/credentials.env。
-        // 次要动作（复制整行）放在它该出现的上下文里，避免把上面的动作行挤成两行。
         + '<div style="margin-top:12px;border-left:3px solid var(--kiwi-600);padding-left:10px">'
         + '<p class="small"><strong>下一步：把令牌填进你的 Kiwi Merchant</strong></p>'
-        + '<p class="small">① 自建实例：终端运行 <code>kiwi merchant init</code>，在第 4 个提示'
-        + '「商家令牌」处粘贴；或把下面这行写进 <code>~/.kiwi/credentials.env</code>（权限 0600）'
+        + '<p class="small">① 自建实例：终端运行 <code>kiwi merchant init</code>，在第 4 个提示「商家令牌」处粘贴；'
+        + '或把下面这行写进 <code>~/.kiwi/credentials.env</code>（权限 0600）'
         + ' <button type="button" class="btn-mini" id="copy_env_line">复制这一行</button><br>'
         + '<code>KIWI_MERCHANT_TOKEN=&lt;你的令牌&gt;</code></p>'
         + '<p class="small">② 填好后 <code>kiwi merchant publish</code>、<code>kiwi agent serve</code> '
         + '等命令会自动读取（shopping-cli 不需要配这个令牌）。</p>'
-        + '<p class="small">③ WorkBuddy 云端应用：填入口在接入向导里（开发中）。'
-        + '如果只是发布公开资料，现在不需要令牌。</p>'
+        + '<p class="small">③ WorkBuddy 云端应用：填入口在接入向导里。只是发布公开资料，现在不需要令牌。</p>'
         + '</div>';
       copyBtn.disabled = false;
-      applyBtn.disabled = true;  // 有令牌：申请令牌变灰
-      document.getElementById('apply_form').style.display = 'none';
-      // 守卫式绑定：该按钮只存在于上面这段 innerHTML 里
       const copyEnv = document.getElementById('copy_env_line');
-      if (copyEnv) {
-        copyEnv.addEventListener('click', () => {
-          const box = document.querySelector('.token-box');
-          if (box) {
-            navigator.clipboard.writeText(
-              'KIWI_MERCHANT_TOKEN=' + (box.textContent || '').trim());
-          }
-        });
-      }
+      if (copyEnv) copyEnv.addEventListener('click', () => {
+        const box = document.querySelector('#token_box .token-box');
+        if (box && navigator.clipboard) navigator.clipboard.writeText('KIWI_MERCHANT_TOKEN=' + (box.textContent || '').trim());
+      });
+      applyBtn.disabled = true;  // 有令牌：申请按钮变灰
     } else if (r.application && r.application.status === 'pending') {
-      tb.innerHTML = '<p class="ok">申请审核中，请稍候。通过后令牌会显示在这里。</p>';
+      tb.innerHTML = '<p class="ok"><strong>审核中</strong>：目录令牌申请正在审核。</p>';
       copyBtn.disabled = true;
       applyBtn.disabled = true;
-      document.getElementById('apply_form').style.display = 'none';
-    } else {
-      tb.innerHTML = '<p class="small muted">还没有令牌。接入发现网络需要商家令牌——点击「申请令牌」填写商家信息提交，平台审核通过后签发。</p>';
-      copyBtn.disabled = true;  // 无令牌：复制令牌变灰
+    } else if (r.application && r.application.status === 'rejected') {
+      tb.innerHTML = '<p class="err"><strong>未申请</strong>。上次申请未通过'
+        + (r.application.review_note ? '：' + esc(r.application.review_note) : '')
+        + '。可点击「重新申请」再次提交（原工单保留为记录）。</p>';
+      copyBtn.disabled = true;
       applyBtn.disabled = false;
-      document.getElementById('apply_form').style.display = 'none';
+      applyBtn.textContent = '重新申请';
+    } else {
+      tb.innerHTML = r.application && r.application.status === 'approved'
+        ? '<p class="ok"><strong>待配置</strong>：申请已通过，请在 Runtime 的安全配置中设置目录令牌。Catalog 无法确认本地配置状态。</p>'
+        : '<p class="small muted"><strong>未申请</strong>：目录商品 listings 需要审批通过的目录令牌。名片绑定与发布不受此审批影响。</p>';
+      copyBtn.disabled = true;
+      applyBtn.disabled = false;
     }
   });
 }
 document.getElementById('copy_token').addEventListener('click', () => {
-  const box = document.querySelector('.token-box');
-  if (box) navigator.clipboard.writeText(box.textContent.trim());
+  const box = document.querySelector('#token_box .token-box');
+  if (box && navigator.clipboard) navigator.clipboard.writeText((box.textContent || '').trim());
 });
-document.getElementById('show_apply').addEventListener('click', () => {
-  document.getElementById('show_apply').disabled = true;
-  document.getElementById('apply_form').style.display = 'block';
-});
-document.getElementById('request_token').addEventListener('click', () => {
-  const btn = document.getElementById('request_token');
+// 申请已零输入（D7）——点击只建 pending 工单；被拒后同一按钮即「重新申请」
+document.getElementById('apply_token').addEventListener('click', () => {
+  const btn = document.getElementById('apply_token');
   btn.disabled = true;
-  postJson('/v1/accounts/token-request', {
-    domain: document.getElementById('a_domain').value.trim(),
-  }).then(r => {
+  postJson('/v1/accounts/token-request', {}).then(r => {
     if (r.ok) { loadMe(); } else {
       const out = document.getElementById('out');
       out.className = 'err';
@@ -1830,7 +1846,11 @@ loadMe();
         + _FOOTER
     )
     # 二级导航高亮（申请令牌 = 本页）
-    body = body.replace("{sub_apply}", ' class="active"').replace("{sub_profile}", "")
+    body = (
+        body.replace("{sub_apply}", ' class="active"')
+        .replace("{sub_profile}", "")
+        .replace("{sub_card}", "")
+    )
     return _account_page("商家后台", body)
 
 
@@ -1845,6 +1865,7 @@ def portal_account_profile() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile"{sub_profile}>基本信息</a>
     <a href="/portal/account"{sub_apply}>令牌信息</a>
+    <a href="/portal/account/card"{sub_card}>我的名片</a>
     <a href="/portal/publications">公开资料</a>
     <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
@@ -1890,8 +1911,339 @@ document.getElementById('save_profile').addEventListener('click', () => {
 """
         + _FOOTER
     )
-    body = body.replace("{sub_apply}", "").replace("{sub_profile}", ' class="active"')
+    body = (
+        body.replace("{sub_apply}", "")
+        .replace("{sub_profile}", ' class="active"')
+        .replace("{sub_card}", "")
+    )
     return _account_page("基本信息", body)
+
+
+def portal_account_card() -> dict[str, Any]:
+    """「我的名片」只读页（设计 §9）。
+
+    页面保留治理动作；首次接入授权统一走 portal_connect 的预览确认页，
+    不在名片页重复确认技术绑定。
+    门户不产出内容：页面没有任何「编辑/生成名片」按钮；「未创建接入记录」
+    空态提供「创建接入记录」按钮（POST /v1/accounts/agents，一商家一条、
+    幂等）。
+    """
+    body = (
+        _nav("account")
+        + """
+<section class="section center-page"><div class="section-inner">
+  <div class="kicker">商家后台</div>
+  <h2>我的名片</h2>
+  <div class="subnav">
+    <a href="/portal/account/profile">基本信息</a>
+    <a href="/portal/account">令牌信息</a>
+    <a href="/portal/account/card" class="active">我的名片</a>
+    <a href="/portal/publications">公开资料</a>
+    <a href="/portal/follows">我的关注</a>
+    <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
+  </div>
+  <p class="lead">名片是你的 Agent 在目录里的公开身份页：由你的运行时签名发布、
+    Catalog 托管在稳定读地址上。本页只读展示——名片内容只能由运行时发布。</p>
+  <div id="out"></div>
+  <div id="content" style="display:none">
+    <div class="card form-card" id="create_card" style="display:none">
+      <h3>还没有接入记录</h3>
+      <p class="small">接入记录是你的 Agent 在目录里的身份条目（一个商家一条）。
+        创建后可在一键上云向导里完成运行时绑定与名片发布。</p>
+      <button class="btn-form" id="create_agent">创建接入记录</button>
+      <p class="small muted">没有运行时？也可以先到<a href="/portal/publications">公开资料</a>
+        发布商品资料，买家同样能在目录里搜到你。</p>
+    </div>
+    <div class="card form-card" id="pending_card">
+      <h3>接入方式</h3>
+      <p class="small">WorkBuddy 与独立 Kiwi Merchant Runtime 共用同一公开预览和一次业务确认流程。</p>
+      <p class="small">买家 Agent 会直接连接你的商家服务。请确保服务有可从互联网访问的 HTTPS 地址，并保持在线。我们会在绑定时自动检查。</p>
+      <p class="small muted">从 Runtime 发起接入后，打开其 Catalog 授权页并核对配对码，再确认公开资料并发布。</p>
+    </div>
+    <div class="card form-card" id="status_card">
+      <h3>名片状态</h3>
+      <div id="status_body"></div>
+    </div>
+    <div class="card form-card" id="binding_card">
+      <h3>运行时绑定</h3>
+      <div id="binding_body"></div>
+    </div>
+    <div class="card form-card" id="content_card">
+      <h3>名片内容（公开字段）</h3>
+      <div id="card_body"></div>
+    </div>
+  </div>
+</div></section>
+<script>
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 命名避开 _PORTAL_JS 的 getJson(url, token)（它在 body 末尾会重新定义全局 getJson）
+function getSessionJson(url) { return fetch(url, {method: 'GET', credentials: 'same-origin'}).then(r => r.json()); }
+// 当前商家的接入记录 id（一商家一条；治理动作的目标）
+let currentAgentId = '';
+function renderStatus(d) {
+  const body = document.getElementById('status_body');
+  const pub = d.publication || {state: 'none'};
+  if (pub.state === 'none') {
+    body.innerHTML = (d.binding
+      ? '<p class="small muted">已绑定运行时，还没有发布的名片——名片由你的运行时签名发布后显示在这里。</p>'
+      : '<p class="small muted">还没有发布的名片。</p>')
+      + '<p class="small">预留稳定读地址（名片发布后才有内容，现在读取会 404）：</p>'
+      + '<div class="token-box">' + esc(d.card_url) + '</div>';
+    return;
+  }
+  const label = {ACTIVE: '已发布 ACTIVE', PAUSED: '已暂停 PAUSED', WITHDRAWN: '已撤回 WITHDRAWN'}[pub.state] || pub.state;
+  body.innerHTML = '<p><strong>' + esc(label) + '</strong> 版本 r' + esc(pub.active_revision)
+    + (pub.digest ? ' · digest ' + esc(pub.digest.slice(0, 16)) + '…' : '')
+    + (pub.updated_at ? ' · 更新 ' + esc(pub.updated_at.slice(0, 10)) : '') + '</p>'
+    + '<p class="small">稳定读地址' + (pub.state === 'WITHDRAWN' ? '（已撤回，读取返回 410）' : '') + '</p>'
+    + '<div class="token-box" id="card_url_box">' + esc(d.card_url) + '</div>'
+    + '<div class="token-actions"><button type="button" class="btn-mini" id="copy_card_url">复制地址</button>'
+    + '<a class="btn-mini" href="' + esc(d.card_url) + '" target="_blank" rel="noopener">查看原始 JSON</a></div>'
+    + '<div class="token-actions" id="card_governance"></div>';
+  // 守卫式绑定：该按钮只存在于上面这段 innerHTML 里
+  const copyBtn = document.getElementById('copy_card_url');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      const box = document.getElementById('card_url_box');
+      if (box && navigator.clipboard) { navigator.clipboard.writeText((box.textContent || '').trim()); }
+    });
+  }
+  renderGovernance(pub);
+}
+// ── 治理动作（P1；设计 §5.1/§5.3）：只切状态，不产出内容 ─────────────────
+// ACTIVE → [暂停] [撤回]；PAUSED → [恢复] [撤回]；WITHDRAWN → 只有说明
+function renderGovernance(pub) {
+  const box = document.getElementById('card_governance');
+  if (!box) { return; }
+  const rev = pub.active_revision;
+  const btn = (id, label) => '<button type="button" class="btn-mini" id="' + id + '">' + label + '</button>';
+  if (pub.state === 'ACTIVE') {
+    box.innerHTML = btn('gov_pause', '暂停') + btn('gov_withdraw', '撤回')
+      + '<p class="small muted">暂停：公开信息保留、停止接待；撤回：稳定地址变 410。</p>';
+    bindGov('gov_pause', 'pause', rev, '');
+    bindGov('gov_withdraw', 'withdraw', rev,
+      '撤回后稳定读地址立即返回 410，买家将无法再读到名片（重新上线需要运行时重新发布并激活）。确认撤回？');
+  } else if (pub.state === 'PAUSED') {
+    box.innerHTML = btn('gov_resume', '恢复') + btn('gov_withdraw', '撤回')
+      + '<p class="small muted">恢复：回到已发布 ACTIVE；撤回：稳定地址变 410。</p>';
+    bindGov('gov_resume', 'resume', rev, '');
+    bindGov('gov_withdraw', 'withdraw', rev,
+      '撤回后稳定读地址立即返回 410，买家将无法再读到名片（重新上线需要运行时重新发布并激活）。确认撤回？');
+  } else if (pub.state === 'WITHDRAWN') {
+    box.innerHTML = '<p class="small muted">名片已撤回——稳定读地址返回 410。'
+      + '重新上线需要你的运行时重新发布并激活名片。</p>';
+  }
+}
+function bindGov(id, action, rev, confirmText) {
+  const el = document.getElementById(id);
+  if (!el) { return; }
+  el.addEventListener('click', () => {
+    if (confirmText && !window.confirm(confirmText)) { return; }
+    el.disabled = true;
+    postJson('/v1/accounts/agents/' + encodeURIComponent(currentAgentId) + '/card/' + action,
+      {expected_revision: rev}).then(r => {
+      const out = document.getElementById('out');
+      if (r.ok) {
+        out.className = 'ok';
+        out.textContent = '已' + ({pause: '暂停', resume: '恢复', withdraw: '撤回'})[action] + '。';
+        loadCardPage();
+      } else {
+        out.className = 'err';
+        out.textContent = r.error || '操作失败';
+        el.disabled = false;
+      }
+    });
+  });
+}
+function renderBinding(d) {
+  const body = document.getElementById('binding_body');
+  const b = d.binding;
+  if (!b) {
+    body.innerHTML = '<p class="small muted">未绑定运行时——在一键上云向导里完成绑定与确认后，'
+      + '运行时地址与绑定版本会显示在这里。</p>'
+      + '<p class="small muted">没有运行时？也可以先到<a href="/portal/publications">公开资料</a>'
+      + '发布商品资料，买家同样能在目录里搜到你。</p>';
+    return;
+  }
+  body.innerHTML = '<table class="kv">'
+    + '<tr><td>运行时地址</td><td class="mono">' + esc(b.runtime_origin) + '</td></tr>'
+    + '<tr><td>A2A 端点</td><td class="mono">' + esc(b.a2a_endpoint) + '</td></tr>'
+    + '<tr><td>绑定版本</td><td>' + esc(b.binding_version) + '</td></tr>'
+    + '<tr><td>状态</td><td>' + esc(b.status) + '</td></tr></table>';
+}
+function renderCardContent(d) {
+  const body = document.getElementById('card_body');
+  const card = d.card;
+  if (!card) {
+    body.innerHTML = '<p class="small muted">还没有名片内容——发布后这里显示与公开读地址一致的公开字段。</p>';
+    return;
+  }
+  body.innerHTML = '<table class="kv">'
+    + '<tr><td>name</td><td>' + esc(card.name) + '</td></tr>'
+    + '<tr><td>description</td><td>' + esc(card.description) + '</td></tr>'
+    + '<tr><td>url</td><td class="mono">' + esc(card.url) + '</td></tr>'
+    + '<tr><td>supportedInterfaces</td><td><code>' + esc(JSON.stringify(card.supportedInterfaces)) + '</code></td></tr>'
+    + '<tr><td>skills</td><td><code>' + esc(JSON.stringify(card.skills)) + '</code></td></tr></table>'
+    + '<p class="small muted">这些字段与公开读地址一致，任何人都能看到。</p>';
+}
+function renderEmptyStates() {
+  // 未创建接入记录：创建卡片 + 其余三块诚实空态
+  document.getElementById('create_card').style.display = 'block';
+  document.getElementById('status_body').innerHTML =
+    '<p class="small muted">未创建接入记录——创建后这里会显示名片发布状态与稳定读地址。</p>';
+  document.getElementById('binding_body').innerHTML =
+    '<p class="small muted">未绑定运行时。</p>';
+  document.getElementById('card_body').innerHTML =
+    '<p class="small muted">还没有名片内容。</p>';
+}
+function loadCardPage() {
+  fetch('/v1/accounts/me', {method: 'GET', credentials: 'same-origin'}).then(r => r.json()).then(me => {
+    if (!me.ok) {
+      // 未登录：直接进入登录流程（登录页含注册入口）
+      window.location.href = '/portal/login';
+      return;
+    }
+    document.getElementById('content').style.display = 'block';
+    getSessionJson('/v1/accounts/agents').then(r => {
+      const out = document.getElementById('out');
+      if (!r.ok) { out.className = 'err'; out.textContent = r.error || '加载失败'; return; }
+      if (!r.results || !r.results.length) { renderEmptyStates(); return; }
+      document.getElementById('create_card').style.display = 'none';
+      const agent = r.results[0];
+      currentAgentId = agent.catalog_agent_id;
+      getSessionJson('/v1/accounts/agents/' + encodeURIComponent(agent.catalog_agent_id) + '/card').then(d => {
+        if (!d.ok) { out.className = 'err'; out.textContent = d.error || '加载失败'; return; }
+        renderStatus(d);
+        renderBinding(d);
+        renderCardContent(d);
+      });
+    });
+  });
+}
+// 「未创建接入记录」空态的唯一动作：创建（幂等，重复点击返回同一条）
+document.getElementById('create_agent').addEventListener('click', () => {
+  const btn = document.getElementById('create_agent');
+  btn.disabled = true;
+  postJson('/v1/accounts/agents', {}).then(r => {
+    if (r.ok) { loadCardPage(); } else {
+      const out = document.getElementById('out');
+      out.className = 'err';
+      out.textContent = r.error || '创建失败';
+      btn.disabled = false;
+    }
+  });
+});
+loadCardPage();
+</script>
+"""
+        + _FOOTER
+    )
+    return _account_page("我的名片", body)
+
+
+def portal_enrollment_connect(enrollment_id: str) -> dict[str, Any]:
+    """统一 WorkBuddy / 独立 Runtime 的公开预览和一次业务确认页。
+
+    GET 页面本身不批准任何请求。冻结预览由登录态 API 读取；用户需登录、
+    核对来自 Runtime 的短配对码和公开内容，再显式点击一次授权发布。
+    """
+    enrollment_json = json.dumps(str(enrollment_id)).replace("<", "\\u003c")
+    body = (
+        _nav("account")
+        + """
+<section class="section"><div class="section-inner">
+  <div class="kicker">Kiwi 商家接入</div>
+  <h2>连接此服务并发布</h2>
+  <p class="lead">请确认这是你刚才从商家 Runtime 发起的连接，并核对公开名片。确认后系统会自动完成绑定与发布，不会再要求你确认技术细节。</p>
+  <div class="card form-card" style="max-width:720px">
+    <div id="connect_state"><p class="small muted">正在读取本次接入请求…</p></div>
+    <div id="connect_preview" style="display:none">
+      <p><strong>商家</strong> <span id="connect_merchant"></span></p>
+      <p><strong>配对码</strong> <span class="token-box" id="connect_code"></span></p>
+      <p class="small">请将此配对码与刚才运行 Runtime 的终端显示内容核对。配对码只用于识别请求，不能取回授权或令牌。</p>
+      <p><strong>服务地址</strong> <span class="mono" id="connect_origin"></span></p>
+      <p><strong>请求时间</strong> <span id="connect_requested"></span></p>
+      <h3 style="margin-top:18px">将公开的资料</h3>
+      <div id="connect_card"></div>
+      <p class="small" style="margin-top:14px">采购方可发现并向本店发送询价；仅按已设置规则报价。</p>
+      <button class="btn-form" id="connect_authorize" disabled>连接此服务并发布</button>
+      <p class="small muted">此确认同时授权当前 Runtime 绑定及上方公开资料，不包含商品 listings 发布审批。</p>
+    </div>
+  </div>
+  <div class="notice"><strong>公网 HTTPS 要求</strong><br>买家 Agent 会直接连接你的商家服务。请确保服务有可从互联网访问的 HTTPS 地址，并保持在线。我们会在绑定时自动检查。</div>
+</div></section>
+<script>
+const enrollmentId = __ENROLLMENT_ID__;
+const state = document.getElementById('connect_state');
+function connectMessage(text, kind) { state.className = kind || ''; state.textContent = text; }
+function showConnectError() { connectMessage('无法读取这次接入请求。请从 Runtime 重新打开授权页，或稍后重试。', 'err'); }
+function renderPreview(d) {
+  if (!d || !d.ok) { showConnectError(); return; }
+  if (['authorized', 'AUTHORIZED', 'verifying', 'VERIFYING', 'bound', 'BOUND'].includes(d.status)) {
+    connectMessage('已确认，Runtime 正在自动检查服务并完成绑定。请返回 Runtime 查看实际进度。', 'ok'); return;
+  }
+  if (['published', 'PUBLISHED'].includes(d.status)) {
+    connectMessage('服务已上线。买家可按已公开能力向本店发送询价。', 'ok'); return;
+  }
+  if (!['ready_for_authorization', 'READY_FOR_AUTHORIZATION', 'pending'].includes(d.status)) {
+    connectMessage('此接入请求已结束或已过期，请从 Runtime 重新发起。', 'err'); return;
+  }
+  const origin = String(d.runtime_origin || '');
+  let url;
+  try { url = new URL(origin); } catch (_) { url = null; }
+  const host = url ? url.hostname.toLowerCase() : '';
+  const ipv4 = host.split('.').map(Number);
+  const privateIPv4 = ipv4.length === 4 && (ipv4[0] === 10 || ipv4[0] === 127
+    || (ipv4[0] === 192 && ipv4[1] === 168)
+    || (ipv4[0] === 172 && ipv4[1] >= 16 && ipv4[1] <= 31));
+  if (!url || url.protocol !== 'https:' || host === 'localhost' || host === '::1'
+      || host.endsWith('.localhost') || privateIPv4) {
+    connectMessage('你的商家服务还没有可用的公网 HTTPS 地址，买家 Agent 暂时无法连接并询价。请先配置公网 HTTPS 入口，或使用 WorkBuddy 云端应用。配置完成后重新检查，已有资料会保留。', 'err');
+    const retry = document.createElement('button'); retry.className = 'btn-mini'; retry.textContent = '重新检查';
+    retry.addEventListener('click', loadEnrollment); state.appendChild(retry);
+    const later = document.createElement('a'); later.className = 'btn-mini'; later.href = '/portal/account/card'; later.textContent = '稍后继续'; state.appendChild(later);
+    return;
+  }
+  document.getElementById('connect_state').textContent = '';
+  document.getElementById('connect_preview').style.display = 'block';
+  document.getElementById('connect_merchant').textContent = d.merchant_name || '当前商家';
+  document.getElementById('connect_code').textContent = d.user_code || '';
+  document.getElementById('connect_origin').textContent = origin;
+  document.getElementById('connect_requested').textContent = d.requested_at || '刚刚';
+  const card = d.public_preview || {};
+  const rows = [['商家名称', card.name || d.merchant_name], ['简介', card.description], ['公开服务能力', Array.isArray(card.skills) ? card.skills.map(x => x.name || x.id || '').filter(Boolean).join('、') : '']];
+  document.getElementById('connect_card').innerHTML = '<table>' + rows.map(row => '<tr><th>' + escHtml(row[0]) + '</th><td>' + escHtml(row[1] || '未提供') + '</td></tr>').join('') + '</table>'
+    + '<details style="margin-top:12px"><summary>查看完整公开资料</summary><pre>' + escHtml(JSON.stringify(card, null, 2)) + '</pre></details>';
+  document.getElementById('connect_authorize').disabled = !d.user_code;
+}
+function loadEnrollment() {
+  state.className = 'small muted'; state.textContent = '正在读取本次接入请求…';
+  fetch('/v1/accounts/enrollments/' + encodeURIComponent(enrollmentId), {credentials: 'same-origin'}).then(async response => ({
+    status: response.status, data: await response.json()
+  })).then(({status, data}) => {
+    if (status === 401 || status === 403) {
+      window.location.href = '/portal/login?next=' + encodeURIComponent('/portal/connect/' + enrollmentId); return;
+    }
+    renderPreview(data);
+  }).catch(showConnectError);
+}
+document.getElementById('connect_authorize').addEventListener('click', e => {
+  const btn = e.currentTarget; btn.disabled = true;
+  const code = document.getElementById('connect_code').textContent;
+  fetch('/v1/accounts/enrollments/' + encodeURIComponent(enrollmentId) + '/authorize', {
+    method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_code: code})
+  }).then(r => r.json()).then(d => {
+    if (d.ok) { document.getElementById('connect_preview').style.display = 'none'; connectMessage('已确认。正在由 Runtime 自动完成绑定和发布，请返回 Runtime 查看进度。', 'ok'); }
+    else { connectMessage('确认未完成。请重新打开授权页检查请求状态。', 'err'); btn.disabled = false; }
+  }).catch(() => { connectMessage('确认未完成。请重新打开授权页检查请求状态。', 'err'); btn.disabled = false; });
+});
+loadEnrollment();
+</script>
+""".replace("__ENROLLMENT_ID__", enrollment_json)
+        + _FOOTER
+    )
+    return _page("连接此服务并发布", body)
 
 
 def portal_publications() -> dict[str, Any]:
@@ -1912,6 +2264,7 @@ def portal_publications() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile">基本信息</a>
     <a href="/portal/account">令牌信息</a>
+    <a href="/portal/account/card">我的名片</a>
     <a href="/portal/publications" class="active">公开资料</a>
     <a href="/portal/follows">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
@@ -2073,6 +2426,7 @@ def portal_follows() -> dict[str, Any]:
   <div class="subnav">
     <a href="/portal/account/profile">基本信息</a>
     <a href="/portal/account">令牌信息</a>
+    <a href="/portal/account/card">我的名片</a>
     <a href="/portal/publications">公开资料</a>
     <a href="/portal/follows" class="active">我的关注</a>
     <a href="#" id="nav_logout" style="margin-left:auto">退出登录</a>
