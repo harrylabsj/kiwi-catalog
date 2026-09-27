@@ -39,7 +39,9 @@ _ACCOUNT_HELPERS = ("nextTarget", "go", "postJson")
 def _scripts_in_order(html: str) -> list[str]:
     return [
         m.group(1)
-        for m in re.finditer(r"<script[^>]*>(.*?)</script>", html, re.S | re.IGNORECASE)
+        for m in re.finditer(
+            r"<script\b[^>]*>(.*?)</script\s*>", html, re.S | re.IGNORECASE
+        )
     ]
 
 
@@ -75,7 +77,8 @@ class PortalScriptOrderTest(unittest.TestCase):
         return str(page["__html__"])
 
     def test_script_extraction_is_case_insensitive(self) -> None:
-        self.assertEqual(_scripts_in_order("<SCRIPT>upper</SCRIPT><script>lower</script>"), ["upper", "lower"])
+        html = "<SCRIPT type='text/javascript'>upper</SCRIPT ><script>lower</script >"
+        self.assertEqual(_scripts_in_order(html), ["upper", "lower"])
 
     def test_account_pages_define_helpers_before_use(self) -> None:
         """登录/注册/连接/重置密码等页面：helper 定义必须早于页面脚本。"""
