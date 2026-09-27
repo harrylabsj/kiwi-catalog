@@ -109,7 +109,15 @@ class KiwiCatalogV1ApiTest(unittest.TestCase):
         return payload
 
     def test_register_stores_public_fields_and_three_domains(self) -> None:
-        payload = self._register()
+        # Registration enqueues a real asynchronous verification task. Its
+        # outcome may change freshness before this immediate-state assertion
+        # reads the response, so keep this contract test deterministic.
+        from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
+
+        with mock.patch.object(
+            handlers_mod, "_enqueue_verification", side_effect=_noop_enqueue
+        ):
+            payload = self._register()
         agent = payload["agent"]
         self.assertEqual(agent["display_name"], "Acme Merchant")
         # canonical 输入（direct_only）在写边界归一化为 legacy 存储值（direct）——
