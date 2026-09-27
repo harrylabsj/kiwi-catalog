@@ -89,7 +89,18 @@ class CatalogMerchantCliTest(unittest.TestCase):
         catalog = subparsers.choices["catalog"]
         merchant = catalog._actions[-1].choices["merchant"]
         merchant_cmds = list(merchant._actions[-1].choices.keys())
-        self.assertEqual(sorted(merchant_cmds), ["applications", "status", "token"])
+        self.assertEqual(sorted(merchant_cmds), ["applications", "listing-limit", "listing-plan-limit", "status", "token"])
+
+    def test_listing_limits_are_configurable_and_audited(self) -> None:
+        changed = json.loads(self._run("catalog", "merchant", "listing-plan-limit", "free", "7", "--format", "json"))
+        self.assertEqual(changed["active_limit"], 7)
+        issued = self._approve_first()
+        merchant_id = issued["merchant_id"]
+        changed = json.loads(self._run("catalog", "merchant", "listing-limit", merchant_id,
+                                       "--active-limit", "12", "--format", "json"))
+        self.assertEqual(changed["active_limit"], 12)
+        with db_session(self.db) as conn:
+            self.assertEqual(conn.execute("select count(*) from listing_entitlement_audit").fetchone()[0], 2)
 
     # ── applications list ──────────────────────────────────────────────────
 

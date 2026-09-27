@@ -33,6 +33,23 @@ import sqlite3
 from kiwi_catalog.cli_common import db_path_from_args, emit
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import merchant_tokens as tokens_service
+from kiwi_catalog.services import listing_entitlements
+
+
+def cmd_listing_plan_limit(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        listing_entitlements.set_plan_limit(conn, args.plan_code, args.active_limit, actor="local-admin")
+    emit({"ok": True, "plan_code": args.plan_code, "active_limit": args.active_limit}, args.format)
+
+
+def cmd_listing_merchant_limit(args: argparse.Namespace) -> None:
+    with db_session(db_path_from_args(args)) as conn:
+        result = listing_entitlements.set_merchant_entitlement(
+            conn, args.merchant_id, actor="local-admin",
+            limit_override=args.active_limit, clear_override=args.use_plan,
+            status=args.status,
+        )
+    emit({"ok": True, "merchant_id": args.merchant_id, **result}, args.format)
 
 
 def cmd_merchant_applications_list(args: argparse.Namespace) -> None:
