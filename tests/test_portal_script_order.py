@@ -40,7 +40,7 @@ def _scripts_in_order(html: str) -> list[str]:
     return [
         m.group(1)
         for m in re.finditer(
-            r"<script\b[^>]*>(.*?)</script\s*>", html, re.S | re.IGNORECASE
+            r"<script\b[^>]*>(.*?)</script\b[^>]*>", html, re.S | re.IGNORECASE
         )
     ]
 
@@ -77,7 +77,10 @@ class PortalScriptOrderTest(unittest.TestCase):
         return str(page["__html__"])
 
     def test_script_extraction_is_case_insensitive(self) -> None:
-        html = "<SCRIPT type='text/javascript'>upper</SCRIPT ><script>lower</script >"
+        html = (
+            "<SCRIPT type='text/javascript'>upper</SCRIPT \t\n bar>"
+            "<script>lower</script >"
+        )
         self.assertEqual(_scripts_in_order(html), ["upper", "lower"])
 
     def test_account_pages_define_helpers_before_use(self) -> None:
