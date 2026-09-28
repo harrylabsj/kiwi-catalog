@@ -119,8 +119,10 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 | `/portal/register` / `/portal/login` | 商家注册（**必填商家名称**，注册即商家）/ 登录 |
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + 商品名额（已用／总额），不展示 Listings owner-token 配置步骤 |
-| `/portal/publications` | 公开资料编辑/预览/发布（M0）：发布成功回执显示 publication_id、版本、发布时间；页内显示关注/浏览匿名汇总；未登录引导去 `/portal/login` |
 | `/portal/account/profile` | 基本信息页显示关注店铺的买家人数（匿名汇总，不展示买家身份） |
+| `/portal/account/card` | 店铺展示状态、商家服务连接状态和买家可见的店铺资料 |
+
+`/portal/publications` 商家页面已移除。`/v1/merchant-publications/*` API 仍保留给现有调用方；日常商品与报价规则由已连接的商家应用维护。
 
 ### 3.5 `/v1/merchant-publications/*`（M0 商家公开资料，账号会话）
 
