@@ -1,6 +1,6 @@
 # kiwi-catalog
 
-当前源码发布线：`0.5.0`；最近的 PyPI 发布记录为 `0.2.2`。PyPI 发布由 Kiwi portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
+当前源码候选：`0.5.1`；正式发布由 Kiwi Portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
 
 独立部署的 Agent Catalog 服务——从 shopping-cli 抽离（
 `shopping-cli/docs/shopping-cli-agent-catalog-extraction-plan-v1.0.md`，
