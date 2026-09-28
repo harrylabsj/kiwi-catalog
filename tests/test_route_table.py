@@ -75,6 +75,7 @@ def test_route_table_covers_expected_route_groups() -> None:
         "/v1/accounts/register",
         "/v1/accounts/login",
         "/v1/accounts/me",
+        "/v1/accounts/me/service-status",
         "/portal",
         "/portal/apply",
         "/portal/account",

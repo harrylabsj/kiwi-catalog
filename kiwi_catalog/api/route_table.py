@@ -41,6 +41,7 @@ from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
+from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
 
@@ -346,6 +347,11 @@ RouteEntry(
         {"GET"},
         "/v1/accounts/me",
         lambda db_path, payload, query, **kw: _v1_account_me(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/accounts/me/service-status",
+        lambda db_path, payload, query, **kw: _v1_account_service_status(db_path, payload),
     ),
 RouteEntry(
         {"POST"},
@@ -765,6 +771,10 @@ def _v1_account_reset_password(db_path, payload):
 
 def _v1_account_me(db_path, payload, query):
     return accounts_handlers.me(db_path, payload, query or {})
+
+
+def _v1_account_service_status(db_path, payload):
+    return service_status_handlers.service_status(db_path, payload or {})
 
 
 def _v1_account_token_request(db_path, payload, query):

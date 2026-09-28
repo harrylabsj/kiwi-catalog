@@ -32,6 +32,7 @@ from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import portal as portal_handlers
+from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.extensions import run_fastapi_hooks
@@ -773,6 +774,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/accounts/me")
     def v1_account_me(request: _FastAPIRequest) -> dict[str, Any]:
         return accounts_handlers.me(db_path, _account_payload(request, {}), {})
+
+    @app.get("/v1/accounts/me/service-status")
+    def v1_account_service_status(request: _FastAPIRequest) -> dict[str, Any]:
+        return service_status_handlers.service_status(db_path, _merchant_payload(request, {}))
 
     @app.post("/v1/accounts/token-request")
     def v1_account_token_request(
