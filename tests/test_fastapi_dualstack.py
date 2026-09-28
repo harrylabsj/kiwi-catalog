@@ -264,7 +264,6 @@ class FastApiDualStackTest(unittest.TestCase):
             "/v1/accounts/agents/{catalog_agent_id}/bindings/pending",
             "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/confirm",
             "/v1/accounts/agents/{catalog_agent_id}/bindings/{binding_request_id}/reject",
-            "/portal/account/card",
         }
         self.assertTrue(new_paths <= {entry.path_template for entry in app_module._ROUTE_TABLE})
         with TestClient(self.app) as client:
@@ -389,9 +388,6 @@ class FastApiDualStackTest(unittest.TestCase):
                 self.assertEqual(resp.status_code, 200, resp.text)
                 self.assertEqual(resp.json()["actor"], f"runtime:{binding_id}")
                 self.assertEqual(resp.json()["freshness_state"], "fresh")
-            resp = client.get("/portal/account/card")
-            self.assertEqual(resp.status_code, 200, resp.text)
-            self.assertIn("我的名片", resp.text)
 
 
 if __name__ == "__main__":

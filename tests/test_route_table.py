@@ -75,9 +75,6 @@ def test_route_table_covers_expected_route_groups() -> None:
         "/v1/accounts/register",
         "/v1/accounts/login",
         "/v1/accounts/me",
-        "/portal",
-        "/portal/apply",
-        "/portal/account",
     ):
         assert expected in paths, f"missing route {expected!r}"
 
@@ -175,13 +172,13 @@ def test_admin_surface_absent_from_open_source_package() -> None:
     leaked = {p for p in paths if p.startswith(forbidden_prefixes) or p in forbidden_paths}
     assert leaked == set(), f"admin 路由回流开源仓: {leaked}"
 
+    # 商家 HTML 后台也属于私有运营产品；开源仓只保留对应 /v1 业务 API。
+    assert not any(path.startswith("/portal") for path in paths)
+
     # 2) handlers：无 admin handler 模块、无 admin_reports 引用
     handlers_dir = Path(__file__).resolve().parent.parent / "kiwi_catalog" / "api" / "handlers"
     assert not (handlers_dir / "admin.py").exists(), "handlers/admin.py 不应在开源仓"
+    assert not (handlers_dir / "portal.py").exists(), "商家后台 HTML 不应在开源仓"
+    assert not (handlers_dir / "portal_kit.py").exists(), "商家后台页面套件不应在开源仓"
     for path in handlers_dir.glob("*.py"):
         assert "admin_reports" not in path.read_text(encoding="utf-8"), path
-
-    # 3) 门户页：无 admin 面板 JS（localStorage key 不回流）
-    portal_src = (handlers_dir / "portal.py").read_text(encoding="utf-8")
-    assert "ADMIN_TOKEN_KEY" not in portal_src
-    assert "kiwi_admin_token" not in portal_src

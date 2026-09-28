@@ -243,17 +243,14 @@ class MarketplaceASGIApp:
         When the caller allows conditional GET and the client's
         ``If-None-Match`` matches the computed ETag, a body-less 304 is sent.
 
-        ``{"__html__": "..."}`` 标记响应（/portal/* 门户页，docs §6）改发
-        text/html；门户页含一次性令牌展示，响应带 no-store 防缓存。
-        ``__status__`` 键覆盖状态码（如审核后台关闭时发真实 404）；
-        ``__redirect__`` 键发 302 + Location（门户旧路径合并跳转）；
+        ``{"__html__": "..."}`` 标记响应改发 text/html 并带 no-store；
+        ``__status__`` 键覆盖状态码；``__redirect__`` 键发 302 + Location。
         ``__cookies__`` 列表下发 Set-Cookie（账号会话，docs/accounts.md）。
         """
         html = response.get("__html__") if isinstance(response, dict) else None
         redirect_to = response.get("__redirect__") if isinstance(response, dict) else None
         if redirect_to is not None:
-            # 门户旧路径跳转（如 /portal/admin/buyer-stats 并入 /portal/dashboard）：
-            # 302 + Location，no-store 防缓存（与门户 HTML 页一致）。
+            # 扩展返回的页面跳转：302 + Location，no-store 防缓存。
             await send(
                 {
                     "type": "http.response.start",

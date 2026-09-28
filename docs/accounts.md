@@ -105,7 +105,12 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 - 轮换端点在私有扩展内，语义不变（必须带当前 token；`new_token` 可选 ≥24 字符；
   明文只返回一次；轮换后发通知邮件，发信失败不回滚轮换）。
 
-### 3.4 `/portal/*`（HTML 门户，登录态；运营/审核页面见私有扩展 kiwi-catalog-admin）
+### 3.4 商家后台 HTML（私有扩展 `kiwi-catalog-admin`）
+
+商家注册、登录、连接确认和资料管理页面由私有扩展提供，URL 保持 `/portal/*`
+不变。开源核心仅提供页面调用的 `/v1/accounts/*`、
+`/v1/merchant-publications/*` 等业务 API，不包含 HTML、CSS、JS 或页面路由。
+部署时需同时安装并启用该扩展；未安装时页面路由返回 404，业务 API 仍可用。
 
 | 路由 | 页面 |
 | --- | --- |
@@ -115,7 +120,7 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + 商品名额（已用／总额），不展示 Listings owner-token 配置步骤 |
 | `/portal/publications` | 公开资料编辑/预览/发布（M0）：发布成功回执显示 publication_id、版本、发布时间；页内显示关注/浏览匿名汇总；未登录引导去 `/portal/login` |
-| `/portal/follows` | 我的关注（M4，买家视角）：关注列表 + 按 merchant_id 关注 + 取消 + 主动拉取更新 |
+| `/portal/account/profile` | 基本信息页显示关注店铺的买家人数（匿名汇总，不展示买家身份） |
 
 ### 3.5 `/v1/merchant-publications/*`（M0 商家公开资料，账号会话）
 
@@ -176,6 +181,8 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 - **匿名汇总原则**：商家只能看到关注者总数与浏览计数，永远拿不到
   buyer_subject / 关注者列表，也没有任何向关注者写消息的 API；浏览计数
   只计非商家本人的公开详情浏览。
+- 买家关注列表页不放在商家 portal；Buyer 客户端仍可通过 `/v1/me/follows*`
+  API 管理自己的关注与主动拉取更新。
 - **限流与审计**：关注/取消按买家限流（env
   `KIWI_CATALOG_FOLLOW_RATE_LIMIT_PER_15MIN`，默认 60/15min，复用
   `merchant_application_limits` 表）；关注/取消操作落 `audit_events`

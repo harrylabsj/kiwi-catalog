@@ -530,46 +530,19 @@ class MerchantsApiTest(unittest.TestCase):
         status, _ = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=" + token)[:2]
         self.assertEqual(status, 403)
 
-    # ── 门户页 ─────────────────────────────────────────────────────────────
-
-    def test_portal_pages_serve_html(self) -> None:
-        for path in ("/portal", "/portal/apply"):
-            status, payload, headers = _call_http(self.app, "GET", path)
-            self.assertEqual(status, 200, (path, payload))
-            self.assertIn("text/html", headers.get("content-type", ""))
-            self.assertIn("no-store", headers.get("cache-control", ""))
-            self.assertIn("Kiwi", payload.get("_raw", ""))
-
-    def test_portal_home_shows_readonly_merchant_id(self) -> None:
-        """商家入口展示自动开通的商品名额。"""
-        status, payload, _ = _call_http(self.app, "GET", "/portal")
-        raw = payload.get("_raw", "")
-        self.assertEqual(status, 200, payload)
-        self.assertIn("商品名额", raw)
-        self.assertIn("r.merchant_id", raw)
-        self.assertIn("基本信息", raw)
-        self.assertNotIn("申请目录令牌", raw)
-        self.assertNotIn("t_domain", raw)
-        self.assertNotIn("店铺域名", raw)
-        self.assertNotIn("商家域名", raw)
+    def test_portal_html_pages_are_owned_by_private_extension(self) -> None:
+        for path in ("/portal", "/portal/apply", "/portal/login", "/portal/account"):
+            status, _, _ = _call_http(self.app, "GET", path)
+            self.assertEqual(status, 404, path)
 
     def test_portal_admin_paths_are_always_404(self) -> None:
-        """审核后台已移私有扩展：即使 env 开关开启也 404（路由不存在）。"""
+        """私有扩展未挂载时，运营后台路由不存在。"""
         for path in ("/portal/admin", "/portal/dashboard", "/portal/admin/searches"):
             with mock.patch.dict(
                 os.environ, {"KIWI_CATALOG_PORTAL_ADMIN_ENABLED": "1"}, clear=False
             ):
                 status, _, _ = _call_http(self.app, "GET", path)
             self.assertEqual(status, 404, path)
-
-    def test_portal_pages_use_official_theme(self) -> None:
-        """门户页与官网共用主题（nav/hero/section/card 类 + --kiwi-* 变量）。"""
-        for path in ("/portal", "/portal/apply"):
-            _, payload, _ = _call_http(self.app, "GET", path)
-            raw = payload.get("_raw", "")
-            self.assertIn("--kiwi-800", raw, path)
-            self.assertIn("class=\"nav\"", raw, path)
-            self.assertIn("class=\"section", raw, path)
 
     def test_token_digest_format(self) -> None:
         self.assertEqual(len(token_digest("mkt_x")), 64)
