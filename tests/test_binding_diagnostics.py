@@ -37,6 +37,8 @@ from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+from kiwi_catalog.api.handlers import cloud_binding
+from kiwi_catalog.db.session import db_session
 from kiwi_catalog.discovery import fetcher as fetcher_module
 from kiwi_catalog.discovery.fetcher import FetchError, FetchResult, ProfileFetcher
 
@@ -309,6 +311,224 @@ class FetcherUrlErrorConvergenceTest(unittest.TestCase):
                     None, None, time.time(),
                     method="POST", data=b"{}", timeout=5, redirect_limit=0,
                 )
+
+
+def _exact_jws(private_pem: str, kid: str, fields: dict) -> str:
+    """逐字段精确签名（不注入 issued_at/nonce）——挑战应答回签用。"""
+    from uuid import uuid4
+
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    from tests.test_cloud_binding import _b64url
+
+    sign_payload = {**fields, "nonce": f"nonce-{uuid4().hex}"}
+    header_segment = _b64url(json.dumps({"alg": "EdDSA", "kid": kid}, separators=(",", ":")).encode())
+    payload_segment = _b64url(json.dumps(sign_payload, separators=(",", ":"), ensure_ascii=False).encode())
+    key = load_pem_private_key(private_pem.encode(), password=None)
+    signature = key.sign(f"{header_segment}.{payload_segment}".encode("ascii"))
+    return f"{header_segment}.{payload_segment}.{_b64url(signature)}"
+
+
+def _jws_nonce(jws: str) -> str:
+    import base64
+
+    segment = jws.split(".")[1]
+    payload = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+    return str(payload["nonce"])
+
+
+class PossessionAndBoundaryDiagnosticsTest(EnrollmentFixture):
+    """C1：持钥证明/签名失败与 nonce 重放（原静默 403）+ BOUND_INACTIVE /
+    CHALLENGE_EXPIRED / ENROLLMENT_CHANGED 边界——固定码/阶段落日志、无秘密。"""
+
+    def _ready_bind(self):
+        enrollment_id = "enr_diag_possession"
+        _, device_hash = self._insert_enrollment(enrollment_id=enrollment_id)
+        grant = cloud_binding_enrollment_grant(enrollment_id, device_hash)
+        binding = {
+            "runtime_origin": RUNTIME_ORIGIN, "a2a_endpoint": A2A_ENDPOINT,
+            "key_jwk": self.jwk, "key_id": RUNTIME_ORIGIN,
+            "generation": 1, "service_epoch": 7,
+        }
+        body = {"enrollment_id": enrollment_id, "grant": grant, "binding": binding}
+
+        def _sig(**overrides):
+            fields = {
+                "method": "POST", "path": f"/v1/agents/{self.agent_id}/runtime-bindings",
+                "audience": "kiwi-catalog", "body_digest": canonical_digest(body),
+                "enrollment_id": enrollment_id,
+                "grant_hash": hashlib.sha256(grant.encode()).hexdigest(),
+                "catalog_agent_id": self.agent_id, "key_id": RUNTIME_ORIGIN,
+                "key_thumbprint": self.thumbprint, "runtime_origin": RUNTIME_ORIGIN,
+                "a2a_endpoint": A2A_ENDPOINT, "generation": 1, "service_epoch": 7,
+                "authorization_epoch": 1,
+                "exp": (datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+                **overrides,
+            }
+            return _jws(self.private_pem, RUNTIME_ORIGIN, fields)
+
+        return enrollment_id, grant, body, _sig
+
+    def _assert_fixed_deny(self, cm, code: str, stage: str) -> None:
+        record = next(r for r in cm.records if "runtime binding denied" in r.getMessage())
+        message = record.getMessage()
+        self.assertIn(f"code={code}", message)
+        self.assertIn(f"stage={stage}", message)
+        self.assertIn(f"agent={self.agent_id}", message)
+        # 日志不得包含 grant、JWS 段、nonce 值。
+        self.assertNotIn("grant=", message)
+        self.assertNotIn("nonce=", message)
+        self.assertNotIn("eyJ", message)
+
+    def _challenge_responder(self, mutate=None):
+        """构造回签正确挑战响应的 post_json mock；mutate 可在回包前做副作用。"""
+
+        def _respond(url, payload, *, timeout):
+            if mutate is not None:
+                mutate()
+            response = {**payload, "key_id": RUNTIME_ORIGIN}
+            response["signature"] = _exact_jws(self.private_pem, RUNTIME_ORIGIN, {
+                **{k: response[k] for k in payload},
+                "key_id": RUNTIME_ORIGIN, "purpose": "kiwi-binding-challenge",
+            })
+            return FetchResult(url=url, status_code=200,
+                               body=json.dumps(response), fetched_at=time.time())
+
+        return _respond
+
+    def test_signed_field_wrong_denial_logs_fixed_code(self) -> None:
+        _eid, _grant, body, sig_for = self._ready_bind()
+        sig = sig_for(path=f"/v1/agents/{self.agent_id}-tampered/runtime-bindings")
+        with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+            status, result = _call(self.app, "POST",
+                                   f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig)
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False, "error": "possession proof field mismatch: path"})
+        self._assert_fixed_deny(cm, "BIND_POSSESSION_INVALID", "validate_possession")
+
+    def test_invalid_signature_denial_logs_fixed_code(self) -> None:
+        _eid, _grant, body, sig_for = self._ready_bind()
+        sig = sig_for()
+        # 翻转签名段中间的一个 base64url 字符（避开尾字符的填充位，保证解码后字节变化）。
+        segment_start = sig.rindex(".") + 1
+        pos = segment_start + (len(sig) - segment_start) // 2
+        for replacement in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_":
+            if replacement != sig[pos]:
+                sig = sig[:pos] + replacement + sig[pos + 1:]
+                break
+        with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+            status, result = _call(self.app, "POST",
+                                   f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig)
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False, "error": "possession proof verification failed"})
+        self._assert_fixed_deny(cm, "BIND_POSSESSION_INVALID", "validate_possession")
+
+    def test_nonce_replay_denial_logs_fixed_code(self) -> None:
+        _eid, _grant, body, sig_for = self._ready_bind()
+        sig = sig_for()
+        nonce = _jws_nonce(sig)
+        now = datetime.now(UTC).replace(microsecond=0)
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into control_plane_nonces (key_id, nonce, issued_at, expires_at, created_at)"
+                " values (?, ?, ?, ?, ?)",
+                (RUNTIME_ORIGIN, nonce, now.isoformat(),
+                 (now + timedelta(minutes=5)).isoformat(), now.isoformat()),
+            )
+        with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+            status, result = _call(self.app, "POST",
+                                   f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig)
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False,
+                                  "error": "request signature replayed (nonce already used)"})
+        self._assert_fixed_deny(cm, "BIND_POSSESSION_REPLAY", "validate_possession")
+
+    def test_bound_inactive_denial_logs_fixed_code(self) -> None:
+        _eid, _grant, body, sig_for = self._ready_bind()
+        enrollment_id = body["enrollment_id"]
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update enrollments set status='bound', binding_id=? where enrollment_id=?",
+                ("bind_missing_" + enrollment_id, enrollment_id),
+            )
+        with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+            status, result = _call(self.app, "POST",
+                                   f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig_for())
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False, "error": "bound enrollment is no longer active"})
+        self._assert_fixed_deny(cm, "BIND_BOUND_INACTIVE", "validate_state")
+
+    def test_challenge_expired_denial_logs_fixed_code(self) -> None:
+        _eid, _grant, body, sig_for = self._ready_bind()
+
+        class _ShiftableDateTime(datetime):
+            shift = timedelta(0)
+
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime.now(tz) if tz is not None else datetime.now()
+                return base + cls.shift
+
+        def _elapse():
+            _ShiftableDateTime.shift = timedelta(seconds=90)
+
+        with mock.patch.object(cloud_binding, "datetime", _ShiftableDateTime), \
+             mock.patch.object(ProfileFetcher, "post_json",
+                               side_effect=self._challenge_responder(mutate=_elapse)):
+            with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+                status, result = _call(self.app, "POST",
+                                       f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig_for())
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False, "error": "runtime endpoint challenge expired"})
+        self._assert_fixed_deny(cm, "BIND_CHALLENGE_EXPIRED", "challenge_response")
+
+    def test_enrollment_changed_denial_logs_fixed_code(self) -> None:
+        enrollment_id, _grant, body, sig_for = self._ready_bind()
+
+        def _cancel():
+            with db_session(self.db_path) as conn:
+                conn.execute("update enrollments set status='canceled' where enrollment_id=?",
+                             (enrollment_id,))
+
+        with mock.patch.object(ProfileFetcher, "post_json",
+                               side_effect=self._challenge_responder(mutate=_cancel)):
+            with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+                status, result = _call(self.app, "POST",
+                                       f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig_for())
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False,
+                                  "error": "enrollment authorization changed during endpoint challenge"})
+        self._assert_fixed_deny(cm, "BIND_ENROLLMENT_CHANGED", "challenge_commit")
+
+    def test_challenge_signature_invalid_denial_logs_fixed_code(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding,
+            NoEncryption,
+            PrivateFormat,
+        )
+
+        _eid, _grant, body, sig_for = self._ready_bind()
+        foreign_pem = Ed25519PrivateKey.generate().private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption(),
+        ).decode()
+
+        def _respond(url, payload, *, timeout):
+            response = {**payload, "key_id": RUNTIME_ORIGIN}
+            response["signature"] = _exact_jws(foreign_pem, RUNTIME_ORIGIN, {
+                **{k: response[k] for k in payload},
+                "key_id": RUNTIME_ORIGIN, "purpose": "kiwi-binding-challenge",
+            })
+            return FetchResult(url=url, status_code=200,
+                               body=json.dumps(response), fetched_at=time.time())
+
+        with mock.patch.object(ProfileFetcher, "post_json", side_effect=_respond):
+            with self.assertLogs(_LOG_NAME, level="WARNING") as cm:
+                status, result = _call(self.app, "POST",
+                                       f"/v1/agents/{self.agent_id}/runtime-bindings", body, signature=sig_for())
+        self.assertEqual(status, 403, result)
+        self.assertEqual(result, {"ok": False, "error": "possession proof verification failed"})
+        self._assert_fixed_deny(cm, "BIND_POSSESSION_INVALID", "challenge_response")
 
 
 if __name__ == "__main__":
