@@ -52,6 +52,18 @@ class FastApiDualStackTest(unittest.TestCase):
     def test_returns_fastapi_app(self) -> None:
         self.assertEqual(type(self.app).__name__, "FastAPI")
 
+    def test_no_portal_pages_in_fastapi_stack(self) -> None:
+        """与 route_table 守卫对称：FastAPI 栈同样不得注册 /portal/* 页面。
+
+        核心自带 /portal/* 会遮蔽私有扩展 kiwi-catalog-admin 的商家后台页面
+        （2026-09-29 生产事故：状态码仍全是 200，只有页面内容被换回旧版）。
+        """
+        leaked = sorted(
+            route.path for route in self.app.routes
+            if str(getattr(route, "path", "")).startswith("/portal")
+        )
+        self.assertEqual([], leaked, f"FastAPI 栈仍有商家后台路由: {leaked}")
+
     def test_register_via_fastapi(self) -> None:
         from fastapi.testclient import TestClient
 
