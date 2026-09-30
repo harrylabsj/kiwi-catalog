@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
-from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
@@ -995,77 +994,6 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         merchant_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _v1_unfollow_merchant(db_path, merchant_id, _account_payload(request, {}))
-
-    _PORTAL_HTML_HEADERS = {"Cache-Control": "no-store"}  # 一次性令牌页防缓存
-
-    from fastapi.responses import HTMLResponse, RedirectResponse
-
-    def _portal_html(result: dict[str, Any]) -> HTMLResponse | RedirectResponse:
-        """门户 handler 结果 → HTMLResponse 或 RedirectResponse（2xx/302）；
-        ``__redirect__`` 键发 302 + Location（门户旧路径合并跳转），
-        ``__status__`` 键覆盖状态码（与 fallback _send_json 语义一致）。
-
-        返回类型注解含 RedirectResponse：此前只写 HTMLResponse，mypy 一直报
-        ``Incompatible return value type``（改动前既有的 CI 失败），本次一并修正。
-        """
-        redirect_to = result.get("__redirect__")
-        if redirect_to:
-            return RedirectResponse(
-                str(redirect_to), status_code=302, headers=_PORTAL_HTML_HEADERS
-            )
-        return HTMLResponse(
-            result["__html__"],
-            status_code=int(result.get("__status__") or 200),
-            headers=_PORTAL_HTML_HEADERS,
-        )
-
-    @app.get("/portal")
-    def portal_home_page() -> Response:
-        return _portal_html(portal_handlers.portal_home())
-
-    @app.get("/portal/apply")
-    def portal_apply_page() -> Response:
-        return _portal_html(portal_handlers.portal_apply())
-
-    @app.get("/portal/connect/{enrollment_id}")
-    def portal_connect_page(enrollment_id: str) -> Response:
-        return _portal_html(portal_handlers.portal_enrollment_connect(enrollment_id))
-
-    @app.get("/portal/register")
-    def portal_register_page() -> Response:
-        return _portal_html(portal_handlers.portal_register())
-
-    @app.get("/portal/login")
-    def portal_login_page() -> Response:
-        return _portal_html(portal_handlers.portal_login())
-
-    @app.get("/portal/connect")
-    def portal_connector_connect_page() -> Response:
-        return _portal_html(portal_handlers.portal_connect())
-
-    @app.get("/portal/reset-password")
-    def portal_reset_password_page() -> Response:
-        return _portal_html(portal_handlers.portal_reset_password())
-
-    @app.get("/portal/account")
-    def portal_account_page() -> Response:
-        return _portal_html(portal_handlers.portal_account())
-
-    @app.get("/portal/account/profile")
-    def portal_account_profile_page() -> Response:
-        return _portal_html(portal_handlers.portal_account_profile())
-
-    @app.get("/portal/account/card")
-    def portal_account_card_page() -> Response:
-        return _portal_html(portal_handlers.portal_account_card())
-
-    @app.get("/portal/publications")
-    def portal_publications_page() -> Response:
-        return _portal_html(portal_handlers.portal_publications())
-
-    @app.get("/portal/follows")
-    def portal_follows_page() -> Response:
-        return _portal_html(portal_handlers.portal_follows())
 
     # 扩展路由挂钩（docs/extensions.md）：基表注册完再让扩展包挂自己的
     # FastAPI 路由；fail-soft 由 run_fastapi_hooks 负责。

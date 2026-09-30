@@ -564,10 +564,9 @@ class BuyerFollowsFallbackStackTest(unittest.TestCase):
                 app, "DELETE", f"/v1/me/follows/{merchant_id}", b"{}", cookie=cookie_b
             )
             self.assertEqual(status, 200, payload)
-            # 门户买家关注页（fallback HTML）
+            # 买家关注仍可通过 API 使用；商家门户 HTML 页已移除。
             status, payload, _ = _call_http(app, "GET", "/portal/follows")
-            self.assertEqual(status, 200)
-            self.assertIn("我的关注", payload["_raw"])
+            self.assertEqual(status, 404, payload)
 
 
 @unittest.skipUnless(app_module.FastAPI is not None, "fastapi not installed")
@@ -597,9 +596,9 @@ class BuyerFollowsFastApiTest(unittest.TestCase):
             "/v1/me/follows/updates",
             "/v1/me/follows/{merchant_id}",
             "/v1/merchant-publications/stats",
-            "/portal/follows",
         ):
             self.assertIn(expected, fastapi_paths)
+        self.assertNotIn("/portal/follows", fastapi_paths)
 
         with TestClient(self.app) as client:
             def register(email: str, name: str) -> str:
@@ -656,8 +655,7 @@ class BuyerFollowsFastApiTest(unittest.TestCase):
             )
             self.assertEqual(resp.status_code, 200, resp.text)
             resp = client.get("/portal/follows")
-            self.assertEqual(resp.status_code, 200, resp.text)
-            self.assertIn("我的关注", resp.text)
+            self.assertEqual(resp.status_code, 404, resp.text)
 
 
 if __name__ == "__main__":

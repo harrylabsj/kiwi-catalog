@@ -21,7 +21,7 @@
 - me：未登录 403；登录后返回工单状态；审批后返回 token 明文（找回）；
 - token-request：pending 去重、active 去重、rejected 后可重新申请（新工单）；
 - 登出后 me 403；
-- /portal/register、/portal/login、/portal/account 页面 200。
+- 商家后台 HTML 页面由私有 kiwi-catalog-admin 扩展负责测试。
 """
 
 from __future__ import annotations
@@ -829,67 +829,6 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 403, payload)
 
-    # ── 导航 ───────────────────────────────────────────────────────────────
-
-    def test_portal_nav_has_my_account(self) -> None:
-        """「商家后台」页一级导航：首页 / 买家 / 商家 / 开发者 / 商家后台。
-
-        与官网首页导航一致，链接到 kiwi.harrylabsj.com 各页（Demo 在官网首页，
-        不单列）；商家后台为本地页；令牌申请收敛到页内（无独立导航链接）。
-        """
-        _, payload, _ = _call_http(self.app, "GET", "/portal/account")
-        raw = payload.get("_raw", "")
-        for label in (">首页</a>", ">买家</a>", ">商家</a>",
-                      ">开发者</a>", ">商家后台</a>"):
-            self.assertIn(label, raw)
-        self.assertNotIn(">Demo</a>", raw)
-        self.assertIn("buyers", raw)
-        self.assertIn("merchants", raw)
-        self.assertIn("developers", raw)
-
-    def test_account_page_shows_listing_capacity_without_token_setup(self) -> None:
-        _, payload, _ = _call_http(self.app, "GET", "/portal/account")
-        raw = payload.get("_raw", "")
-        self.assertIn("商品名额", raw)
-        self.assertIn("listing_capacity", raw)
-        self.assertNotIn("KIWI_MERCHANT_TOKEN=", raw)
-        self.assertNotIn('id="copy_env_line"', raw)
-        self.assertNotIn("demo.html", raw)
-        self.assertNotIn("申请目录令牌", raw)
-        self.assertNotIn(">API Token</a>", raw)
-        self.assertNotIn(">令牌申请</a>", raw)
-        self.assertNotIn("/portal/status", raw)
-        self.assertNotIn(">Merchant Portal<", raw)  # 导航无 Merchant Portal（title 后缀除外）
-
-    def test_home_nav_points_to_my_account(self) -> None:
-        """`/portal` 一级导航指向商家后台；不再有独立令牌申请导航链接。"""
-        _, payload, _ = _call_http(self.app, "GET", "/portal")
-        raw = payload.get("_raw", "")
-        self.assertIn(">商家后台</a>", raw)
-        self.assertIn("/portal/account", raw)
-        self.assertIn(">商家</a>", raw)
-        self.assertNotIn(">API Token</a>", raw)
-        self.assertNotIn(">令牌申请</a>", raw)
-
-    def test_status_page_removed(self) -> None:
-        status, _, _ = _call_http(self.app, "GET", "/portal/status")
-        self.assertEqual(status, 404, "令牌页已移除")
-
-    # ── 页面 ───────────────────────────────────────────────────────────────
-
-    def test_account_pages_serve_html(self) -> None:
-        markers = {
-            "/portal/register": "注册商家账号",
-            "/portal/login": "商家登录",
-            "/portal/account": "商家后台",
-        }
-        for path, marker in markers.items():
-            status, payload, _ = _call_http(self.app, "GET", path)
-            self.assertEqual(status, 200, (path, payload))
-            self.assertTrue(payload.get("_raw", "").startswith("<!doctype html"), path)
-            self.assertIn(marker, payload.get("_raw", ""), path)
-
-
 class PasswordResetApiTest(unittest.TestCase):
     """忘记密码重置流程（迁移 v24，docs/accounts.md）。
 
@@ -1033,17 +972,6 @@ class PasswordResetApiTest(unittest.TestCase):
         code = self._forgot()["reset_code"]
         status, payload = self._reset("ops@acme.example", code, "short")
         self.assertEqual(status, 400, payload)
-
-    def test_portal_reset_password_page(self) -> None:
-        status, payload, _ = _call_http(self.app, "GET", "/portal/reset-password")
-        self.assertEqual(status, 200, payload)
-        raw = payload.get("_raw", "")
-        self.assertTrue(raw.startswith("<!doctype html"))
-        self.assertIn("重置密码", raw)
-        # 登录页有「忘记密码」入口
-        _, payload, _ = _call_http(self.app, "GET", "/portal/login")
-        self.assertIn("/portal/reset-password", payload.get("_raw", ""))
-
 
 class TokenEncryptionTest(unittest.TestCase):
     """审查 C-H1：Fernet 密钥派生升级为 scrypt + v2 前缀 + 解密 fail-closed。"""
