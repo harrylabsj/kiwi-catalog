@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""kiwi-catalog fallback route table (阶段 2 独立库).
+"""kiwi-catalog public API fallback route table.
 
-The executable route table and its handler wrappers, extracted verbatim from
-api/app.py.  The app facade keeps payload validation, error mapping and the
-FastAPI/fallback selection; this module owns the pure route table that both
-stacks dispatch through (``resolve_route`` walks it for the middleware and
-fallback route resolver).  Move-only split: no route, handler or status
-semantics changed.
+This table contains only public catalog and business API routes. Private HTML
+pages and operational routes are contributed by configured extensions. The
+app facade keeps payload validation, error mapping and FastAPI/fallback
+selection; both stacks dispatch through this table plus extension routes.
 """
 
 from __future__ import annotations
@@ -40,7 +38,6 @@ from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_h
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
-from kiwi_catalog.api.handlers import portal as portal_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
@@ -523,64 +520,7 @@ RouteEntry(
             db_path, request_id, payload
         ),
     ),
-# ── /portal（门户页面，docs §6；fallback 栈渲染 HTML）────────────────────
-RouteEntry(
-        {"GET"},
-        "/portal",
-        lambda db_path, payload, query, **kw: _portal_home(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/apply",
-        lambda db_path, payload, query, **kw: _portal_apply(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/register",
-        lambda db_path, payload, query, **kw: _portal_register(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/login",
-        lambda db_path, payload, query, **kw: _portal_login(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/connect",
-        lambda db_path, payload, query, **kw: _portal_connect(),
-    ),
-RouteEntry({"GET"}, "/portal/connect/{enrollment_id}",
-          lambda db_path, payload, query, enrollment_id: portal_handlers.portal_enrollment_connect(enrollment_id)),
-RouteEntry(
-        {"GET"},
-        "/portal/reset-password",
-        lambda db_path, payload, query, **kw: _portal_reset_password(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/account",
-        lambda db_path, payload, query, **kw: _portal_account(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/account/profile",
-        lambda db_path, payload, query, **kw: _portal_account_profile(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/account/card",
-        lambda db_path, payload, query, **kw: _portal_account_card(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/publications",
-        lambda db_path, payload, query, **kw: _portal_publications(),
-    ),
-RouteEntry(
-        {"GET"},
-        "/portal/follows",
-        lambda db_path, payload, query, **kw: _portal_follows(),
-    ),
+
 )
 
 def _list_catalog_agents(db_path, payload, query):
@@ -886,53 +826,6 @@ def _v1_exchange_connector_identity(db_path, payload):
 
 def _v1_revoke_connector_identity(db_path, payload):
     return connector_identity_handlers.revoke_identity_token(db_path, payload)
-
-
-# ── /portal wrapper（门户页面）────────────────────────────────────────────
-
-
-def _portal_home():
-    return portal_handlers.portal_home()
-
-
-def _portal_apply():
-    return portal_handlers.portal_apply()
-
-
-def _portal_register():
-    return portal_handlers.portal_register()
-
-
-def _portal_login():
-    return portal_handlers.portal_login()
-
-
-def _portal_connect():
-    return portal_handlers.portal_connect()
-
-
-def _portal_reset_password():
-    return portal_handlers.portal_reset_password()
-
-
-def _portal_account():
-    return portal_handlers.portal_account()
-
-
-def _portal_account_profile():
-    return portal_handlers.portal_account_profile()
-
-
-def _portal_account_card():
-    return portal_handlers.portal_account_card()
-
-
-def _portal_publications():
-    return portal_handlers.portal_publications()
-
-
-def _portal_follows():
-    return portal_handlers.portal_follows()
 
 
 def _v1_get_listing(db_path, listing_id, payload=None, query=None):

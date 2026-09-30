@@ -499,7 +499,6 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
             "/v1/merchant-publications/search",
             "/v1/merchant-publications/{publication_id}",
             "/v1/merchant-publications/{publication_id}/withdraw",
-            "/portal/publications",
         ):
             self.assertIn(expected, fastapi_paths)
 

@@ -28,6 +28,10 @@ def register_kiwi_extension(reg) -> None:
     reg.add_fastapi_hook(_fastapi)
 ```
 
+商家后台 HTML（`/portal/*`）与运营后台同属私有运营界面，由
+`kiwi-catalog-admin` 扩展注册。核心仓只保留其调用的账号、商家资料和 Listings
+API；未安装扩展时页面路由不存在。
+
 ## 规则与保证
 
 - **fail-soft**：扩展缺失、没有 `register_kiwi_extension`、注册或挂钩抛

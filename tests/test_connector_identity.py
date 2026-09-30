@@ -224,13 +224,6 @@ class ConnectorIdentityApiTest(unittest.TestCase):
             status, _ = self._create()
         self.assertEqual(status, 400)
 
-    # ── 门户确认页 ─────────────────────────────────────────────────────────
-
-    def test_connect_page_is_served(self) -> None:
-        status, payload, _ = _call_http(self.app, "GET", "/portal/connect")
-        self.assertEqual(status, 200)
-        self.assertIn("连接「Kiwi 商家运营」", payload["_raw"])
-
     def test_view_requires_session(self) -> None:
         status, payload = self._create()
         request_id = payload["request"]["request_id"]
