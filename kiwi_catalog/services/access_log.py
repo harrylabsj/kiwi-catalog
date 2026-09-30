@@ -154,6 +154,8 @@ def classify_surface(method: str, path: str) -> str | None:
       /v1/merchants/self 等归入商家面）；
     - ``account_portal``：账号体系 /v1/accounts/* 与门户 HTML 页 /portal/*；
     - ``admin``：运营后台 /v1/admin/*、/portal/admin*、/portal/dashboard。
+      （/portal/* 页面现由私有扩展 kiwi-catalog-admin 提供；分类保留不变——
+      扩展流量仍按这些 surface 归类。）
     """
     path = str(path or "").split("?", 1)[0]
     if path == "/health":

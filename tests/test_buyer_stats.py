@@ -23,8 +23,9 @@
 - 关键词统计（v27，buyer_keyword_daily）：归一化、upsert 累加、
   zero_results 计数、空 query 跳过、top_keywords 排序/窗口/limit、
   端点 top_keywords/zero_hit_keywords 字段、搜索 handler 关键词埋点；
-- portal 页（2026-08-22 合并）：旧 /portal/admin/buyer-stats 独立页 302
-  跳转到 /portal/dashboard（双栈）；dashboard 渲染并入的买家搜索统计区块。
+运营后台页面（/portal/admin*、/portal/dashboard）已随私有扩展
+kiwi-catalog-admin 移出本包，对应的页面/跳转断言不再属于本模块；这里只覆盖
+留在核心的服务层与 /v1/admin/* API。
 """
 
 from __future__ import annotations

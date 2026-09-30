@@ -392,5 +392,88 @@ class EnrollmentSecurityTest(EnrollmentFixture):
         self.assertEqual(card_status, 409, card_result)
 
 
+class EnrollmentAuthorizationApiTest(EnrollmentFixture):
+    """商家侧预览 / 授权 API 的行为与安全断言（不含任何页面依赖）。
+
+    这些断言原本在 ``tests/test_portal_enrollment_flow.py`` 里与商家门户页面测试
+    混在一个文件；门户页面移入私有扩展后该文件整体删除，但
+    ``/v1/accounts/enrollments/{id}`` 与 ``/authorize`` 仍留在本包，其安全语义
+    （匿名拒绝、字段不泄漏、CSRF 源校验、失败不改状态、重复授权幂等）必须继续
+    有覆盖，故迁到这里。
+    """
+
+    def _user_code(self, enrollment_id: str) -> str:
+        return "S" + hashlib.sha256(enrollment_id.encode()).hexdigest()[:7].upper()
+
+    def _login_owner(self) -> None:
+        logged_in = self.client.post("/v1/accounts/login", json={
+            "email": self.owner, "password": "strong-password-123",
+        })
+        self.assertEqual(logged_in.status_code, 200, logged_in.text)
+
+    def test_preview_and_authorize_api_flow(self) -> None:
+        enrollment_id = "enr_authorize_api_flow"
+        self._insert_enrollment(status="ready_for_authorization", enrollment_id=enrollment_id)
+        user_code = self._user_code(enrollment_id)
+        detail_url = f"/v1/accounts/enrollments/{enrollment_id}"
+
+        # 商家私密预览：匿名必须被拒。
+        self.client.cookies.clear()
+        anonymous = self.client.get(detail_url)
+        self.assertEqual(anonymous.status_code, 403, anonymous.text)
+
+        self._login_owner()
+        preview = self.client.get(detail_url)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["user_code"], user_code)
+        self.assertEqual(preview.json()["public_preview"]["name"], "Security Merchant A")
+        # 预览不得泄漏设备码 / 运行时公钥 / 授权码。
+        self.assertNotIn("device_code", preview.text)
+        self.assertNotIn("key_jwk", preview.text)
+        self.assertNotIn("grant", preview.text)
+
+        authorized = self.client.post(
+            f"{detail_url}/authorize",
+            json={"user_code": user_code}, headers={"Origin": "https://localhost"},
+        )
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+        self.assertEqual(authorized.json()["status"], "authorized")
+        self.assertNotIn("grant", authorized.text)
+
+        # 重复授权是幂等的，不应把已授权的登记打回。
+        replay = self.client.post(
+            f"{detail_url}/authorize",
+            json={"user_code": user_code}, headers={"Origin": "https://localhost"},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+
+        final = self.client.get(detail_url)
+        self.assertEqual(final.status_code, 200, final.text)
+        self.assertEqual(final.json()["status"], "authorized")
+
+    def test_authorize_rejects_cross_origin_and_wrong_code(self) -> None:
+        enrollment_id = "enr_authorize_api_guard"
+        self._insert_enrollment(status="ready_for_authorization", enrollment_id=enrollment_id)
+        detail_url = f"/v1/accounts/enrollments/{enrollment_id}"
+
+        cross_origin = self.client.post(
+            f"{detail_url}/authorize",
+            json={"user_code": self._user_code(enrollment_id)},
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(cross_origin.status_code, 403, cross_origin.text)
+
+        wrong_code = self.client.post(
+            f"{detail_url}/authorize",
+            json={"user_code": "00000000"}, headers={"Origin": "https://localhost"},
+        )
+        self.assertIn(wrong_code.status_code, (400, 409), wrong_code.text)
+
+        # 失败的授权不得改变登记状态。
+        still_ready = self.client.get(detail_url)
+        self.assertEqual(still_ready.status_code, 200, still_ready.text)
+        self.assertEqual(still_ready.json()["status"], "ready_for_authorization")
+
+
 if __name__ == "__main__":
     unittest.main()
