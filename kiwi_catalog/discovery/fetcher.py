@@ -757,6 +757,12 @@ class ProfileFetcher:
             raise
         except TimeoutError as exc:
             raise FetchError(f"Request timed out after {self._timeout}s: {exc}") from exc
+        except urllib.error.URLError as exc:
+            # TLS/连接层失败（如握手超时）在 urllib 内部已被包成 URLError，
+            # 不会以裸 TimeoutError 到达这里；统一收敛为 FetchError——与
+            # _fetch 的既有约定一致，避免网络错误漏成未处理 500。
+            # 顺序必须在 HTTPError 之后（HTTPError 是 URLError 子类，需透传状态码）。
+            raise FetchError(f"Fetch failed for '{url}': {exc}") from exc
 
     def _process_response(
         self,
