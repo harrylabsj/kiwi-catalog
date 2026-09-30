@@ -32,6 +32,21 @@ def register_kiwi_extension(reg) -> None:
 `kiwi-catalog-admin` 扩展注册。核心仓只保留其调用的账号、商家资料和 Listings
 API；未安装扩展时页面路由不存在。
 
+### 核心 API 返回的 `/portal/*` 链接
+
+有三处**核心响应会给出手工操作入口的 `/portal/*` 链接**，它们只有在扩展已挂载
+时才可访问（基址取自 `KIWI_CATALOG_PUBLIC_BASE_URL`，未配置时回退本地开发地址）：
+
+| 位置 | 字段 | 形式 |
+| --- | --- | --- |
+| `services/enrollments.py` | `verification_uri` | `/portal/connect/{enrollment_id}`（相对路径） |
+| `api/handlers/connector_identity.py` | `login_url` | `<基址>/portal/connect?request_id=…` |
+| `api/handlers/service_status.py` | `authorization_url` | `<基址>/portal/connect/{enrollment_id}` |
+
+未安装扩展时这些链接 404：`/v1` API（含 device 轮询）本身不受影响，但**连接确认/
+授权必须由用户在浏览器里完成的那一步做不了**。因此「只跑核心、不装扩展」的部署
+必须自行提供等价页面，或把这几步排除在流程之外。
+
 ## 规则与保证
 
 - **fail-soft**：扩展缺失、没有 `register_kiwi_extension`、注册或挂钩抛
