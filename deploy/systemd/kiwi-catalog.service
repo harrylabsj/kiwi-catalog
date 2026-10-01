@@ -14,6 +14,10 @@ User=kiwi-catalog
 Group=kiwi-catalog
 WorkingDirectory=/opt/kiwi-catalog
 EnvironmentFile=-/etc/kiwi-catalog/env
+# 上线预检（A40-3）：签发必需配置（issuer + KIWI_CATALOG_PUBLIC_ORIGIN）缺失
+# 即拒绝启动（原缺陷：配置缺失只会在 runtime-bindings 静默 403，无启动期信号）。
+# 确需无签发配置运行的部署，注释掉本行即可（serving 路径仍会打印 stderr 警告）。
+ExecStartPre=/opt/kiwi-catalog/.venv/bin/kiwi-catalog-api --check-config
 ExecStart=/opt/kiwi-catalog/.venv/bin/kiwi-catalog-api --db /var/lib/kiwi-catalog/catalog.sqlite --host 127.0.0.1 --port 8600
 Restart=on-failure
 RestartSec=3
