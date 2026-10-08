@@ -11,7 +11,12 @@ requires-python = ">=3.11"
 # cryptography：token 加密存储（Fernet）——标准库无可逆加密，商家凭证
 # 安全存储的必要例外（docs §account）
 # jsonschema：register-input 契约硬拒（CD #8，schema 落盘 + additionalProperties:false）
-dependencies = ["cryptography", "jsonschema"]
+# review 3-70（A316 收窄）：直接依赖设安全下限——uv.lock/Dockerfile
+# --require-hashes 之外，非锁安装（pip install）不受任何下限保护。
+# cryptography>=42.0.4：排除已核受影响线（42.0.0-42.0.3，CVE-2024-26130 修复线）；
+# jsonschema>=4.18：Python 3.11 兼容基线。floor 只约束未锁安装，不代表当前
+# 锁内依赖无漏洞；实际锁 cryptography 50.0.0 不漂移。
+dependencies = ["cryptography>=42.0.4", "jsonschema>=4.18"]
 license = {file = "LICENSE"}
 
 [project.optional-dependencies]

@@ -153,7 +153,9 @@ def public_enrollment(conn: sqlite3.Connection, enrollment_id: str) -> dict[str,
 
 
 def authorize(conn: sqlite3.Connection, row: sqlite3.Row, account: dict[str, Any], user_code: str,
-              agent_id: str, grant: str) -> dict[str, Any]:
+              agent_id: str) -> dict[str, Any]:
+    # review 3-61：grant 形参已删——service 内部始终以 _stable_grant 重算，
+    # 传入的随机 grant 从未落库（死参数）；user_code 校验收敛到本函数唯一一处。
     if str(row["user_code"]).upper() != user_code.strip().upper():
         raise ValidationError("user_code mismatch")
     if (row["status"] == "authorized" and row["grant_expires_at"] > now_iso()

@@ -423,10 +423,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.141.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
-    { name = "jsonschema" },
+    { name = "jsonschema", specifier = ">=4.18" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },

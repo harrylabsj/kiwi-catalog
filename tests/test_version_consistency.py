@@ -22,3 +22,14 @@ def test_version_constant_matches_pyproject() -> None:
         f"kiwi_catalog.VERSION ({VERSION!r}) 与 pyproject.toml ({declared!r}) 不一致；"
         "发版时必须同步 kiwi_catalog/__init__.py"
     )
+
+
+def test_db_session_reexports_package_version() -> None:
+    """review 3-59：db/session 的 VERSION 必须 re-export 包版本。
+
+    此前硬编码 "0.5.0" 并写进 meta 表的 package_version——所有 ≥0.5.1
+    安装的库运营元数据都是错版本。
+    """
+    from kiwi_catalog.db import session as db_session_module
+
+    assert db_session_module.VERSION == VERSION

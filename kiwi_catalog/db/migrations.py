@@ -1444,9 +1444,34 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     # 中途抛错则前半段已落库且 user_version 停在最后成功条（此前靠逐条幂等自愈）。
     # SAVEPOINT 让整条链原子回滚（含 user_version 的 PRAGMA 改动）；并发双开靠
     # busy_timeout 串行化，索引迁移的 CREATE INDEX IF NOT EXISTS 幂等兜底。
-    current_version = schema_user_version(conn)
-    conn.execute("SAVEPOINT kiwi_migrations")
+    # review 3-55（返修）：BEGIN IMMEDIATE 取写锁后**保持到迁移结束**才
+    # commit——原返修 BEGIN 后立即 commit，写锁即刻释放，并发双进程首开仍
+    # 可同时进入迁移链（A313 独验）。写锁覆盖整个链；链内原子性仍由
+    # SAVEPOINT 承担（legacy 隔离模式 DDL 自提交语义不变）。
+    # review 3-55（A316 收窄）：兼容调用方已有事务——已在事务中时不能
+    # BEGIN IMMEDIATE（SQLite 报错），退回 SAVEPOINT 原语义（外层事务已持锁）。
+    # review 3-55（A323 校准）：**事务归属收口**——A317 raw C4 实证：调用方
+    # 已有外层事务时，末尾 conn.commit() 会把外层一并提交（caller rollback
+    # 失效、scratch 表/version 泄漏提交）。归属规则：
+    #   - 自己无外层事务：BEGIN IMMEDIATE 取写权并**持有到链结束**，锁内重读
+    #     version；结束时只 commit **自己的**事务。
+    #   - 调用方已有事务：不 BEGIN、不 commit/rollback 外层——只用自己命名
+    #     SAVEPOINT 包链，失败仅回滚自身范围；外层提交/回滚由 caller 决定。
+    #     deferred 外层若并发下写权升级失败，SQLite 显式抛错保外层语义
+    #     （不假宣所有外层先持写权）。
+    in_outer_tx = bool(getattr(conn, "in_transaction", False))
+    own_tx = not in_outer_tx
+    if own_tx:
+        conn.execute("BEGIN IMMEDIATE")
+    # review 3-55（A328 余项）：version 读取与 SAVEPOINT 创建收进 try——
+    # own BEGIN 之后这两步失败此前会越过 own rollback，遗留 open 事务；
+    # savepoint_created 守卫区分「savepoint 未建立」（无可回滚目标）与
+    # 「链中失败」（回滚自身 SAVEPOINT 范围）。outer 一律不代回滚/代提交。
+    savepoint_created = False
     try:
+        current_version = schema_user_version(conn)
+        conn.execute("SAVEPOINT kiwi_migrations")
+        savepoint_created = True
         for migration in MIGRATIONS:
             if migration.version <= current_version:
                 continue
@@ -1454,7 +1479,22 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             _set_schema_user_version(conn, migration.version)
         conn.execute("RELEASE SAVEPOINT kiwi_migrations")
     except BaseException:
-        conn.execute("ROLLBACK TO SAVEPOINT kiwi_migrations")
-        conn.execute("RELEASE SAVEPOINT kiwi_migrations")
+        # review 3-55（A326）：apply 异常只回滚自身 SAVEPOINT 范围——caller
+        # outer 事务与原错误原样保留（不盲 rollback caller outer）。
+        if savepoint_created:
+            conn.execute("ROLLBACK TO SAVEPOINT kiwi_migrations")
+            conn.execute("RELEASE SAVEPOINT kiwi_migrations")
+        if own_tx:
+            conn.rollback()
         raise
-    conn.commit()
+    if own_tx:
+        # review 3-55（A326）：own 事务 COMMIT 失败（磁盘满/锁等）→ 显式
+        # rollback 自身收尾，不留 open transaction；原错误上抛。
+        try:
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except BaseException:
+                pass  # 收尾失败不掩盖 COMMIT 原错误
+            raise

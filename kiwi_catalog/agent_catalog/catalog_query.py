@@ -76,11 +76,14 @@ AGENT_ORDER_BY = (
 
 
 def agent_list_cursor_clause(cursor: str) -> tuple[str, list[Any]]:
-    """Legacy single-key list cursor: continue after *cursor* (by id).
+    """Legacy single-key list cursor (review P1-5: no longer used by callers).
 
-    Used by the plain list entry points (``list_catalog_agents`` /
-    ``list_catalog_agents_by_merchant``), which page strictly on
-    ``catalog_agent_id``.  Search uses the v2 keyset predicate instead.
+    The plain list entry points (``list_catalog_agents`` /
+    ``list_catalog_agents_by_merchant``) previously paged on this
+    ``catalog_agent_id > ?`` predicate while emitting rank-first v2 cursors —
+    the predicate never matched and pagination stuck on page 1.  They now share
+    ``pagination.agent_cursor_predicate``; this fragment survives only for the
+    regression test that pins the historical (wrong) shape.
     """
     return "ca.catalog_agent_id > ?", [cursor]
 

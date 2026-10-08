@@ -585,10 +585,14 @@ def _read_management_descriptor(
     payload: dict | None = None,
     query: dict | None = None,
 ):
+    # review P1-6：不再注入 _allow_query_owner_token——凭据只从 Authorization
+    # header（payload_with_auth 注入的 _auth_token）读取，owner_token 不进 URL
+    # （访问日志/代理缓存/浏览器历史暴露面）。此前共享 wrapper 无条件注入该
+    # 标记，注释声称的「仅本地 fallback 旧约定」漂移成了两个栈都吃 query 凭据。
     return cloud_binding_handlers.read_management_descriptor(
         db_path,
         catalog_agent_id,
-        {**(payload or {}), "_allow_query_owner_token": True},
+        payload or {},
         query or {},
     )
 

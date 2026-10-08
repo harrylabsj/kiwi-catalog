@@ -83,7 +83,11 @@ from kiwi_catalog.services.agent_catalog import (
 # 审查 P1-8：VerificationQueueFullError 必须在模块级可见——此前只在
 # _verification_queue 函数内导入，队列满的 except 分支求值时抛 NameError
 # → 500，优雅降级（verification_enqueued=False）是死代码。
-from kiwi_catalog.services.agent_verification import VerificationQueueFullError
+from kiwi_catalog.services.agent_verification import (
+    VerificationQueueFullError,
+    VerificationQueueLedgerError,
+    VerificationQueueShutdownError,
+)
 
 
 def _serialize_row(
@@ -896,12 +900,22 @@ def reinstate_catalog_agent(
         action="reinstate",
         reason=_payload_reason(payload),
     )
-    # Auto-queue one verification run (idempotent replays return early inside
-    # _moderation_action, so this only runs on the fresh reinstate path).
-    if response.get("verification_status") == "discovered":
-        enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="verify", actor="admin")
-        response["verify_enqueued"] = True
-        response["verify_task_id"] = getattr(enqueued, "task_id", "")
+    # Auto-queue one verification run — **only on the fresh path**: idempotent
+    # replay of an already-completed reinstate must NOT enqueue yet another
+    # verify (A316 收窄 3-58)；replay 诚实返回 verify_enqueued=false。
+    if response.get("idempotent") is not True and response.get("verification_status") == "discovered":
+        # review 3-58：enqueue 失败不得把已成功的治理动作变成 500——对齐
+        # register 的优雅降级（治理事务已提交，重试会让幂等重放误导）。
+        try:
+            enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="verify", actor="admin")
+            response["verify_enqueued"] = True
+            response["verify_task_id"] = getattr(enqueued, "task_id", "")
+        except (VerificationQueueFullError, VerificationQueueLedgerError, VerificationQueueShutdownError):
+            # review 3-58（返修）：A313 独验——Shutdown 队列异常也曾把已成功的
+            # 治理动作变成 500。治理事务已提交（成功事实不变），重排失败诚实
+            # 降级标注，两类结果分开表达。
+            response["verify_enqueued"] = False
+            response["queue_reason"] = "verification queue unavailable; verify later via the verify endpoint"
     return response
 
 

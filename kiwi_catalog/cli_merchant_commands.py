@@ -38,14 +38,14 @@ from kiwi_catalog.services import listing_entitlements
 
 def cmd_listing_plan_limit(args: argparse.Namespace) -> None:
     with db_session(db_path_from_args(args)) as conn:
-        listing_entitlements.set_plan_limit(conn, args.plan_code, args.active_limit, actor="local-admin")
+        listing_entitlements.set_plan_limit(conn, args.plan_code, args.active_limit, actor="cli-declared:local-admin")
     emit({"ok": True, "plan_code": args.plan_code, "active_limit": args.active_limit}, args.format)
 
 
 def cmd_listing_merchant_limit(args: argparse.Namespace) -> None:
     with db_session(db_path_from_args(args)) as conn:
         result = listing_entitlements.set_merchant_entitlement(
-            conn, args.merchant_id, actor="local-admin",
+            conn, args.merchant_id, actor="cli-declared:local-admin",
             limit_override=args.active_limit, clear_override=args.use_plan,
             status=args.status,
         )

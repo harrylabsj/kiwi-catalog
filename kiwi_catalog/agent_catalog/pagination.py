@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from kiwi_catalog.core.errors import ValidationError  # review 2-33：畸形 cursor → 400
+
 import base64
 import json
 import sqlite3
@@ -51,20 +53,40 @@ def encode_agent_cursor(
 
 
 def decode_agent_cursor(cursor: str) -> tuple[list[Any], bool]:
+    """review 2-33（返修）：任何 ``v2:`` 前缀 cursor 解码/形状/类型失败一律
+    typed ValidationError（→4xx），绝不静默退回 legacy 单键路径（那会把畸形
+    cursor 当作裸 id 过滤、产出错页/空页）。非 v2 前缀才走 legacy（见
+    agent_cursor_predicate 的明示拒绝策略）。"""
     if cursor.startswith("v2:"):
         try:
             keys = json.loads(base64.urlsafe_b64decode(cursor[3:].encode("ascii")).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            keys = None
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"malformed v2 agent cursor: {exc.__class__.__name__}") from None
         if isinstance(keys, list) and len(keys) == 4:
-            return keys, True
+            rank, last_verified_at, name, agent_id = keys
+            if (
+                (rank is None or isinstance(rank, int) and not isinstance(rank, bool))
+                and (last_verified_at is None or isinstance(last_verified_at, str))
+                and isinstance(name, str)
+                and isinstance(agent_id, str)
+            ):
+                # review 2-33（A316 收窄）：last_verified_at 按线协议可为 None
+                #（生产列 NOT NULL，但线合同允许 null——合同防御，不做迁移）。
+                return keys, True
+        raise ValidationError("malformed v2 agent cursor: element shape/types")
     return [cursor], False
 
 
 def agent_cursor_predicate(cursor: str) -> tuple[str, list[Any]]:
     keys, is_v2 = decode_agent_cursor(cursor)
     if not is_v2:
-        return "ca.catalog_agent_id > ?", [keys[0]]
+        # review P1-5（返修）：排序是 rank-first keyset——裸 legacy id 无法还原
+        # (rank, last_verified_at, name, id) 四元组，旧的单键谓词跨 rank 组会
+        # 漏页/错页。明示拒绝（4xx）而非静默错页；客户端用服务端下发的
+        # next_cursor（恒为 v2）翻页。
+        raise ValidationError(
+            "legacy single-key agent cursor is not supported; use the v2 cursor from next_cursor"
+        )
     rank, last_verified_at, name, catalog_agent_id = keys
     clauses = [
         f"{AGENT_STATUS_RANK_CASE} > ?",

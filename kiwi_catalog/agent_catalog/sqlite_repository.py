@@ -29,9 +29,6 @@ from kiwi_catalog.agent_catalog.catalog_audit import (
     append_catalog_audit,  # noqa: F401 —— facade re-export
 )
 from kiwi_catalog.agent_catalog.catalog_query import (
-    agent_list_cursor_clause as _agent_list_cursor_clause,
-)
-from kiwi_catalog.agent_catalog.catalog_query import (
     agent_page_query as _agent_page_query,
 )
 from kiwi_catalog.agent_catalog.pagination import (
@@ -617,7 +614,10 @@ def list_catalog_agents(
     params: list[Any] = []
 
     if cursor:
-        cursor_clause, cursor_params = _agent_list_cursor_clause(cursor)
+        # review P1-5：list 与 search 同用 v2 keyset 谓词——排序键是 rank-first，
+        # 旧的单键 catalog_agent_id > ? 谓词对 v2 游标恒假（'cagt_' > 'v2:' 不
+        # 成立），翻页永远停在第一页（正是 §8.3 注释点名的历史 bug 类 P1-6）。
+        cursor_clause, cursor_params = _agent_cursor_predicate(cursor)
         clauses.append(cursor_clause)
         params.extend(cursor_params)
 
@@ -643,7 +643,8 @@ def list_catalog_agents_by_merchant(
     params: list[Any] = [merchant_id]
 
     if cursor:
-        cursor_clause, cursor_params = _agent_list_cursor_clause(cursor)
+        # review P1-5：同 list_catalog_agents——共享 v2 keyset 谓词。
+        cursor_clause, cursor_params = _agent_cursor_predicate(cursor)
         clauses.append(cursor_clause)
         params.extend(cursor_params)
 

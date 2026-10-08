@@ -239,6 +239,10 @@ def complete_catalog_write_idempotency(
         try:
             cutoff = (datetime.now(UTC) - timedelta(days=_IDEMPOTENCY_RETENTION_DAYS)).isoformat()
             conn.execute(
+                # review 2-32（返修）：只清理 completed 终态行。processing 行的
+                # 结果未知（可能已 commit 但崩溃于标记清除前）——按 TTL/PID 删除
+                # 会让同一 idempotency key 的 unknown 结果被二次执行（A313/Kimi
+                # 8 天 probe 实证）。unknown 占坑是 fail-closed 的代价，保留。
                 "delete from agent_catalog_write_idempotency"
                 " where status = 'completed' and updated_at < ?",
                 (cutoff,),

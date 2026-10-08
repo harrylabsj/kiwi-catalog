@@ -296,7 +296,15 @@ def test_search_catalog_agents_within_same_rank_sorts_by_lva_desc_then_name(conn
     assert [r["catalog_agent_id"] for r in results] == ["cagt_a", "cagt_b"]
 
 
-def test_list_catalog_agents_pages_with_legacy_cursor(conn) -> None:
+def test_list_catalog_agents_pages_through_emitted_v2_cursor(conn) -> None:
+    """review P1-5 回归：list 用服务端发出的 next_cursor 翻到全部行。
+
+    历史 bug：list 的排序键是 rank-first，游标谓词却是单键
+    ``catalog_agent_id > ?``——v2 游标（'v2:' 前缀）回喂后谓词恒假，
+    翻页永远停在第一页（正是 §8.3 注释点名的历史 bug 类）。现在 list 与
+    search 共享 ``pagination.agent_cursor_predicate``，循环必须收全 5 行
+    且无重复（旧实现只收得到前 2 行）。
+    """
     for i in range(5):
         _seed_agent(
             conn,
@@ -305,24 +313,33 @@ def test_list_catalog_agents_pages_with_legacy_cursor(conn) -> None:
             verification_status="discovered",
         )
 
-    page1, cursor1 = sqlite_repository.list_catalog_agents(conn, limit=2)
-    assert [r["catalog_agent_id"] for r in page1] == ["cagt_00", "cagt_01"]
-    assert cursor1 is not None
+    collected: list[str] = []
+    cursor = ""
+    for _page in range(10):
+        rows, next_cursor = sqlite_repository.list_catalog_agents(
+            conn, limit=2, cursor=cursor
+        )
+        collected.extend(r["catalog_agent_id"] for r in rows)
+        if next_cursor is None:
+            break
+        cursor = next_cursor
 
-    # The list entry point pages on the legacy single-key cursor
-    # (catalog_query.agent_list_cursor_clause → ca.catalog_agent_id > ?).
-    # Feed the previous page's last id back as the raw cursor value.
-    page2, cursor2 = sqlite_repository.list_catalog_agents(
-        conn, limit=2, cursor="cagt_01"
-    )
-    assert [r["catalog_agent_id"] for r in page2] == ["cagt_02", "cagt_03"]
-    assert cursor2 is not None
+    assert collected == [f"cagt_{i:02d}" for i in range(5)]
 
-    page3, cursor3 = sqlite_repository.list_catalog_agents(
-        conn, limit=2, cursor="cagt_03"
-    )
-    assert [r["catalog_agent_id"] for r in page3] == ["cagt_04"]
-    assert cursor3 is None
+
+def test_list_catalog_agents_rejects_malformed_v2_cursor_types(conn) -> None:
+    """review 2-33 回归：v2 游标元素类型不合法 → ValidationError（400），不落 500。"""
+    import base64
+    import json
+
+    import pytest
+
+    from kiwi_catalog.core.errors import ValidationError
+
+    payload = json.dumps([{}, "x", "y", "z"])  # rank 元素为 dict → 非法
+    cursor = "v2:" + base64.urlsafe_b64encode(payload.encode()).decode()
+    with pytest.raises(ValidationError):
+        sqlite_repository.list_catalog_agents(conn, limit=2, cursor=cursor)
 
 
 def test_list_catalog_agents_by_merchant_filters_and_pages(conn) -> None:

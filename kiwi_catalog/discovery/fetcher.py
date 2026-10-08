@@ -50,6 +50,8 @@ import http.client
 import ipaddress
 import json
 import socket
+import concurrent.futures
+import threading
 import ssl
 import time as _time
 import urllib.error
@@ -59,6 +61,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from kiwi_catalog.discovery._bounded_dns import BoundedResolver
 from kiwi_catalog.discovery.trust import TrustPolicy
 from kiwi_catalog.services.catalog_runtime_metrics import record_profile_fetch
 
@@ -92,6 +95,71 @@ _NAT64_V6 = ipaddress.IPv6Network("64:ff9b::/96")
 _IPV4_COMPATIBLE_V6 = ipaddress.IPv6Network("::/96")
 
 # ── Verified IP store (shared across handler and redirect handler) ─────────────
+# Two fixed daemon workers, with six physical running/queued items total.
+# Cancelled queued items keep their admission slot until a worker removes them.
+_DNS_EXECUTOR = BoundedResolver()
+_DNS_ADMISSION = _DNS_EXECUTOR.admission
+_DNS_MAX_QUEUED = 4
+_DNS_EXECUTOR_QUEUE = _DNS_EXECUTOR._work_queue
+
+
+class _RequestLifecycle:
+    """A single request owns its sockets and one absolute deadline timer."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self._lock = threading.Lock()
+        self._sockets: list[socket.socket] = []
+        self._closed = False
+        self._timer = threading.Timer(max(deadline - _time.monotonic(), 0.001), self._expire)
+        self._timer.daemon = True
+
+    @staticmethod
+    def _abort(sock: socket.socket) -> None:
+        # close alone leaves makefile() I/O references alive. shutdown wakes
+        # header/chunk framing reads before close relinquishes ownership.
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def register(self, sock: socket.socket) -> None:
+        with self._lock:
+            late = self._closed or _time.monotonic() >= self.deadline
+            if not late:
+                self._sockets.append(sock)
+        if late:
+            self._abort(sock)
+            raise FetchError("total fetch duration exceeded while connecting")
+
+    def _expire(self) -> None:
+        with self._lock:
+            self._closed = True
+            sockets, self._sockets = self._sockets, []
+        for sock in sockets:
+            self._abort(sock)
+
+    def check(self) -> None:
+        if _time.monotonic() >= self.deadline:
+            raise FetchError("total fetch duration exceeded")
+
+    def __enter__(self):
+        self.check()
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._timer.cancel()
+        # If expiry already started, wait for its bounded socket cleanup;
+        # cancellation alone does not prove the callback has stopped.
+        self._timer.join()
+        self._expire()
+
+
 # Maps (hostname, port) → verified IP string.  Populated by the redirect handler
 # when a redirect target is validated; consulted by the HTTPS handler to pick the
 # correct verified IP for each request.  Fail-closed: a host not in the store is
@@ -213,13 +281,44 @@ def _port_of(parsed: Any, scheme: str) -> int:
 # ── DNS resolution ────────────────────────────────────────────────────────────
 
 
-def _resolve_hostname(hostname: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def _resolve_hostname(hostname: str, port: int, *, deadline: float | None = None) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Resolve *hostname* and return all IP addresses.
+
+    review 2-36（A316 收窄）：getaddrinfo 本身无超时——有 deadline 时在
+    worker 线程解析并以剩余预算等待，超时即 FetchError（总 deadline 贯穿
+    初始 DNS 阶段，DNS 挂起不再绕过 30s 上限）。
 
     Raises SSRFBlockError when the hostname cannot be resolved.
     """
     try:
-        infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+        if deadline is not None:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FetchError("total fetch duration exceeded before DNS resolution")
+            try:
+                future = _DNS_EXECUTOR.submit(
+                    socket.getaddrinfo, hostname, port, proto=socket.IPPROTO_TCP,
+                    admission_timeout=remaining,
+                )
+            except concurrent.futures.TimeoutError as exc:
+                raise FetchError("total fetch duration exceeded waiting for DNS admission") from exc
+            except Exception as exc:
+                raise FetchError(f"DNS submission failed: {exc}") from exc
+            try:
+                # Admission itself may have consumed the budget.
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise concurrent.futures.TimeoutError()
+                infos = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError as exc:
+                cancelled = future.cancel()
+                kind = "cancelled queued" if cancelled else "abandoned running"
+                raise FetchError(
+                    f"total fetch duration exceeded during DNS resolution ({kind}; "
+                    "running getaddrinfo finishes in background)"
+                ) from exc
+        else:
+            infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
         raise SSRFBlockError(f"Cannot resolve hostname '{hostname}': {exc}") from exc
 
@@ -235,13 +334,18 @@ def _resolve_hostname(hostname: str, port: int) -> list[ipaddress.IPv4Address | 
     return ips
 
 
-def _resolve_and_validate(hostname: str, port: int) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+def _resolve_and_validate(
+    hostname: str,
+    port: int,
+    *,
+    deadline: float | None = None,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     """Resolve *hostname*, validate all IPs, and return the first valid IP.
 
     Raises SSRFBlockError if any resolved IP is blocked or the hostname
     cannot be resolved.
     """
-    ips = _resolve_hostname(hostname, port)
+    ips = _resolve_hostname(hostname, port, deadline=deadline)
     if not ips:
         raise SSRFBlockError(f"No IP addresses resolved for '{hostname}'")
     for ip in ips:
@@ -261,8 +365,9 @@ class _ProtectedHTTPConnection(http.client.HTTPConnection):
     直连已验证 IP，不让 OS resolver 二次选址。无 TLS 包装。
     """
 
-    def __init__(self, host: str, verified_ip: str, **kwargs: Any) -> None:
+    def __init__(self, host: str, verified_ip: str, *, lifecycle: _RequestLifecycle | None = None, **kwargs: Any) -> None:
         self._ssrf_verified_ip = str(verified_ip)
+        self._lifecycle = lifecycle
         super().__init__(host, **kwargs)
 
     def connect(self) -> None:
@@ -271,6 +376,9 @@ class _ProtectedHTTPConnection(http.client.HTTPConnection):
             self.timeout,
         )
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # review 2-36（A328）：登记活跃 socket 供 deadline watchdog 关闭
+        if self._lifecycle is not None:
+            self._lifecycle.register(self.sock)
         if self._tunnel_host:  # type: ignore[attr-defined]
             self._tunnel()  # type: ignore[attr-defined]
 
@@ -288,8 +396,9 @@ class _ProtectedHTTPSConnection(http.client.HTTPSConnection):
     correct certificate and the TLS handshake verifies the logical identity.
     """
 
-    def __init__(self, host: str, verified_ip: str, **kwargs: Any) -> None:
+    def __init__(self, host: str, verified_ip: str, *, lifecycle: _RequestLifecycle | None = None, **kwargs: Any) -> None:
         self._ssrf_verified_ip = str(verified_ip)
+        self._lifecycle = lifecycle
         super().__init__(host, **kwargs)
 
     def connect(self) -> None:
@@ -298,14 +407,26 @@ class _ProtectedHTTPSConnection(http.client.HTTPSConnection):
             self.timeout,
         )
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # review 2-36（A328）：同 HTTP 侧——登记活跃 socket 供 watchdog 关闭
+        if self._lifecycle is not None:
+            self._lifecycle.register(self.sock)
 
         if self._tunnel_host:  # type: ignore[attr-defined]
             self._tunnel()  # type: ignore[attr-defined]
 
-        ctx = ssl.create_default_context()
+        # review 2-34：尊重 https_open 传入的 context（do_open 存在 self._context）；
+        # 未提供时回落默认 context。此前每次新建默认 context——未来自定义 CA/
+        # 策略配置会被静默丢弃，且每连接重复构建。
+        ctx = getattr(self, "_context", None) or ssl.create_default_context()
         # SNI carries self.host (the original hostname); cert validation
         # is against that hostname, not the IP.
-        self.sock = ctx.wrap_socket(self.sock, server_hostname=self.host)
+        self.sock = ctx.wrap_socket(self.sock, server_hostname=self.host,
+                                    do_handshake_on_connect=False)
+        # wrap_socket detaches the raw socket. Register the actual SSL owner
+        # before the handshake, which itself is subject to the same deadline.
+        if self._lifecycle is not None:
+            self._lifecycle.register(self.sock)
+        self.sock.do_handshake()
 
 
 # ── Custom URL opener ─────────────────────────────────────────────────────────
@@ -327,11 +448,17 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
         redirect_limit: int,
         validator: Callable[[str], ipaddress.IPv4Address | ipaddress.IPv6Address],
         ip_store: _VerifiedIPStore,
+        *,
+        deadline: float | None = None,
     ):
         self._redirect_limit = redirect_limit
         self._redirect_count = 0
         self._validator = validator
         self._ip_store = ip_store
+        # review 2-36（返修）：总 deadline 由 redirect handler 持有——每一跳
+        # redirect 发生前先扣减剩余预算，重定向链不再各自获得完整 socket
+        # timeout（A313 独验：opener/DNS/header 阶段超总 deadline 仍阻塞 caller）。
+        self._deadline = deadline
         super().__init__()
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -340,6 +467,12 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
             raise SSRFBlockError(
                 f"Redirect limit ({self._redirect_limit}) exceeded"
             )
+        if self._deadline is not None:
+            remaining = self._deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FetchError(
+                    "total fetch duration exceeded (_MAX_FETCH_DURATION_SECONDS) on redirect"
+                )
         # Re-validate the redirect target and store the verified IP so
         # the HTTPS handler uses the correct address for the new host.
         verified_ip = self._validator(newurl)
@@ -348,7 +481,18 @@ class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
         port = _port_of(parsed, parsed.scheme)
         assert hostname is not None  # validator guarantees a hostname is present
         self._ip_store[(hostname, port)] = str(verified_ip)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and self._deadline is not None:
+            remaining = self._deadline - _time.monotonic()
+            if remaining <= 0:
+                raise FetchError(
+                    "total fetch duration exceeded (_MAX_FETCH_DURATION_SECONDS) on redirect"
+                )
+            # urllib later reopens using the original req.timeout; a newly
+            # created Request need not carry a timeout attribute yet.
+            req.timeout = min(float(getattr(req, "timeout", remaining) or remaining), remaining)
+            redirected.timeout = req.timeout
+        return redirected
 
 
 def _build_opener(
@@ -357,6 +501,9 @@ def _build_opener(
     initial_port: int,
     redirect_limit: int,
     redirect_validator: Callable[[str], ipaddress.IPv4Address | ipaddress.IPv6Address],
+    *,
+    lifecycle_deadline: float | None = None,
+    lifecycle: _RequestLifecycle | None = None,
 ) -> urllib.request.OpenerDirector:
     """Build a ``urllib`` opener that uses verified IPs for every connection.
 
@@ -384,13 +531,13 @@ def _build_opener(
                 )
             if scheme == "https":
                 return lambda host, **kw: _ProtectedHTTPSConnection(
-                    host, verified_ip=verified_ip, **kw
+                    host, verified_ip=verified_ip, lifecycle=lifecycle, **kw
                 )
             # 审查 P2（http 支持真实化）：permissive_local 声明的 http:// 走
             # 同样的 verified-IP 直连（防 DNS rebinding），不再 UnknownHandler
             # 恒失败。默认 require_https 策略在 scheme 校验层已拦截 http。
             return lambda host, **kw: _ProtectedHTTPConnection(
-                host, verified_ip=verified_ip, **kw
+                host, verified_ip=verified_ip, lifecycle=lifecycle, **kw
             )
 
         def https_open(self, req):
@@ -415,7 +562,9 @@ def _build_opener(
                 req,
             )
 
-    redirect_handler = _SSRFRedirectHandler(redirect_limit, redirect_validator, ip_store)
+    redirect_handler = _SSRFRedirectHandler(
+        redirect_limit, redirect_validator, ip_store, deadline=lifecycle_deadline
+    )
 
     opener = urllib.request.OpenerDirector()
     opener.add_handler(_Handler())
@@ -600,13 +749,18 @@ class ProfileFetcher:
         if self._policy.require_https and scheme != "https":
             raise SSRFBlockError("HTTPS is required")
         _validate_port(port, self._policy.allowed_ports)
-        verified_ip = _resolve_and_validate(hostname, port)
+        # review 2-36：DNS 与后续 _make_request 共享同一 fetch deadline。
+        fetch_deadline = _time.monotonic() + _MAX_FETCH_DURATION_SECONDS
+        verified_ip = _resolve_and_validate(hostname, port, deadline=fetch_deadline)
         payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(payload) > self._policy.max_profile_bytes:
             raise FetchLimitError("POST body exceeds configured limit")
+        # review 2-36（A328 余项）：POST 与 GET 同单生命周期——初始 DNS 后的
+        # 剩余预算传入 _make_request，不再重获完整预算。
         return self._make_request(url, str(verified_ip), hostname, port, None, None,
                                   _time.time(), method="POST", data=payload,
-                                  timeout=min(float(timeout), self._timeout), redirect_limit=0)
+                                  timeout=min(float(timeout), self._timeout), redirect_limit=0,
+                                  deadline=fetch_deadline)
 
     def _fetch(
         self,
@@ -632,32 +786,18 @@ class ProfileFetcher:
         # 3. Validate port
         _validate_port(port, self._policy.allowed_ports)
 
-        # 4. Resolve DNS and validate all IPs
-        verified_ip = _resolve_and_validate(hostname, port)
+        # 4. Resolve DNS and validate all IPs — review 2-36：与 _make_request
+        # 共享同一 fetch deadline（getaddrinfo 受剩余预算约束）。
+        fetch_deadline = _time.monotonic() + _MAX_FETCH_DURATION_SECONDS
+        verified_ip = _resolve_and_validate(hostname, port, deadline=fetch_deadline)
 
         # 5. Make the request with DNS-rebinding protection
+        # review 2-36（A326）：初始 DNS 消耗掉的预算必须延续——fetch_deadline
+        # 传入 _make_request（不再重置 30s），header/redirect/body 全部从同一
+        # caller 总期限扣减。
         fetched_at = _time.time()
         try:
-            result = self._make_request(url, str(verified_ip), hostname, port, etag, last_modified, fetched_at)
-        except urllib.error.HTTPError as exc:
-            # Pass through HTTP errors with their status code.  Error bodies are
-            # read under the same byte limit as success bodies — 恶意源站返回
-            # 超大 4xx 错误体时，无上限的 exc.read() 是请求线程内存 DoS。
-            try:
-                body_bytes = _read_limited(
-                    exc,
-                    self._policy.max_profile_bytes,
-                    deadline=_time.monotonic() + _MAX_FETCH_DURATION_SECONDS,
-                )
-            except FetchLimitError:
-                body_bytes = b""
-            return FetchResult(
-                url=url,
-                status_code=exc.code,
-                body="",
-                raw_bytes=body_bytes,
-                fetched_at=fetched_at,
-            )
+            result = self._make_request(url, str(verified_ip), hostname, port, etag, last_modified, fetched_at, deadline=fetch_deadline)
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise FetchError(f"Fetch failed for '{url}': {exc}") from exc
 
@@ -691,11 +831,17 @@ class ProfileFetcher:
 
         return parsed
 
-    def _validate_redirect_target(self, redirect_url: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    def _validate_redirect_target(
+        self,
+        redirect_url: str,
+        *,
+        deadline: float | None = None,
+    ) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         """Validate a redirect target URL with full SSRF checks.
 
         Called by the redirect handler before each redirect is followed.
         Returns the first verified IP for the new hostname.
+        ``deadline``（review 2-36）承载 caller 剩余预算，贯穿本跳 DNS。
         """
         parsed = self._validate_url(redirect_url)
         scheme = parsed.scheme
@@ -707,7 +853,10 @@ class ProfileFetcher:
             raise SSRFBlockError(f"Redirect to non-HTTPS URL blocked: {redirect_url}")
 
         _validate_port(port, self._policy.allowed_ports)
-        return _resolve_and_validate(hostname, port)
+        # review 2-36（A323 校准）：重定向跳的 DNS 解析继承 caller deadline
+        #（剩余预算），不再每跳独立获得完整 socket timeout（A317 raw C5
+        # 实测 1.227s）。
+        return _resolve_and_validate(hostname, port, deadline=deadline)
 
     def _make_request(
         self,
@@ -720,12 +869,20 @@ class ProfileFetcher:
         fetched_at: float,
         *, method: str = "GET", data: bytes | None = None, timeout: float | None = None,
         redirect_limit: int | None = None,
+        deadline: float | None = None,
     ) -> FetchResult:
         """Execute the HTTP request with all SSRF protections in place."""
         # Build request with conditional headers
+        # review 2-35（返修）：非默认端口时 Host 头带端口（HTTP/1.1）。原返修
+        # 把请求 port 与同源 URL 解析出的 port 自比较——恒等、8443 等非默认
+        # 端口永不带出；且 IPv6 主机名须加方括号。A313 独验实证两者皆错。
+        url_scheme = urllib.parse.urlparse(url).scheme or "https"
+        default_port = 443 if url_scheme == "https" else 80
+        host_name = f"[{hostname}]" if ":" in hostname else hostname
+        host_header = host_name if port == default_port else f"{host_name}:{port}"
         req_headers: dict[str, str] = {
             "Accept": "application/json",
-            "Host": hostname,
+            "Host": host_header,
         }
         if data is not None:
             req_headers["Content-Type"] = "application/json"
@@ -736,33 +893,64 @@ class ProfileFetcher:
 
         request = urllib.request.Request(url, data=data, headers=req_headers, method=method)
 
+        # review 2-36（返修）：总时长 monotonic deadline 从请求构建起贯穿全部
+        # 阶段——opener 建连/DNS/header（open socket 超时=剩余预算）、每一跳
+        # redirect（handler 持有同一 deadline 并逐跳收缩）、body 读取。此前
+        # 只约束 body 读取，A313 独验实证 opener/DNS/header 阶段仍可阻塞
+        # caller 超 30s。
+        # review 2-36（A326）：caller 传入的总期限优先（初始 DNS 已消耗预算）；
+        # 无 caller 期限（内部直连路径）才以当前时刻起算。
+        lifecycle_deadline = deadline if deadline is not None else _time.monotonic() + _MAX_FETCH_DURATION_SECONDS
+        open_timeout = min(
+            float(timeout or self._timeout),
+            max(lifecycle_deadline - _time.monotonic(), 0.001),
+        )
+
         # Build opener with verified-IP connection
-        redirect_validator = self._validate_redirect_target
+        # review 2-36（A323 校准）：per-request 闭包携带 deadline——重定向跳的
+        # DNS 解析继承剩余预算（并发 fetch 不共享可变 deadline）。
+        def redirect_validator(redirect_url: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+            return self._validate_redirect_target(redirect_url, deadline=lifecycle_deadline)
+        lifecycle = _RequestLifecycle(lifecycle_deadline)
         opener = _build_opener(
             verified_ip, hostname, port,
             self._policy.redirect_limit if redirect_limit is None else redirect_limit, redirect_validator,
+            lifecycle_deadline=lifecycle_deadline, lifecycle=lifecycle,
         )
-
         try:
-            with opener.open(request, timeout=timeout or self._timeout) as response:
-                # 审查 P3：response.geturl() 是重定向后的终址——此前传初请求
-                # URL，快照/审计记录的是跳转前地址。
-                return self._process_response(response, response.geturl(), fetched_at)
-        except SSRFBlockError:
+            with lifecycle:
+                try:
+                    response = opener.open(request, timeout=open_timeout)
+                except urllib.error.HTTPError as exc:
+                    try:
+                        try:
+                            raw_bytes = _read_limited(exc, self._policy.max_profile_bytes,
+                                                      deadline=lifecycle_deadline)
+                        except FetchLimitError:
+                            raw_bytes = b""
+                        lifecycle.check()
+                        return FetchResult(url=url, status_code=exc.code, body="",
+                                           raw_bytes=raw_bytes, fetched_at=fetched_at)
+                    finally:
+                        exc.close()
+                with response:
+                    lifecycle.check()
+                    result = self._process_response(response, response.geturl(), fetched_at,
+                                                    deadline=lifecycle_deadline)
+                    lifecycle.check()
+                    return result
+        except (SSRFBlockError, FetchError):
             raise
-        except FetchLimitError:
-            raise
-        except urllib.error.HTTPError:
-            # Re-raise to be caught by fetch()
-            raise
-        except TimeoutError as exc:
-            raise FetchError(f"Request timed out after {self._timeout}s: {exc}") from exc
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            raise FetchError(f"fetch aborted (deadline or connection error): {exc}") from exc
 
     def _process_response(
         self,
         response: http.client.HTTPResponse,
         final_url: str,
         fetched_at: float,
+        *,
+        deadline: float | None = None,
     ) -> FetchResult:
         """Read, validate, and parse the HTTP response."""
         status = response.status
@@ -785,11 +973,28 @@ class ProfileFetcher:
         cache_ctrl = resp_headers.get("cache-control") or None
 
         # Stream-read with byte limit
+        # review 2-36（A323 校准）：滴漏 body 的阻塞点是 socket recv（每次
+        # 等满 socket timeout 才返回）——读前把 socket 超时压到**剩余预算**，
+        # 滴漏在 deadline 到点即被 socket 层打断（A317 raw C3 实测 5.089s）。
+        remaining = (
+            deadline - _time.monotonic() if deadline is not None else None
+        )
+        if remaining is not None and remaining <= 0:
+            raise FetchError("total fetch duration exceeded before body read")
+        if remaining is not None:
+            # review 2-36（A326）：首个 header→body 间隙同样压到剩余预算；
+            # 每次 recv 内的剩余超时由 _read_limited 内 deadline 驱动循环接管。
+            sock = _response_socket(response)
+            if sock is not None:
+                try:
+                    sock.settimeout(max(remaining, 0.001))
+                except OSError:
+                    pass  # socket 已关闭等场景——deadline 检查仍兜底
         max_bytes = self._policy.max_profile_bytes
         raw_bytes = _read_limited(
             response,
             max_bytes,
-            deadline=_time.monotonic() + _MAX_FETCH_DURATION_SECONDS,
+            deadline=deadline if deadline is not None else _time.monotonic() + _MAX_FETCH_DURATION_SECONDS,
         )
 
         # Parse JSON with structure limits
@@ -863,12 +1068,30 @@ def _read_limited(
     total = 0
     chunk_size = 8192
 
+    # review 2-36（A326 faulthandler 实证）：`response.read(n)`（BufferedReader
+    # 语义）会**凑满 n 字节才返回**——滴流源站每 0.05s 供 1B 时每次 recv 都
+    # 「有数据」，socket 超时永不触发、循环顶部 deadline 检查永远到不了
+    # （实测 450s+）。改用 **read1**（至多一次底层 recv，返回现有可用字节）：
+    # 每轮循环必回到 deadline 检查，socket 超时同时压到剩余预算——绝对 wall
+    # deadline 真正围住持续滴流。
+    sock = _response_socket(response)
+    read1 = getattr(response, "read1", None)
+    if read1 is None and deadline is not None and sock is None:
+        raise FetchError("response wrapper cannot provide a bounded read")
+
     while True:
         if deadline is not None and _time.monotonic() > deadline:
             raise FetchLimitError("Response body read exceeded the total fetch duration")
+        if sock is not None and deadline is not None:
+            try:
+                # 响应读完（content-length 满足）后 socket 可能已关闭——
+                # EBADF 等忽略，循环顶部绝对 deadline 仍兜底。
+                sock.settimeout(max(deadline - _time.monotonic(), 0.001))
+            except OSError:
+                pass
         remaining = max_bytes - total + 1  # +1 to detect overflow
         read_size = min(chunk_size, max(remaining, 1))
-        chunk = response.read(read_size)
+        chunk = read1(read_size) if read1 is not None else response.read(read_size)
         if not chunk:
             break
         total += len(chunk)
@@ -879,6 +1102,28 @@ def _read_limited(
         chunks.append(chunk)
 
     return b"".join(chunks)
+
+
+def _response_socket(response: _ReadableBody) -> socket.socket | None:
+    """从 http.client.HTTPResponse 取底层 socket（形状防御，取不到返回 None）。"""
+    pending: list[Any] = [response]
+    seen: set[int] = set()
+    # HTTPError.fp -> HTTPResponse.fp -> BufferedReader.raw -> SocketIO._sock.
+    # Bound traversal and tolerate cycles in custom wrappers.
+    for _ in range(16):
+        if not pending:
+            break
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, socket.socket):
+            return node
+        for attr in ("fp", "raw", "_sock"):
+            child = getattr(node, attr, None)
+            if child is not None and id(child) not in seen:
+                pending.append(child)
+    return None
 
 
 def _parse_max_age_from_header(cache_control: str) -> int | None:

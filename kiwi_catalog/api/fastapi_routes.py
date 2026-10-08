@@ -742,9 +742,22 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             _account_payload(request, body), request.headers.get("authorization", ""), ""
         )
 
+    def _rate_limit_ip_payload(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        """review 2-30（返修）：限流分桶 IP 只信 server 侧解析（trusted XFF +
+        直连 peer）——payload 携带的 _client_ip 是客户端可伪造值，先剥除再注入，
+        否则轮换伪造 IP 即可跨桶打穿 per-IP 限流。"""
+        body = dict(payload or {})
+        body.pop("_client_ip", None)
+        client = getattr(request, "client", None)
+        body["_client_ip"] = resolve_client_ip(
+            request.headers.get("x-forwarded-for", ""),
+            str(client.host or "") if client is not None else None,
+        )
+        return body
+
     @app.post("/v1/accounts/register")
-    def v1_account_register(payload: dict[str, Any]) -> _JSONResponse:
-        return _account_response(accounts_handlers.register(db_path, payload))
+    def v1_account_register(request: _FastAPIRequest, payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(accounts_handlers.register(db_path, _rate_limit_ip_payload(request, payload)))
 
     @app.post("/v1/accounts/login")
     def v1_account_login(payload: dict[str, Any]) -> _JSONResponse:
@@ -759,8 +772,8 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _account_response(accounts_handlers.verify_email(db_path, payload))
 
     @app.post("/v1/accounts/resend-code")
-    def v1_account_resend_code(payload: dict[str, Any]) -> dict[str, Any]:
-        return accounts_handlers.resend_code(db_path, payload)
+    def v1_account_resend_code(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.resend_code(db_path, _rate_limit_ip_payload(request, payload))
 
     @app.post("/v1/accounts/forgot-password")
     def v1_account_forgot_password(payload: dict[str, Any]) -> dict[str, Any]:

@@ -55,8 +55,11 @@ OWNER_TOKEN = "cmt_descriptor_owner_token"
 OTHER_TOKEN = "cmt_descriptor_other_token"
 
 
-def _call(app, method: str, path: str, query: str = ""):
-    """直调 ASGI（与其它 catalog 测试同口径）；返回 (status, payload)。"""
+def _call(app, method: str, path: str, query: str = "", authorization: str = ""):
+    """直调 ASGI（与其它 catalog 测试同口径）；返回 (status, payload)。
+
+    review P1-6：凭据经 Authorization header 传递（owner_token 不进 URL）。
+    """
     import asyncio
 
     received: list[dict] = []
@@ -67,13 +70,17 @@ def _call(app, method: str, path: str, query: str = ""):
     async def send(msg: dict) -> None:
         received.append(msg)
 
+    headers = [(b"content-type", b"application/json")]
+    if authorization:
+        headers.append((b"authorization", authorization.encode()))
+
     asyncio.run(
         app(
             {
                 "type": "http",
                 "method": method,
                 "path": path,
-                "headers": [(b"content-type", b"application/json")],
+                "headers": headers,
                 "query_string": query.encode(),
                 "http_version": "1.1",
                 "scheme": "http",
@@ -154,8 +161,12 @@ class ManagementDescriptorTest(unittest.TestCase):
             )
 
     def _get(self, agent_id: str, token: str = OWNER_TOKEN, *, raw: bool = False):
-        query = f"owner_token={token}"
-        return _call(self.app, "GET", f"{DESCRIPTOR_BASE}/{agent_id}/management-descriptor", query)
+        return _call(
+            self.app,
+            "GET",
+            f"{DESCRIPTOR_BASE}/{agent_id}/management-descriptor",
+            authorization=f"Bearer {token}",
+        )
 
     # ── 归属鉴权 ─────────────────────────────────────────────────
     def test_requires_owner_token(self) -> None:
@@ -169,7 +180,9 @@ class ManagementDescriptorTest(unittest.TestCase):
         path = f"{DESCRIPTOR_BASE}/{self.agent_id}/management-descriptor"
         self.assertEqual(_call(self.app, "GET", path)[0], 403)
         # 坏 token 与无 token 同形（不区分"没带"与"带错"）
-        self.assertEqual(_call(self.app, "GET", path, "owner_token=cmt_nope")[0], 403)
+        self.assertEqual(
+            _call(self.app, "GET", path, authorization="Bearer cmt_nope")[0], 403
+        )
 
     def test_other_merchants_agent_is_a_uniform_404(self) -> None:
         """用别的商家 token 读本商家的 agent → 404，与"不存在"不可区分。"""

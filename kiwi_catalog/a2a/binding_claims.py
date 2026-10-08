@@ -175,8 +175,25 @@ def read_runtime_binding(
     if binding is None:
         raise NotFoundError("no active runtime binding for this agent")
     expires_at = str(binding["expires_at"] or "")
-    if expires_at and datetime.fromisoformat(expires_at) <= current:
-        raise PermissionDenied("runtime binding expired; refusing to issue claims")
+    if expires_at:
+        # review 3-67（返修）：解析失败（ValueError）**与 naive/aware 混比
+        #（TypeError）**都 fail-closed 拒签 403——A313 独验：畸形时区行的
+        # TypeError 仍让公开签发面 500。
+        try:
+            parsed = datetime.fromisoformat(expires_at)
+            # review 3-67（A316 收窄）：必须 timezone-aware——naive 行与 aware
+            # current 比较是 TypeError→500；显式 typed 拒签。
+            if parsed.tzinfo is None:
+                raise PermissionDenied(
+                    "runtime binding expires_at is not timezone-aware; refusing to issue claims"
+                )
+            expired = parsed <= current
+        except (ValueError, TypeError):
+            raise PermissionDenied(
+                "runtime binding has malformed expires_at; refusing to issue claims"
+            ) from None
+        if expired:
+            raise PermissionDenied("runtime binding expired; refusing to issue claims")
 
     # 治理状态（§11.6 SIG-02 的撤回拒签语义不变，仅把「从未发布」拆出来）：
     # - WITHDRAWN（撤回，read_active_card 抛 GoneError）→ 拒签（403）；

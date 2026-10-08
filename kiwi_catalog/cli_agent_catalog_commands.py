@@ -140,11 +140,17 @@ def cmd_agent_catalog_search(args: argparse.Namespace) -> None:
 
 
 def _cli_actor(args: argparse.Namespace, merchant_id: str = "") -> str:
-    """Best-effort audit actor from optional CLI tokens (default ``cli``)."""
+    """Best-effort audit actor from optional CLI tokens (default ``cli``).
+
+    review 3-66（返修）：CLI token 值不经任何校验即决定 actor 身份——审计里
+    记裸 ``admin`` 会与服务端 `require_admin_token` 验证过的真实 admin 审计
+    记录不可区分（冒充已认证审计主体）。改为 ``cli-declared:`` 前缀，明确
+    标注「本地声明、未验证」；服务器验证过的 admin 记录不受影响。
+    """
     if getattr(args, "admin_token", ""):
-        return "admin"
+        return "cli-declared:admin"
     if getattr(args, "owner_token", "") and merchant_id:
-        return f"merchant:{merchant_id}"
+        return f"cli-declared:merchant:{merchant_id}"
     return "cli"
 
 

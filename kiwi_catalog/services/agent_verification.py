@@ -1099,6 +1099,8 @@ class VerificationQueue:
     """
 
     _KINDS = frozenset({"verify", "refresh", "mark_stale", "suspend"})
+    # review 2-31 F2：关闭置位后 worker 复核「已接纳任务全部有结果」的周期。
+    _SHUTDOWN_POLL_SECONDS = 0.05
 
     def __init__(
         self,
@@ -1151,6 +1153,12 @@ class VerificationQueue:
         self._pending: queue.Queue[VerificationTask | None] = queue.Queue(
             maxsize=max(self._config.max_pending, recovered + 1)
         )
+        # review 2-31：同 agent 串行化状态（在 _results_cv 保护下访问）。
+        self._agent_running: set[str] = set()
+        self._agent_deferred: dict[str, list[VerificationTask]] = {}
+        # review 2-31（A327）：preclaim 移交表——完成方在同一 cv 内把串行槽
+        # 移交给 deferred 队首任务；该任务出队时凭身份绕过 busy 检查。
+        self._agent_preclaimed: dict[str, VerificationTask] = {}
         for task in self._recovered_tasks:
             self._pending.put(task)
         self._id_seq = itertools.count(1)
@@ -1324,12 +1332,17 @@ class VerificationQueue:
         # 新建。并发任务各自基于入口处陈旧快照读-改-写，后写者可把已晋升
         # 级别回退（队列任务 + 同步 /verify 请求并发时的真实竞态）。
         # finished 的旧任务（已进 _results）不拦截新一轮验证。
+        # review 2-31：去重键从 (agent) 收紧为 (agent, kind)——此前已有 pending
+        # 的 verify 任务时，显式 enqueue(kind="refresh") 会被静默吞掉（返回
+        # verify 任务的 outcome 而不执行 refresh）；suspend 等未来 kind 同样
+        # 会被吞。不同 kind 语义不同，不能互相复用。
         with self._results_cv:
             existing_id = next(
                 (
                     task_id
                     for task_id, task in self._tasks.items()
                     if task.catalog_agent_id == catalog_agent_id
+                    and task.kind == kind
                     and task_id not in self._results
                 ),
                 None,
@@ -1341,7 +1354,7 @@ class VerificationQueue:
             return VerificationTaskResult(
                 task_id=existing_id,
                 catalog_agent_id=catalog_agent_id,
-                kind=kind,
+                kind=existing_task.kind,
                 status="enqueued",
                 verification_status="",
                 enqueued_at=existing_task.enqueued_at,
@@ -1460,15 +1473,21 @@ class VerificationQueue:
             return [self._results[tid] for tid in self._tasks if tid in self._results]
 
     def shutdown(self, wait: bool = True, timeout: float | None = None) -> None:
-        """Stop accepting new tasks and (optionally) wait for workers to exit."""
+        """Stop accepting new tasks and (optionally) wait for workers to exit.
+
+        正常关闭合同（review 2-31 F2）：已接纳的任务（pending / deferred /
+        preclaimed）不随关闭丢弃——worker 在全部已接纳任务都有确定结果
+        （completed / failed / timeout）后才退出，``wait=True`` 返回时无静默
+        无结果任务，无需 shutdown 之后另进程恢复来补完本轮工作。
+        显式 timeout 仍只限制 join 等待，可能在排干前返回。
+        """
         if self._shutdown.is_set():
             return
-        # 审查 P3：置位 + 放哨兵与 enqueue 的「检查+put」互斥（_enqueue_lock）——
-        # 否则哨兵之后仍可能入队无人消费的任务。
+        # 关闭置位与 enqueue 的「检查+put」互斥；worker 排干已接纳任务后退出。
         with self._enqueue_lock:
             self._shutdown.set()
-            for _ in self._workers:
-                self._pending.put(None)
+            # Workers poll for shutdown independently of pending capacity.
+            # Blocking sentinel puts can deadlock after drained workers exit.
         if wait:
             for worker in self._workers:
                 worker.join(timeout=timeout)
@@ -1509,12 +1528,63 @@ class VerificationQueue:
 
     # ── Internals ────────────────────────────────────────────────────────
 
+    def _admitted_drained(self) -> bool:
+        """正常关闭排干条件：所有已接纳任务（_tasks 登记）均已有结果。
+
+        pending / deferred / preclaimed 任务同样登记在 _tasks 且尚无结果，
+        故本条件覆盖全部在途形态；completed / failed / timeout 都算确定
+        结果（既有语义不变）。
+        """
+        with self._results_cv:
+            return all(task_id in self._results for task_id in self._tasks)
+
     def _worker_loop(self) -> None:
+        # review 2-31（A327 返修）：同 agent 串行化收口为**单一互斥临界区**——
+        # A317 v9 实证旧实现的两个同形屏障：①busy 检查与 running.add 分属两个
+        # cv 块，双 worker 均 busyFalse 后同 agent 双执行；②defer 决定/append 与
+        # 完成 owner 的 discard/pop 分锁，deferred 任务可能永久滞留（无后续
+        # completion 可触发 drain）。现协议：
+        #   出队（同一 cv 块内）：busy 且非 preclaim → defer；否则 running.add。
+        #   完成（同一 cv 块内）：discard；deferred 队首**原子移交 preclaim**
+        #   （agent 保持 running 归属）并经 _pending 重投，其余保持 deferred。
+        #   preclaim 任务出队时凭 task_id 身份绕过 busy 检查直接执行。
+        # 新到达的同 agent 任务一律 defer（无重叠窗口）；所有真实任务最终
+        # 恰执行一次、结果恰记录一次。
+        # review 2-31 F2（A332 返修）：正常关闭合同——shutdown 的哨兵只表示
+        # 「不再接纳新任务」，不是立即退出信号。完成方的 preclaim 重投经
+        # _pending 落在哨兵之后，哨兵即 break 会让已接纳的 deferred/preclaimed
+        # 任务静默无结果（db_path=None 不可恢复；临时 ledger 场景则把本轮该
+        # 完成的工作推给 shutdown 之后另进程恢复）。worker 必须在所有已接纳
+        # 任务都有确定结果后才退出：关闭置位时用带超时的 get 周期复核排干
+        # 条件。A343 不向有界工作队列放哨兵；空闲 get 亦周期检查关闭，
+        # 避免 drained worker 先退使 shutdown 阻塞于放哨兵。
         while True:
-            task = self._pending.get()
+            if self._shutdown.is_set() and self._admitted_drained():
+                break
+            try:
+                # Always bound the idle wait: shutdown no longer enqueues
+                # wakeups into the bounded work queue. This also covers a
+                # worker that starts waiting just before shutdown is set.
+                task = self._pending.get(timeout=self._SHUTDOWN_POLL_SECONDS)
+            except queue.Empty:
+                continue
             try:
                 if task is None:
-                    break
+                    continue
+                with self._results_cv:
+                    agent = task.catalog_agent_id
+                    preclaimed = self._agent_preclaimed.get(agent) is task
+                    if preclaimed:
+                        # review 2-31 F1：preclaim 移交在出队时消费完毕，清掉
+                        # 残留元数据（此前最后完成的 preclaimed 任务残留一条）。
+                        self._agent_preclaimed.pop(agent, None)
+                    if agent in self._agent_running and not preclaimed:
+                        self._agent_deferred.setdefault(agent, []).append(task)
+                        self._results_cv.notify_all()
+                        continue
+                    if not preclaimed:
+                        self._agent_running.add(agent)
+                    # preclaim 任务：归属已在完成方转移（running 未移除）
                 try:
                     result = self._run_task_with_timeout(task)
                 except Exception as exc:  # noqa: BLE001 —— 单任务失败不得杀 worker
@@ -1536,9 +1606,42 @@ class VerificationQueue:
                         )
                     except Exception:  # noqa: BLE001 —— ledger 写失败不杀 worker
                         pass
+                    # review 3-57：异常可能发生在 _persist_running 之前（ledger 行
+                    # 仍是 pending）——finish 的 running 守卫会静默 no-op，留下
+                    # pending 僵尸行被重启后当任务重跑。此处无条件删除该任务行，
+                    # 与内存里已报 failed 的结果保持一致（幂等性兜底正确性）。
+                    if self._db_conn is not None:
+                        try:
+                            with self._results_cv:
+                                self._db_conn.execute(
+                                    "delete from verification_queue_tasks where task_id = ?"
+                                    " and status = 'pending'",
+                                    (task.task_id,),
+                                )
+                                self._db_conn.commit()
+                        except Exception:  # noqa: BLE001
+                            pass
                 with self._results_cv:
                     self._results[task.task_id] = result
                     self._results_cv.notify_all()
+                # review 2-31（A327）：完成收尾在同一 cv 块内——释放或**原子
+                # 移交**串行槽给 deferred 队首（preclaim），消除 discard→pop
+                # 分锁窗口；requeue 在 cv 外执行（有界队列可能阻塞，防 cv
+                # 死锁），期间 agent 保持 running 归属，新到达任务照常 defer。
+                with self._results_cv:
+                    self._results_cv.notify_all()
+                    self._agent_running.discard(task.catalog_agent_id)
+                    waiting = self._agent_deferred.pop(task.catalog_agent_id, [])
+                    requeue = []
+                    if waiting:
+                        nxt = waiting.pop(0)
+                        self._agent_running.add(task.catalog_agent_id)
+                        self._agent_preclaimed[task.catalog_agent_id] = nxt
+                        requeue.append(nxt)
+                        self._agent_deferred[task.catalog_agent_id] = waiting
+                        self._results_cv.notify_all()
+                for d in requeue:
+                    self._pending.put(d)
                 self._update_depth()
             finally:
                 self._pending.task_done()

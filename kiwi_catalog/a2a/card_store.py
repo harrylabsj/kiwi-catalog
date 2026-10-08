@@ -190,7 +190,12 @@ def validate_publication(
     if publication["wire_profile"] != WIRE_PROFILE:
         raise ValidationError(f"unsupported wire_profile: {publication['wire_profile']}")
     digest = str(publication["card_digest"] or "")
-    if not digest.startswith("sha256:") or len(digest) != len("sha256:") + 64:
+    # review 3-68：补 64 位 hex 校验（此前只验前缀+长度，sha256:zzz… 可入库）。
+    if (
+        not digest.startswith("sha256:")
+        or len(digest) != len("sha256:") + 64
+        or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):])
+    ):
         raise ValidationError("card_digest must be sha256:<64 hex>")
 
     leaks = scan_publication_leaks(publication)

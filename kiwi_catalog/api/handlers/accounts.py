@@ -73,6 +73,22 @@ def _redact_token_plaintext(view: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
+def _client_ip_prefix(payload: dict[str, Any]) -> str:
+    """review 2-30：取客户端 IP 的截断前缀作限流桶键（/24 IPv4、/48 IPv6）。
+
+    fallback/FastAPI 两栈经 payload['_client_ip'] 注入（enrollments 同款）；
+    缺失时归 'unknown'（限流仍然生效，只是共享一个桶——fail-closed）。
+    """
+    ip = str(payload.get("_client_ip") or "").strip()
+    if ip == "":
+        return "unknown"
+    if ":" in ip:
+        parts = ip.split(":")
+        return ":".join(parts[:3])
+    parts = ip.split(".")
+    return ".".join(parts[:3]) if len(parts) == 4 else ip
+
+
 def _login_rate_limit_per_15min() -> int:
     import os
 
@@ -145,6 +161,25 @@ def register(
                 limit=limit,
                 window_seconds=900,
                 description=f"account register ({limit}/15min per email)",
+            )
+            # review 2-30：补 per-IP 桶——仅 per-email 限流挡不住轮换邮箱的
+            # 邮件轰炸/垃圾中继（smtp 模式下这是未认证端点向任意地址发信）。
+            # IP 截断前缀复用 enrollments 的 _client_ip 机制。
+            enforce_rate_limit(
+                backend,
+                key=f"register-ip:{_client_ip_prefix(payload)}",
+                limit=max(limit * 5, 20),
+                window_seconds=900,
+                description=f"account register per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
+            )
+            # review 2-30（A316 收窄）：全局发信预算——per-email/per-IP 之外
+            # 的第三道（轮换邮箱+IP 仍受总量约束），在 register 落库发信前生效。
+            enforce_rate_limit(
+                backend,
+                key="register-email:global",
+                limit=max(limit * 50, 200),
+                window_seconds=900,
+                description=f"account register global email budget ({max(limit * 50, 200)}/15min)",
             )
         registered = accounts_service.register_account(
             conn,
@@ -254,11 +289,33 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 window_seconds=900,
                 description=f"verification code resend ({limit}/15min per email)",
             )
+        # review 2-30：resend 同样补 per-IP 桶（与 register 同口径）。
+        if limit > 0:
+            enforce_rate_limit(
+                backend,
+                key=f"resend-code-ip:{_client_ip_prefix(payload)}",
+                limit=max(limit * 5, 20),
+                window_seconds=900,
+                description=f"verification code resend per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
+            )
+            # review 2-30：resend 全局发信预算（同 register）。
+            enforce_rate_limit(
+                backend,
+                key="resend-code-email:global",
+                limit=max(limit * 50, 200),
+                window_seconds=900,
+                description=f"verification code resend global email budget ({max(limit * 50, 200)}/15min)",
+            )
         account = accounts_service.account_by_email(conn, email)
+        # review 3-64（A316 收窄）：SMTP 模式下 unknown / known / verified
+        # 三态同形通用结果（A313 实证 verified 403、unknown sent:false 仍
+        # 枚举）。unknown/verified 不发信不落码；console 开发模式对「已知且
+        # 未验证」明示验证码（文档化开发语义）。
+        generic = {"ok": True, "email": email, "verification_code": ""}
         if account is None:
-            raise AuthError("unknown email")
+            return generic
         if int(account.get("email_verified") or 0) == 1:
-            raise AuthError("email already verified")
+            return generic
         code = accounts_service.issue_verification(
             conn, int(account["account_id"]), email
         )
@@ -643,9 +700,8 @@ def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[
             from kiwi_catalog.core.errors import ConflictError
             raise ConflictError("enrollment is not available for authorization")
         agent = ensure_my_catalog_agent(conn, account, base_url=allowed)
-        grant = __import__("secrets").token_urlsafe(32)
         result = service.authorize(conn, row, account, str(payload.get("user_code", "")),
-                                   str(agent["catalog_agent_id"]), grant)
+                                   str(agent["catalog_agent_id"]))
     except BaseException as exc:
         ctx.__exit__(type(exc), exc, exc.__traceback__)
         raise

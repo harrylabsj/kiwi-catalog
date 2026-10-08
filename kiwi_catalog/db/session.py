@@ -31,7 +31,9 @@ from kiwi_catalog.db.migrations import (
 )
 from kiwi_catalog.db.models import INDEXES, SCHEMA
 
-VERSION = "0.5.0"  # kiwi-catalog standalone  # kiwi-catalog standalone
+# review 3-59：re-export 包版本——此前硬编码 "0.5.0" 且写进 meta 表的
+# package_version，所有 ≥0.5.1 安装的库运营元数据都是错版本。
+from kiwi_catalog import VERSION as VERSION  # noqa: F401  (re-export)
 
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
