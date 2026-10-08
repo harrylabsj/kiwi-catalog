@@ -16,8 +16,8 @@
 
 The ledger is the durable side of the bounded in-process verification queue
 (§25 Phase 2, schema v15): enqueued tasks are written through so a process
-restart recovers ``pending``/``running`` rows and ``wait()`` can rebuild
-outcomes from the ledger.
+restart can distinguish safe ``pending`` work from unresolved ``running``
+work, and ``wait()`` can rebuild outcomes from the ledger.
 
 Each helper is a small, injectable statement runner: the caller passes the
 ``sqlite3.Connection`` (or transaction) to run against, so the queue can drive
@@ -31,6 +31,8 @@ transaction boundaries stay with the caller.
 from __future__ import annotations
 
 import sqlite3
+
+UNKNOWN_OUTCOME_MARKER = "queue_outcome_unknown"
 from collections.abc import Sequence
 
 __all__ = [
@@ -112,14 +114,15 @@ def finish_task(
 
     The ``and status = 'running'`` guard is the ledger's write fence: a
     ``timeout`` already persisted by the supervisor cannot be overwritten by
-    a runaway task thread that finishes late.
+    a runaway task thread that finishes late. The explicit unknown marker
+    keeps an unresolved running fence equally immutable to late completions.
     """
     conn.execute(
         "update verification_queue_tasks"
         " set status = ?, verification_status = ?, error = ?,"
         " result_json = ?, finished_at = ?, updated_at = ?"
-        " where task_id = ? and status = 'running'",
-        (status, verification_status, error, result_json, finished_at, updated_at, task_id),
+        " where task_id = ? and status = 'running' and verification_status != ?",
+        (status, verification_status, error, result_json, finished_at, updated_at, task_id, UNKNOWN_OUTCOME_MARKER),
     )
 
 
@@ -138,3 +141,19 @@ def fetch_task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None
     return conn.execute(
         "select * from verification_queue_tasks where task_id = ?", (task_id,)
     ).fetchone()
+
+
+def mark_task_unknown(conn: sqlite3.Connection, *, task_id: str, error: str,
+                      finished_at: float, updated_at: str) -> None:
+    """Keep unresolved work in running, outside automatic recovery/terminal GC.
+
+    The existing JSON/verification_status fields explicitly distinguish this
+    unresolved fence from a live running task. No schema migration is needed.
+    """
+    conn.execute(
+        "update verification_queue_tasks set status='running', verification_status=?,"
+        " error=?, result_json=?, finished_at=?, updated_at=?"
+        " where task_id=? and status in ('pending','running')",
+        (UNKNOWN_OUTCOME_MARKER, error, '{"queue_outcome":"unknown"}',
+         finished_at, updated_at, task_id),
+    )

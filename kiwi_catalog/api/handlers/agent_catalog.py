@@ -84,6 +84,7 @@ from kiwi_catalog.services.agent_catalog import (
 # _verification_queue 函数内导入，队列满的 except 分支求值时抛 NameError
 # → 500，优雅降级（verification_enqueued=False）是死代码。
 from kiwi_catalog.services.agent_verification import (
+    VerificationQueueOutcomeUnknownError,
     VerificationQueueFullError,
     VerificationQueueLedgerError,
     VerificationQueueShutdownError,
@@ -565,6 +566,9 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
     try:
         enqueued = _enqueue_verification(db_path, cagt_id, kind="verify", actor=actor)
         response["task_id"] = getattr(enqueued, "task_id", "")
+    except VerificationQueueOutcomeUnknownError:
+        response["verification_enqueued"] = False
+        response["queue_reason"] = "prior verification outcome unknown; reconciliation required"
     except VerificationQueueFullError:
         # 队列满：注册本身已成功（事务已提交）——返回 400 会让调用方重试，
         # 幂等重放得到 task_id="" 且验证永不执行。改为显式标注未入队。
@@ -621,7 +625,19 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
             raise
     # Enqueue AFTER the transaction commits — see register_catalog_agent
     # for the ledger write-lock rationale (v3.0-P4 persistent queue).
-    enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
+    try:
+        enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="refresh", actor=actor)
+    except VerificationQueueOutcomeUnknownError:
+        # This request was not enqueued; the earlier task's outcome remains
+        # unknown. Cache the same honest response for this key, rather than
+        # replaying the provisional refresh_enqueued=True envelope.
+        response["refresh_enqueued"] = False
+        response["queue_reason"] = "prior verification outcome unknown; reconciliation required"
+        with db_session(db_path) as conn:
+            api_idempotency.complete_catalog_write_idempotency(
+                conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash, response
+            )
+        return response
     response["task_id"] = getattr(enqueued, "task_id", "")
     return response
 
@@ -910,6 +926,9 @@ def reinstate_catalog_agent(
             enqueued = _enqueue_verification(db_path, catalog_agent_id, kind="verify", actor="admin")
             response["verify_enqueued"] = True
             response["verify_task_id"] = getattr(enqueued, "task_id", "")
+        except VerificationQueueOutcomeUnknownError:
+            response["verify_enqueued"] = False
+            response["queue_reason"] = "prior verification outcome unknown; reconciliation required"
         except (VerificationQueueFullError, VerificationQueueLedgerError, VerificationQueueShutdownError):
             # review 3-58（返修）：A313 独验——Shutdown 队列异常也曾把已成功的
             # 治理动作变成 500。治理事务已提交（成功事实不变），重排失败诚实

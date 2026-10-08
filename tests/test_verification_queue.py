@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from kiwi_catalog.services.verification_stages import VerificationResult
+
 from kiwi_catalog.services.agent_verification import (
     VerificationQueue,
     VerificationQueueConfig,
@@ -47,14 +49,12 @@ class _StubService:
     def verify(self, catalog_agent_id: str, actor: str = "verification_worker"):
         if self.delay > 0:
             time.sleep(self.delay)
-        return type(
-            "Res",
-            (),
-            {
-                "status": "profile_valid",
-                "catalog_agent_id": catalog_agent_id,
-            },
-        )()
+        return VerificationResult(
+            catalog_agent_id=catalog_agent_id,
+            previous_status="unverified",
+            status="profile_valid",
+            stages=(),
+        )
 
     def commit(self) -> None:
         return None
@@ -186,11 +186,17 @@ class VerificationQueueRunawayTest(unittest.TestCase):
 
         with mock.patch.object(q, "_persist_finish", side_effect=flaky_finish):
             first = q.enqueue("cagt_locked", wait=True, timeout=2.0)
-            # 结果不丢（box 先于 persist 赋值 → completed 准确返回），
-            # 绝不 KeyError 杀 worker（此前 _persist_finish 抛异常时 box
-            # 缺失 → 异常传播出 worker 循环 → 并发预算永久减一）。
-            self.assertEqual(first.status, "completed")
-            self.assertEqual(first.verification_status, "profile_valid")
+            # 3-56: business commit may be confirmed, but its durable queue
+            # outcome is not. Preserve an explicit unknown fence, not a
+            # fabricated completed record or safe-to-retry failure.
+            self.assertEqual(first.status, "unknown")
+            self.assertEqual(first.verification_status, "")
+            self.assertIn("commit confirmed", first.error)
+            self.assertIn("persistence unknown", first.error)
+            self.assertEqual(self._ledger_row(first.task_id)["status"], "running")
+            from kiwi_catalog.services.agent_verification import VerificationQueueOutcomeUnknownError
+            with self.assertRaises(VerificationQueueOutcomeUnknownError):
+                q.enqueue("cagt_locked", kind="refresh")
 
         # worker 存活：下一个任务正常完成。
         second = q.enqueue("cagt_ok", wait=True, timeout=2.0)

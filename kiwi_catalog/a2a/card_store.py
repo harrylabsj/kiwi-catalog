@@ -54,7 +54,7 @@ from kiwi_catalog.discovery.cache import compute_etag as _http_etag
 WIRE_PROFILE = "a2a-1.0"
 PUBLICATION_STATES = ("ACTIVE", "PAUSED", "WITHDRAWN")
 
-#: 发布对象里**绝不允许**出现的字段名片段（私密经营数据；§11.3 泄漏字段注入）。
+#: Sensitive field words/compounds, matched at JSON-key token boundaries.
 _PRIVATE_KEY_PATTERNS = (
     "cost",
     "floor",
@@ -70,7 +70,31 @@ _PRIVATE_KEY_PATTERNS = (
     "api_key",
     "apikey",
     "credential",
+    "credentials",
+    "tokens",
+    "secrets",
+    "passwords",
+    "privatekey",
+    "accesstoken",
+    "ownertoken",
+    "clientsecret",
+    "minunitprice",
+    "pricefloor",
 )
+
+
+def _is_private_publication_key(key: str) -> bool:
+    # snake/dotted/dashed and camel/PascalCase fields share word boundaries.
+    # A word like tokenize/secretary is not a token/secret credential field.
+    words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", str(key))
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", words)
+    parts = tuple(p for p in re.split(r"[^a-z0-9]+", words.lower()) if p)
+    for pattern in _PRIVATE_KEY_PATTERNS:
+        expected = tuple(pattern.split("_"))
+        if any(parts[i:i + len(expected)] == expected
+               for i in range(len(parts) - len(expected) + 1)):
+            return True
+    return False
 
 
 def _storage_json(value: Any) -> str:
@@ -125,8 +149,7 @@ def scan_publication_leaks(publication: dict[str, Any]) -> list[str]:
         if isinstance(value, dict):
             for key, item in value.items():
                 key_text = str(key)
-                lowered = key_text.lower()
-                if any(pattern in lowered for pattern in _PRIVATE_KEY_PATTERNS):
+                if _is_private_publication_key(key_text):
                     leaks.append(f"{path}.{key_text}" if path else key_text)
                 _walk(item, f"{path}.{key_text}" if path else key_text)
         elif isinstance(value, list):

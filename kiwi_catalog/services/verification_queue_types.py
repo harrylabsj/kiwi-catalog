@@ -42,7 +42,9 @@ class VerificationQueueConfig:
 
     task_timeout_seconds: float = 30.0
     """Per-task wall-clock deadline.  A task that exceeds it is reported with
-    ``status == "timeout"`` and the worker frees its slot for the next task."""
+    ``status == "timeout"`` only when the deadline wins before commit permission;
+    a committing task returns ``unknown`` if its outcome is not confirmed.
+    Physical runner slots remain occupied until those threads actually exit."""
 
     def __post_init__(self) -> None:
         if self.max_pending < 1:
@@ -72,7 +74,11 @@ class VerificationTaskResult:
     catalog_agent_id: str
     kind: str
     status: str
-    """``enqueued`` | ``completed`` | ``failed`` | ``timeout``."""
+    """``enqueued`` | ``completed`` | ``failed`` | ``timeout`` | ``unknown``.
+
+    Unknown work is stored as an unresolved running row with explicit metadata;
+    it is never automatically recovered/re-driven or removed by terminal GC.
+    """
 
     verification_status: str
     """Final ``catalog_agents.verification_status`` (empty unless completed)."""
