@@ -217,10 +217,16 @@ def require_merchant_token(
 
     - 随机 token 落库路径（v12）：merchant_tokens 表 active 行，SHA-256
       恒时比较——支持签发/轮换/吊销；
-    - 未命中 fallback HMAC 派生路径（require_owner_token）——存量调用方/
-      CLI/测试兼容。
+    - 无 token 行且 legacy 开启时，HMAC 派生路径（require_owner_token）
+      保留存量 body-only 调用兼容。
 
-    *conn* 缺省时只走 HMAC fallback（无 DB 的调用点行为不变）。
+    非空 body ``owner_token`` 优先于 transport ``_auth_token``，包括冲突时；
+    错误 body 不会尝试另一 Bearer。active 随机 token 可经这两位置认证。
+    无 token 行且 legacy 开启时，HMAC 只接受 body（不新增 Bearer legacy）。
+    只要商户存在 token 行，失配/rotated/revoked 均拒绝，绝不回退 HMAC。
+
+    *conn* 缺省时只走 body HMAC fallback（可信本地旧调用合同不变）；
+    网络入口必须传 conn，legacy-off 关闭的是带 conn 的无行兼容路径。
     """
     # owner_token（body 直传）或 _auth_token（Authorization 头经 transport 合并）
     presented = str(

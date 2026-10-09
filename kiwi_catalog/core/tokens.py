@@ -57,3 +57,13 @@ def is_sha256_digest(value: str) -> bool:
 
 def token_matches(candidate: str, expected: str) -> bool:
     return hmac.compare_digest(str(candidate or ""), str(expected or ""))
+
+
+def merchant_token_audit_fingerprint(token: str) -> str:
+    """Versioned, full SHA-256 audit correlation; never a bearer substring.
+
+    Domain separation avoids reusing the authentication digest as a display ID.
+    Old audit token_prefix fields remain historical data; no rewrite is implied.
+    """
+    material = b"kiwi-catalog-merchant-audit-v1\x00" + str(token or "").encode("utf-8")
+    return "sha256:v1:" + hashlib.sha256(material).hexdigest()

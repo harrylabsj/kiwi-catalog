@@ -33,6 +33,7 @@ from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.core.errors import ConflictError, NotFoundError
 from kiwi_catalog.core.tokens import (
     generate_merchant_token,
+    merchant_token_audit_fingerprint,
     token_digest,
 )
 from kiwi_catalog.db.session import now_iso
@@ -179,7 +180,7 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         {
             "application_id": application_id,
             "merchant_id": merchant_id,
-            "token_prefix": token[:24],
+            "token_fingerprint": merchant_token_audit_fingerprint(token),
         },
     )
     return {
@@ -242,7 +243,7 @@ def rotate_token(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
         "",
         "admin",
         "merchant_token_rotated",
-        {"merchant_id": merchant_id, "token_prefix": token[:24]},
+        {"merchant_id": merchant_id, "token_fingerprint": merchant_token_audit_fingerprint(token)},
     )
     return {"merchant_id": merchant_id, "token": token, "token_prefix": token[:24]}
 
