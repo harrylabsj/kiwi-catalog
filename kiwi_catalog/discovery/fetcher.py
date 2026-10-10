@@ -941,7 +941,11 @@ class ProfileFetcher:
                     return result
         except (SSRFBlockError, FetchError):
             raise
-        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+        except urllib.error.URLError as exc:
+            # urllib wraps TLS/connection failures in URLError. HTTPError is
+            # handled above while this request's body deadline is still live.
+            raise FetchError(f"Fetch failed for '{url}': {exc}") from exc
+        except (OSError, http.client.HTTPException) as exc:
             raise FetchError(f"fetch aborted (deadline or connection error): {exc}") from exc
 
     def _process_response(

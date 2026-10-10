@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,12 +47,78 @@ from kiwi_catalog.api.auth import AuthError
 from kiwi_catalog.core.errors import (
     ConflictError,
     NotFoundError,
+    PermissionDenied,
     ValidationError,
 )
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
 
+_LOG = logging.getLogger(__name__)
+
 SIGNATURE_HEADER = "x-kiwi-binding-jws"
+
+# ── A16：绑定拒绝/失败的自有固定诊断码 ─────────────────────────────────────
+# 只进服务端日志（code + stage + agent_id + 安全细节），不进响应体、不含
+# grant/JWS/密钥/远端原文。响应文案保持既有不变，Runtime 与 ZCode 诊断
+# 候选兼容。阶段取值：validate_grant / validate_material / validate_key /
+# validate_generation / validate_scope / validate_state / challenge_delivery /
+# challenge_response / challenge_commit。
+BIND_DIAG_GRANT_UNAVAILABLE = "BIND_GRANT_UNAVAILABLE"
+BIND_DIAG_GRANT_MISMATCH = "BIND_GRANT_MISMATCH"
+BIND_DIAG_MATERIAL_MISMATCH = "BIND_MATERIAL_MISMATCH"
+BIND_DIAG_KEY_MISMATCH = "BIND_KEY_MISMATCH"
+BIND_DIAG_GENERATION_MISMATCH = "BIND_GENERATION_MISMATCH"
+BIND_DIAG_SCOPE_MISSING = "BIND_SCOPE_MISSING"
+BIND_DIAG_BOUND_INACTIVE = "BIND_BOUND_INACTIVE"
+BIND_DIAG_CHALLENGE_DELIVERY_FAILED = "BIND_CHALLENGE_DELIVERY_FAILED"
+BIND_DIAG_CHALLENGE_REJECTED = "BIND_CHALLENGE_REJECTED"
+BIND_DIAG_CHALLENGE_JSON = "BIND_CHALLENGE_INVALID_JSON"
+BIND_DIAG_CHALLENGE_SHAPE = "BIND_CHALLENGE_INVALID_SHAPE"
+BIND_DIAG_CHALLENGE_MISMATCH = "BIND_CHALLENGE_RESPONSE_MISMATCH"
+BIND_DIAG_CHALLENGE_EXPIRED = "BIND_CHALLENGE_EXPIRED"
+BIND_DIAG_ENROLLMENT_CHANGED = "BIND_ENROLLMENT_CHANGED"
+# C1：持钥证明/签名失败与 nonce 重放（403，原静默）——细分只用自有固定词表，
+# 不从异常字符串动态拷贝原因。
+BIND_DIAG_POSSESSION_INVALID = "BIND_POSSESSION_INVALID"
+BIND_DIAG_POSSESSION_REPLAY = "BIND_POSSESSION_REPLAY"
+
+_SAFE_LOG_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+
+
+def _log_safe_id(value: Any) -> str:
+    """日志用标识净化（C2）：只保留安全字符集，其余按 ``\\xHH`` 转义并限长。
+
+    仅用于日志输出；agent 业务身份判断（库行匹配等）仍用原始值，不受影响。
+    """
+    text = str(value)[:128]
+    return "".join(ch if ch in _SAFE_LOG_ID_CHARS else f"\\x{ord(ch):02x}" for ch in text)
+
+
+def _deny(code: str, stage: str, agent_id: str, message: str, *, detail: str = "",
+          cause: BaseException | None = None) -> None:
+    """拒绝（403）：固定诊断码落日志后抛 PermissionDenied。
+
+    日志只含自有码、阶段、净化后的 agent 路径标识与可选的安全细节（如远端 HTTP
+    状态码）；绝不记录 grant、请求 JWS、公钥材料或异常原文。``cause`` 仅用于
+    保留原 ``raise ... from exc`` 的可调试性，不进入日志。
+    """
+    suffix = f" detail={detail}" if detail else ""
+    _LOG.warning("runtime binding denied: code=%s stage=%s agent=%s%s",
+                 code, stage, _log_safe_id(agent_id), suffix)
+    if cause is not None:
+        raise PermissionDenied(message) from cause
+    raise PermissionDenied(message)
+
+
+def _deny_logged(code: str, stage: str, agent_id: str) -> None:
+    """拒绝已在途中（PermissionDenied 由下层抛出）：补固定码日志后原样上抛。
+
+    下层异常对象（类型/文案/``__cause__``）逐字保留——响应、状态与事务语义零变更。
+    """
+    _LOG.warning("runtime binding denied: code=%s stage=%s agent=%s",
+                 code, stage, _log_safe_id(agent_id))
 
 
 def read_runtime_binding_document(
@@ -400,7 +467,6 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
     from kiwi_catalog.a2a.request_signature import consume_request_nonce
     from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher
     from kiwi_catalog.discovery.trust import TrustPolicy
-    from kiwi_catalog.core.errors import PermissionDenied
     from kiwi_catalog.services.enrollments import validate_public_jwk
 
     binding = _binding_required(payload)
@@ -420,33 +486,43 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
         if row is None or agent is None or row["catalog_agent_id"] != agent_id:
             raise NotFoundError("enrollment not found")
         if row["status"] not in ("authorized", "bound") or (row["status"] == "authorized" and row["grant_expires_at"] <= now_iso()):
-            raise PermissionDenied("enrollment grant is expired or unavailable")
+            _deny(BIND_DIAG_GRANT_UNAVAILABLE, "validate_grant", agent_id, "enrollment grant is expired or unavailable")
         if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"]:
-            raise PermissionDenied("invalid enrollment grant")
+            _deny(BIND_DIAG_GRANT_MISMATCH, "validate_grant", agent_id, "invalid enrollment grant")
         if row["merchant_id"] != agent["merchant_id"] or str(binding["runtime_origin"]) != row["runtime_origin"] or str(binding["a2a_endpoint"]) != row["a2a_endpoint"]:
-            raise PermissionDenied("binding material does not match approved enrollment")
+            _deny(BIND_DIAG_MATERIAL_MISMATCH, "validate_material", agent_id, "binding material does not match approved enrollment")
         thumb = validate_public_jwk(dict(binding["key_jwk"]))
         if thumb != row["key_thumbprint"] or str(binding["key_id"]) != row["key_id"]:
-            raise PermissionDenied("binding key does not match approved enrollment")
+            _deny(BIND_DIAG_KEY_MISMATCH, "validate_key", agent_id, "binding key does not match approved enrollment")
         if int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]):
-            raise PermissionDenied("binding generation does not match approved enrollment")
+            _deny(BIND_DIAG_GENERATION_MISMATCH, "validate_generation", agent_id, "binding generation does not match approved enrollment")
         if "runtime:bind" not in json.loads(row["scopes_json"]):
-            raise PermissionDenied("enrollment grant does not include runtime:bind")
-        signed = verify_binding_possession(jws=jws, public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
-            "method": "POST", "path": f"/v1/agents/{agent_id}/runtime-bindings", "audience": "kiwi-catalog",
-            "body_digest": canonical_digest(body), "enrollment_id": enrollment_id,
-            "grant_hash": hashlib.sha256(grant.encode()).hexdigest(), "catalog_agent_id": agent_id,
-            "key_id": row["key_id"],
-            "key_thumbprint": thumb, "runtime_origin": row["runtime_origin"], "a2a_endpoint": row["a2a_endpoint"],
-            "generation": int(binding["generation"]), "service_epoch": int(binding["service_epoch"]),
-            "authorization_epoch": int(row["authorization_epoch"]),
-        })
+            _deny(BIND_DIAG_SCOPE_MISSING, "validate_scope", agent_id, "enrollment grant does not include runtime:bind")
+        try:
+            signed = verify_binding_possession(jws=jws, public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
+                "method": "POST", "path": f"/v1/agents/{agent_id}/runtime-bindings", "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body), "enrollment_id": enrollment_id,
+                "grant_hash": hashlib.sha256(grant.encode()).hexdigest(), "catalog_agent_id": agent_id,
+                "key_id": row["key_id"],
+                "key_thumbprint": thumb, "runtime_origin": row["runtime_origin"], "a2a_endpoint": row["a2a_endpoint"],
+                "generation": int(binding["generation"]), "service_epoch": int(binding["service_epoch"]),
+                "authorization_epoch": int(row["authorization_epoch"]),
+            })
+        except PermissionDenied:
+            # C1：持钥证明/签名失败（字段不符/验签失败/alg/kid/时钟窗）——
+            # 原异常原样上抛（响应零变更），仅补固定码日志。
+            _deny_logged(BIND_DIAG_POSSESSION_INVALID, "validate_possession", agent_id)
+            raise
         _check_enrollment_exp(signed)
-        consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(signed.get("nonce", "")), issued_at=str(signed.get("issued_at", "")))
+        try:
+            consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(signed.get("nonce", "")), issued_at=str(signed.get("issued_at", "")))
+        except PermissionDenied:
+            _deny_logged(BIND_DIAG_POSSESSION_REPLAY, "validate_possession", agent_id)
+            raise
         if row["status"] == "bound" and row["binding_id"]:
             active = conn.execute("select status from runtime_bindings where binding_id=?", (row["binding_id"],)).fetchone()
             if active is None or active["status"] != "active" or agent["administrative_state"] != "active":
-                raise PermissionDenied("bound enrollment is no longer active")
+                _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id, "bound enrollment is no longer active")
             return _enrollment_binding_result(conn, agent_id, row)
         challenge = secrets.token_urlsafe(32)
         origin = str(row["runtime_origin"]).rstrip("/")
@@ -458,34 +534,60 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
         result = ProfileFetcher(TrustPolicy.defaults(), timeout=5).post_json(
             origin + "/.well-known/kiwi-binding-challenge", challenge_request, timeout=5)
     except FetchError as exc:
+        # 出口网络失败（DNS/连接/TLS 握手/超时）统一收敛为既有可诊断 409；
+        # 日志只记自有码 + 异常类型名，不记 URL/异常原文，不放宽任何安全边界。
+        # C6：客户端可见面有意保持粗粒度——旧 Runtime 把本 409 映射为
+        # BIND_REJECTED（"目录拒绝了本次绑定请求"），精确拒绝原因只在服务端
+        # 日志（BIND_CHALLENGE_DELIVERY_FAILED）；两仓口径对齐见 A17 报告 C6，
+        # 不在本协议版本扩大响应面。
+        _LOG.warning(
+            "runtime binding challenge delivery failed: code=%s stage=challenge_delivery agent=%s error_type=%s",
+            BIND_DIAG_CHALLENGE_DELIVERY_FAILED, _log_safe_id(agent_id), type(exc).__name__,
+        )
         raise ConflictError("runtime endpoint challenge failed; retry when the public HTTPS service is reachable") from exc
     if result.status_code != 200:
-        raise PermissionDenied("runtime endpoint challenge failed")
+        _deny(BIND_DIAG_CHALLENGE_REJECTED, "challenge_delivery", agent_id,
+              "runtime endpoint challenge failed", detail=f"status={result.status_code}")
     try:
         response = json.loads(result.body)
     except (ValueError, TypeError) as exc:
-        raise PermissionDenied("runtime endpoint challenge returned invalid JSON") from exc
+        _deny(BIND_DIAG_CHALLENGE_JSON, "challenge_response", agent_id,
+              "runtime endpoint challenge returned invalid JSON", cause=exc)
     if not isinstance(response, dict) or set(response) != {"enrollment_id", "challenge", "origin", "key_thumbprint", "audience", "issued_at", "expires_at", "key_id", "signature"}:
-        raise PermissionDenied("runtime endpoint challenge response shape is invalid")
+        _deny(BIND_DIAG_CHALLENGE_SHAPE, "challenge_response", agent_id,
+              "runtime endpoint challenge response shape is invalid")
     for key, value in challenge_request.items():
         if response.get(key) != value:
-            raise PermissionDenied("runtime endpoint challenge response mismatch")
+            _deny(BIND_DIAG_CHALLENGE_MISMATCH, "challenge_response", agent_id,
+                  "runtime endpoint challenge response mismatch")
     if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
-        raise PermissionDenied("runtime endpoint challenge expired")
-    verify_binding_possession(jws=str(response["signature"]), public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
-        **{k: response[k] for k in challenge_request}, "key_id": row["key_id"], "purpose": "kiwi-binding-challenge"})
+        _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_response", agent_id,
+              "runtime endpoint challenge expired")
+    try:
+        verify_binding_possession(jws=str(response["signature"]), public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
+            **{k: response[k] for k in challenge_request}, "key_id": row["key_id"], "purpose": "kiwi-binding-challenge"})
+    except PermissionDenied:
+        _deny_logged(BIND_DIAG_POSSESSION_INVALID, "challenge_response", agent_id)
+        raise
     challenge_jws_payload = _read_jws_payload(str(response["signature"]))
     _check_enrollment_exp({**challenge_jws_payload, "exp": response["expires_at"]})
     with db_session(db_path) as conn:
         row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
         if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
-            raise PermissionDenied("runtime endpoint challenge expired")
+            _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_commit", agent_id,
+                  "runtime endpoint challenge expired")
         if row is None or row["status"] != "authorized" or row["grant_expires_at"] <= now_iso() or row["merchant_id"] != agent["merchant_id"] or agent["administrative_state"] != "active":
-            raise PermissionDenied("enrollment authorization changed during endpoint challenge")
+            _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
+                  "enrollment authorization changed during endpoint challenge")
         if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"] or int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]) or "runtime:bind" not in json.loads(row["scopes_json"]):
-            raise PermissionDenied("enrollment grant changed during endpoint challenge")
-        consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(challenge_jws_payload.get("nonce", "")), issued_at=str(challenge_jws_payload.get("issued_at", "")))
+            _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
+                  "enrollment grant changed during endpoint challenge")
+        try:
+            consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(challenge_jws_payload.get("nonce", "")), issued_at=str(challenge_jws_payload.get("issued_at", "")))
+        except PermissionDenied:
+            _deny_logged(BIND_DIAG_POSSESSION_REPLAY, "challenge_commit", agent_id)
+            raise
         version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
         if version != int(row["expected_binding_version"]):
             raise ConflictError("binding version changed since enrollment authorization")
