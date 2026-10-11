@@ -9,7 +9,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest import mock
 
 from kiwi_catalog.a2a.binding_claims import read_runtime_binding
@@ -18,10 +18,6 @@ from kiwi_catalog.agent_catalog.pagination import (
     decode_agent_cursor,
 )
 from kiwi_catalog.core.errors import PermissionDenied, ValidationError
-from kiwi_catalog.api.handlers.agent_catalog import (
-    _enqueue_verification,
-    reinstate_catalog_agent,
-)
 from kiwi_catalog.services.agent_verification import VerificationQueueShutdownError
 
 ADMIN_TOKEN = "a316-admin-token"
@@ -175,22 +171,28 @@ class ReinstateShutdownDegradeTest(unittest.TestCase):
         agent_id = new_catalog_agent_id()
         with db_session(db_path) as conn:
             upsert_catalog_agent(
-                conn, catalog_agent_id=agent_id, merchant_id="",
+                conn,
+                catalog_agent_id=agent_id,
+                merchant_id="",
                 canonical_domain="a.example",
-                source_type="admin_curated", lifecycle_status="active",
+                source_type="admin_curated",
+                lifecycle_status="active",
             )
             # reinstate 前置：administrative_state 必须是 suspended
             conn.execute(
                 "update catalog_agents set administrative_state='suspended' where catalog_agent_id=?",
                 (agent_id,),
             )
-        with mock.patch.dict(
-            os.environ,
-            {"KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN, "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
-            clear=False,
-        ), mock.patch(
-            "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
-            side_effect=VerificationQueueShutdownError("shutdown"),
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN, "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
+                clear=False,
+            ),
+            mock.patch(
+                "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
+                side_effect=VerificationQueueShutdownError("shutdown"),
+            ),
         ):
             payload = handlers.reinstate_catalog_agent(
                 db_path, agent_id, {"admin_token": ADMIN_TOKEN, "reason": "a316"}
@@ -234,13 +236,16 @@ class BindingExpiryTypedTest(unittest.TestCase):
             {"KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN, "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET},
             clear=False,
         ):
-            app = create_catalog_app(db_path)
+            create_catalog_app(db_path)
             agent_id = new_catalog_agent_id()
             with db_session(db_path) as conn:
                 upsert_catalog_agent(
-                    conn, catalog_agent_id=agent_id, merchant_id="",
+                    conn,
+                    catalog_agent_id=agent_id,
+                    merchant_id="",
                     canonical_domain="b.example",
-                    source_type="admin_curated", lifecycle_status="active",
+                    source_type="admin_curated",
+                    lifecycle_status="active",
                 )
                 conn.execute(
                     "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
@@ -281,9 +286,7 @@ class MigrationLockTest(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(savepoint_idx, "SAVEPOINT must be taken inside the write lock")
-        commit_idx = next(
-            (i for i, st in enumerate(after_begin) if st.upper() == "COMMIT"), None
-        )
+        commit_idx = next((i for i, st in enumerate(after_begin) if st.upper() == "COMMIT"), None)
         self.assertIsNotNone(commit_idx)
         self.assertGreater(commit_idx, savepoint_idx, "write lock must outlive the migration chain")
 

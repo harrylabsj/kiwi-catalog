@@ -2,7 +2,6 @@
 # v9 口径：行级强断（per-agent 并发 ≤1、每任务恰一次执行、无结果滞留），
 # 不以「探针标签 ALL PASS」代验收。
 import os
-import sqlite3
 import tempfile
 import threading
 import time
@@ -24,7 +23,7 @@ class Harness:
         conn = open_connection(self.db_path)  # 走迁移入口（真实 open/init 语义）
         conn.close()
         self.lock = threading.Lock()
-        self.executions: dict[str, int] = {}          # task_id → 执行次数
+        self.executions: dict[str, int] = {}  # task_id → 执行次数
         self.concurrent_per_agent: dict[str, int] = {}  # agent → 峰值并发
         self.current_per_agent: dict[str, int] = {}
         self.results_seen: set[str] = set()
@@ -33,7 +32,7 @@ class Harness:
     def on_execute(self, task: VerificationTask):
         with self.lock:
             self.executions[task.task_id] = self.executions.get(task.task_id, 0) + 1
-            n = self.executions[task.task_id]
+            self.executions[task.task_id]
             cur = self.current_per_agent.get(task.catalog_agent_id, 0) + 1
             self.current_per_agent[task.catalog_agent_id] = cur
             peak = self.concurrent_per_agent.get(task.catalog_agent_id, 0)
@@ -116,12 +115,14 @@ class AgentSerializationTest(unittest.TestCase):
         """v9 红 → 收口：同 agent verify×N 并发提交 → 峰值并发 ≤1、
         每任务恰执行 1 次、全部有结果（无 deferred 滞留）。"""
         q = self.h.make_queue()
-        agents = [f"agent-same" for _ in range(6)]
+        agents = ["agent-same" for _ in range(6)]
         task_ids = []
         for i, agent in enumerate(agents):
             kind = "verify" if i % 2 == 0 else "refresh"
             t = VerificationTask(
-                catalog_agent_id=agent, task_id=f"vt-{i:03d}", kind=kind,
+                catalog_agent_id=agent,
+                task_id=f"vt-{i:03d}",
+                kind=kind,
                 enqueued_at=time.time(),
             )
             task_ids.append(t.task_id)
@@ -143,7 +144,9 @@ class AgentSerializationTest(unittest.TestCase):
         task_ids = []
         for agent in agents:
             t = VerificationTask(
-                catalog_agent_id=agent, task_id=f"vt-{agent}", kind="verify",
+                catalog_agent_id=agent,
+                task_id=f"vt-{agent}",
+                kind="verify",
                 enqueued_at=time.time(),
             )
             q._pending.put(t)

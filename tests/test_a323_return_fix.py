@@ -11,7 +11,6 @@ from kiwi_catalog.discovery.fetcher import (
     FetchError,
     ProfileFetcher,
     TrustPolicy,
-    _resolve_and_validate,
 )
 
 
@@ -93,6 +92,7 @@ class BudgetBoundTest(unittest.TestCase):
     def test_c5_redirect_dns_shares_budget(self):
         server, base = _serve(_RedirectSlowDnsHandler)
         try:
+
             def slow_getaddrinfo(host, port, **kwargs):
                 if host == "slow-dns-a323.invalid":
                     time.sleep(1.2)
@@ -111,7 +111,7 @@ class BudgetBoundTest(unittest.TestCase):
 
     def test_positive_fast_fetch_still_works(self):
         # loopback 在产品里被硬封（无 policy 杠杆）——正控 fixture 级放行
-        #（与 C4 patch getaddrinfo 同口径；不改产品封禁语义）。
+        # （与 C4 patch getaddrinfo 同口径；不改产品封禁语义）。
         blocked_patch = mock.patch.object(fetcher_mod, "_is_blocked_ip", return_value=None)
         blocked_patch.start()
         self.addCleanup(blocked_patch.stop)

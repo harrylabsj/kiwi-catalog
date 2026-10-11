@@ -1,11 +1,11 @@
 """Small-capacity shutdown controls; safe cleanup even against the frozen defect."""
+
 import queue
 import threading
 import time
 import unittest
 
 from tests.test_a332_queue_shutdown import QueueShutdownHarness, _starts, _wait_until
-from kiwi_catalog.services.agent_verification import VerificationQueueConfig
 
 
 class SmallCapacityShutdownTest(unittest.TestCase):
@@ -20,13 +20,16 @@ class SmallCapacityShutdownTest(unittest.TestCase):
             self.assertTrue(_wait_until(lambda: bool(_starts(h.events, agent, "verify"))))
         entered, resume, done = threading.Event(), threading.Event(), threading.Event()
         real_set = q._shutdown.set
+
         def pause_after_set():
             real_set()
             entered.set()
             if not resume.wait(5):
                 raise AssertionError("shutdown fixture barrier was not released")
+
         q._shutdown.set = pause_after_set
         errors = []
+
         def stop():
             try:
                 q.shutdown(wait=True)
@@ -34,6 +37,7 @@ class SmallCapacityShutdownTest(unittest.TestCase):
                 errors.append(exc)
             finally:
                 done.set()
+
         thread = threading.Thread(target=stop, daemon=True)
         thread.start()
         bounded = False
@@ -54,7 +58,7 @@ class SmallCapacityShutdownTest(unittest.TestCase):
             end = time.monotonic() + 3
             while not done.is_set() and time.monotonic() < end:
                 try:
-                    q._pending.get(timeout=.05)
+                    q._pending.get(timeout=0.05)
                     q._pending.task_done()
                 except queue.Empty:
                     pass

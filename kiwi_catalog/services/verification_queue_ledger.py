@@ -31,9 +31,9 @@ transaction boundaries stay with the caller.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 
 UNKNOWN_OUTCOME_MARKER = "queue_outcome_unknown"
-from collections.abc import Sequence
 
 __all__ = [
     "cleanup_terminal_tasks",
