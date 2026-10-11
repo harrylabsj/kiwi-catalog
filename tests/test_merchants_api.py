@@ -331,7 +331,7 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertEqual(status, 409, payload)
 
     def test_approve_audit_has_no_plaintext(self) -> None:
-        """签发审计含 merchant_id + token_prefix，不含明文 token。"""
+        """签发审计含版本化不可逆 fingerprint，不含 token 或旧 bearer 前缀。"""
         _, applied = self._apply()
         app_id = applied["application_id"]
         _, issued = self._approve(app_id)
@@ -346,7 +346,9 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertEqual(len(events), 1)
         details = json.loads(events[0]["details_json"])
         self.assertEqual(details["merchant_id"], issued["merchant_id"])
-        self.assertIn("token_prefix", details)
+        self.assertRegex(details["token_fingerprint"], r"^sha256:v1:[0-9a-f]{64}$")
+        self.assertNotIn("token_prefix", details)
+        self.assertNotIn(issued["token"][:24], json.dumps(details, ensure_ascii=False))
         self.assertNotIn(issued["token"], json.dumps(details, ensure_ascii=False))
 
     def test_approved_token_cannot_replace_runtime_binding_for_listing(self) -> None:

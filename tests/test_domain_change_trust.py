@@ -216,6 +216,7 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
             conn,
             domain="new.example",
             agent_card_url="https://new.example/card.json",
+            ucp_profile_url="https://new.example/ucp.json",
         )["catalog_agent_id"]
 
         class _FakeCard:
@@ -236,8 +237,8 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
             card = _FakeCard()
             ucp = _FakeUcp()
             urls = {
-                "agent_card": "https://old.example/.well-known/agent-card.json",
-                "ucp_profile": "https://old.example/ucp.json",
+                "agent_card": "https://new.example/card.json",
+                "ucp_profile": "https://new.example/ucp.json",
             }
             snapshot_ids = (1, 2)
 
@@ -254,6 +255,9 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
                 verification_type="agent_identity", result="passed", details={}, reason="mock"
             )
 
+        # Complete fixture registration before the mocked profile loader bypasses
+        # its real owned snapshot checkpoint; verification does not own caller TXs.
+        conn.commit()
         service = VerificationService(conn)
         service._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
         service._identity_verifier.verify_domain_control = _recording_domain_control  # type: ignore[method-assign]
@@ -283,6 +287,8 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
             agent_card_url="https://old.example/card.json",
             ucp_profile_url="https://old.example/ucp.json",
         )["catalog_agent_id"]
+        # Finish fixture registration before the network verification entry.
+        conn.commit()
         service = VerificationService(conn)
         with self.assertRaises(_ProfileFailure) as ctx:
             service._load_profiles(cid)
@@ -312,6 +318,8 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
             def fetch(self, url, etag=None, last_modified=None):
                 raise FetchError("offline test fetcher")
 
+        # Finish fixture registration before the network verification entry.
+        conn.commit()
         service = VerificationService(conn, fetcher=_OfflineFetcher())
         with self.assertRaises(_ProfileFailure) as ctx:
             service._load_profiles(cid)

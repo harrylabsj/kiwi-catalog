@@ -674,10 +674,12 @@ def heartbeat_catalog_agent(
                 expected_fields={"agent_id": catalog_agent_id},
             )
             actor = f"runtime:{verified.get('binding_id', '')}"
+            rate_actor = f"runtime:{catalog_agent_id}:{verified['binding_id']}"
         else:
             actor = _require_catalog_write_auth(conn, agent, payload)
+            rate_actor = api_idempotency.catalog_write_actor_key(payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
-            conn, api_idempotency.catalog_write_actor_key(payload), _catalog_write_rate_limit_per_minute()
+            conn, rate_actor, _catalog_write_rate_limit_per_minute()
         )
         updated = touch_catalog_agent(conn, catalog_agent_id)
     return {
@@ -1014,6 +1016,8 @@ def v1_search_agents(
         str(query.get("hosting_mode") or "")
     )
     with db_session(db_path) as conn:
+        from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
+        enforce_public_read_limit(conn, auth_payload, surface="agent search")
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
         buyer_stats.record_buyer_search(
             conn,

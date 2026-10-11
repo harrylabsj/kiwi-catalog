@@ -21,7 +21,7 @@
 - buyer_keyword_daily：day × search_type × keyword——回答「买家每天在搜
   什么关键词、多少没搜到」（zero_results = 供需缺口信号，运营据此招商）。
   与 buyer_search_events 的原始事件流（有界 5000 条裁剪）不同：本表是
-  日聚合、无保留上限。
+  日聚合、保留最近 7 个 UTC 日期；每天每搜索类型最多 1000 个新关键词。
 
 隐私设计（与 usage_metrics 的最小化原则一致，catalog 不存 buyer 原始身份）：
 - 身份来源：Authorization Bearer token，或 X-Buyer-Id 头（buyer agent
@@ -46,6 +46,7 @@ import json
 import os
 import sqlite3
 import unicodedata
+from datetime import date, timedelta
 from typing import Any
 
 from kiwi_catalog.db.session import now_iso
@@ -69,6 +70,8 @@ _HASH_HEX_LEN = 16
 SEARCH_TYPES = ("agent", "listing")
 
 _KEYWORD_CAP = 80
+_KEYWORD_RETENTION_DAYS = 7
+_KEYWORD_DAILY_MAX = 1000
 
 
 # 关键词排行数据源（Phase 3 Step A）：默认从 access_log 派生（单一事实源），
@@ -217,14 +220,23 @@ def record_buyer_keyword(
         zero_hit = 1 if int(str(result_count or 0)) == 0 else 0
     except (TypeError, ValueError):
         zero_hit = 0
+    current = now_iso()
+    day = current[:_DAY_PREFIX_LEN]
+    cutoff = (date.fromisoformat(day) - timedelta(days=_KEYWORD_RETENTION_DAYS - 1)).isoformat()
+    conn.execute("delete from buyer_keyword_daily where day < ?", (cutoff,))
+    # One conditional INSERT keeps admission atomic across real SQLite writers.
+    # Existing admitted keywords continue counting after the daily cap is reached.
     conn.execute(
         "insert into buyer_keyword_daily(day, search_type, keyword, searches, zero_results, updated_at)"
-        " values (?, ?, ?, 1, ?, ?)"
+        " select ?, ?, ?, 1, ?, ? where"
+        " exists(select 1 from buyer_keyword_daily where day=? and search_type=? and keyword=?)"
+        " or (select count(*) from buyer_keyword_daily where day=? and search_type=?) < ?"
         " on conflict(day, search_type, keyword) do update set"
         " searches = buyer_keyword_daily.searches + 1,"
         " zero_results = buyer_keyword_daily.zero_results + excluded.zero_results,"
         " updated_at = excluded.updated_at",
-        (now_iso()[:_DAY_PREFIX_LEN], search_type, keyword, zero_hit, now_iso()),
+        (day, search_type, keyword, zero_hit, current,
+         day, search_type, keyword, day, search_type, _KEYWORD_DAILY_MAX),
     )
 
 

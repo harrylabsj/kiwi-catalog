@@ -220,7 +220,7 @@ def approve_request(
         raise PermissionDenied("account has no merchant_id — complete registration first")
     merchant_name = str(account.get("merchant_name") or "").strip()
     code = secrets.token_urlsafe(32)
-    conn.execute(
+    cursor = conn.execute(
         """
         update connector_identity_requests
            set status = 'approved', account_id = ?, merchant_id = ?, merchant_name = ?,
@@ -229,6 +229,8 @@ def approve_request(
         """,
         (account_id, merchant_id, merchant_name, token_digest(code), now_iso(), record["request_id"]),
     )
+    if cursor.rowcount != 1:
+        raise ConflictError("connector identity request is no longer pending")
     return {"request_id": record["request_id"], "code": code, "merchant_id": merchant_id}
 
 

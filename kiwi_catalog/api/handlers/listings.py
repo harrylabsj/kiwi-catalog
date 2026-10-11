@@ -282,6 +282,8 @@ def v1_search_listings(
     normalized = dict(query or {})
     normalized["limit"] = limit
     with db_session(db_path) as conn:
+        from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
+        enforce_public_read_limit(conn, auth_payload, surface="listing search")
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_LISTING_SEARCH)
         buyer_stats.record_buyer_search(
             conn,

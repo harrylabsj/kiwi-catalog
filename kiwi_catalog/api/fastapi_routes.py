@@ -25,6 +25,7 @@ stacks continue to share the wrappers in ``api.route_table``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -273,7 +274,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
                 )
             return response
         finally:
-            _record_access()
+            await asyncio.to_thread(_record_access)
 
     def _query_params_from_request(request: _FastAPIRequest) -> dict[str, str]:
         """Mirror fallback parse_qs(keep_blank_values=True) + last-value-wins.
@@ -314,7 +315,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
         与 fallback_asgi 的头合并对齐（_auth_token 经 payload_with_auth，
         _buyer_id 显式透传）；身份只用于每日去重买家统计
-        （services/buyer_stats.py，不落原始值）。
+        （services/buyer_stats.py，不落原始值）；可信来源 IP 仅用于公开读预算。
         """
         payload = api_auth.payload_with_auth(
             {}, request.headers.get("authorization", ""), ""
@@ -322,6 +323,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         buyer_id = request.headers.get("x-buyer-id", "")
         if buyer_id:
             payload["_buyer_id"] = buyer_id
+        client = getattr(request, "client", None)
+        payload["_client_ip"] = resolve_client_ip(
+            request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None
+        )
         return payload
 
     @app.get("/health")

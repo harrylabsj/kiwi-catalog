@@ -287,18 +287,13 @@ class VerificationService:
                 f"(administrative_state={admin!r}); it must be reinstated or re-registered"
             )
 
+        stale_profile_audit = False
         # Freshness gate: only re-verify on-demand when the profile is stale,
         # unless the caller explicitly forces a full re-verification.
         if freshness == FRESH and level in _LADDER_RUNGS:
             if not force:
                 return VerificationResult(catalog_agent_id, previous, previous, ())
-            if self._is_stale(catalog_agent_id):
-                self._write_audit(
-                    catalog_agent_id,
-                    actor,
-                    "catalog_agent_stale",
-                    {"reason": "profile freshness window expired", "actor_reason": reason},
-                )
+            stale_profile_audit = self._is_stale(catalog_agent_id)
         # D5：有活动绑定的云商家跳过域所有权阶梯（不抓卡、不做同源判定）——
         # 信任证据 = 绑定声明（确认时写入的 passed 证据行支撑级别）。
         skipped = self._skip_ladder_for_cloud_binding(
@@ -310,7 +305,17 @@ class VerificationService:
         try:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
+            if stale_profile_audit:
+                self._write_audit(catalog_agent_id, actor, "catalog_agent_stale",
+                    {"reason": "profile freshness window expired", "actor_reason": reason})
             return self._handle_profile_failure(catalog_agent_id, previous, exc, actor, stages)
+
+        # Acquire all domain network evidence before reopening a write transaction.
+        domain_evidence = self._domain_control_evidence(catalog_agent_id, profiles, expected_agent=agent)
+        self._begin_verified_persistence(agent, profiles)
+        if stale_profile_audit:
+            self._write_audit(catalog_agent_id, actor, "catalog_agent_stale",
+                {"reason": "profile freshness window expired", "actor_reason": reason})
 
         # 抓取成功后才重入阶梯（legacy STALE → 阶梯重入语义一致）。放在抓取
         # 之后：_handle_profile_failure 按设计"只动 freshness、保留最后已验证
@@ -329,7 +334,8 @@ class VerificationService:
         )
 
         domain_stage = self._stage_domain(
-            catalog_agent_id, profile_target, actor, profiles, from_level=original_level
+            catalog_agent_id, profile_target, actor, profiles, from_level=original_level,
+            evidence=domain_evidence,
         )
         stages.append(domain_stage)
         if domain_stage.outcome != "passed":
@@ -512,8 +518,10 @@ class VerificationService:
             profiles = self._load_profiles(catalog_agent_id)
         except _ProfileFailure as exc:
             return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
+        domain_evidence = self._domain_control_evidence(catalog_agent_id, profiles, expected_agent=agent)
+        self._begin_verified_persistence(agent, profiles)
         self._apply_freshness(agent, FRESH)
-        stage = self._stage_domain(catalog_agent_id, current, actor, profiles)
+        stage = self._stage_domain(catalog_agent_id, current, actor, profiles, evidence=domain_evidence)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
         return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
@@ -587,6 +595,8 @@ class VerificationService:
             _ProfileFailure: the semantic terminal status and a safe reason
                 when the profile stage cannot complete.
         """
+        if self._conn.in_transaction:
+            raise ValidationError("network verification requires an idle caller connection; caller transaction preserved")
         endpoints = list_endpoints(self._conn, catalog_agent_id)
         urls = {ep["kind"]: ep["url"] for ep in endpoints if ep["kind"] in ("agent_card", "ucp_profile")}
         if set(urls) != {"agent_card", "ucp_profile"}:
@@ -720,6 +730,52 @@ class VerificationService:
 
     # ── Domain / identity / commerce stages ────────────────────────────────
 
+    def _begin_verified_persistence(self, expected_agent: dict[str, Any], profiles: _Profiles) -> None:
+        """Take the write lock only after I/O; never commit a caller's transaction."""
+        if self._conn.in_transaction:
+            raise ValidationError("verification persistence requires an idle caller connection")
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = require_catalog_agent(self._conn, str(expected_agent["catalog_agent_id"]))
+            binding_fields = (
+                "canonical_domain", "merchant_id", "hosted_runtime_agent_id",
+                "source_type", "hosting_mode", "lifecycle_status", "administrative_state",
+            )
+            current_urls = {
+                ep["kind"]: ep["url"] for ep in list_endpoints(self._conn, str(expected_agent["catalog_agent_id"]))
+                if ep["kind"] in ("agent_card", "ucp_profile")
+            }
+            if (current["administrative_state"] != ACTIVE
+                    or any(current.get(key) != expected_agent.get(key) for key in binding_fields)
+                    or current_urls != profiles.urls):
+                raise ConflictError("catalog agent identity, administration or endpoints changed during verification")
+        except BaseException as exc:
+            try:
+                self._conn.rollback()
+            except sqlite3.Error as rollback_error:
+                exc.add_note(f"owned verification rollback failed: {type(rollback_error).__name__}")
+            raise
+
+    def _domain_control_evidence(
+        self, catalog_agent_id: str, profiles: _Profiles,
+        *, expected_agent: dict[str, Any] | None = None,
+    ) -> VerificationEvidence:
+        """Acquire evidence for the captured subject, never a later live domain."""
+        agent = expected_agent if expected_agent is not None else require_catalog_agent(self._conn, catalog_agent_id)
+        stored_domain = str(agent.get("canonical_domain") or "").strip()
+        if stored_domain and any(
+            not is_http_url(url) or not is_same_authority(canonical_domain_of(url), stored_domain)
+            for url in profiles.urls.values()
+        ):
+            raise ConflictError("profile endpoints changed away from the captured verification domain")
+        if not stored_domain:
+            return _failed_evidence("domain_control",
+                "catalog agent has no canonical_domain; domain control cannot be verified",
+                {"method": "https_domain_control", "domain_control_method": self._policy.domain_control_method,
+                 "canonical_domain": stored_domain})
+        return self._identity_verifier.verify_domain_control(stored_domain,
+            declared={"agent_card": profiles.urls["agent_card"], "ucp_profile": profiles.urls["ucp_profile"]})
+
     def _stage_domain(
         self,
         catalog_agent_id: str,
@@ -728,6 +784,7 @@ class VerificationService:
         profiles: _Profiles,
         *,
         from_level: str | None = None,
+        evidence: VerificationEvidence | None = None,
     ) -> StageResult:
         """HTTPS domain-control (§6 MVP identity mechanism；v0.3 级别语义）。
 
@@ -738,30 +795,7 @@ class VerificationService:
         agent 无法证明域名控制（rejected）。
         """
         agent = require_catalog_agent(self._conn, catalog_agent_id)
-        stored_domain = str(agent.get("canonical_domain") or "").strip()
-        details: dict[str, Any] = {
-            "method": "https_domain_control",
-            "domain_control_method": self._policy.domain_control_method,
-            "canonical_domain": stored_domain,
-        }
-        if not stored_domain:
-            evidence = _failed_evidence(
-                "domain_control",
-                "catalog agent has no canonical_domain; domain control cannot be verified",
-                details,
-            )
-            target = self._degrade_level_to_supported(agent, from_level=from_level)
-            self._apply_level(agent, target)
-            vid = self._persist_verification(catalog_agent_id, evidence, target)
-            return StageResult(
-                "domain_control", "rejected", target, reason=evidence.reason,
-                verification_id=vid, evidence=_evidence_payload(evidence, self._policy),
-            )
-        declared = {
-            "agent_card": profiles.urls["agent_card"],
-            "ucp_profile": profiles.urls["ucp_profile"],
-        }
-        evidence = self._identity_verifier.verify_domain_control(stored_domain, declared=declared)
+        evidence = evidence if evidence is not None else self._domain_control_evidence(catalog_agent_id, profiles)
         if evidence.passed:
             target = self._level_machine.transition(current, DOMAIN_VERIFIED)
             self._apply_level(agent, target)
@@ -1674,16 +1708,22 @@ class VerificationQueue:
         # 任务都有记录结果后才退出（unknown保持围栏）：关闭置位时用带超时的 get 周期复核排干
         # 条件。A343 不向有界工作队列放哨兵；空闲 get 亦周期检查关闭，
         # 避免 drained worker 先退使 shutdown 阻塞于放哨兵。
+        handoff_task: VerificationTask | None = None
+        task: VerificationTask | None
         while True:
             if self._shutdown.is_set() and self._admitted_drained():
                 break
-            try:
-                # Always bound the idle wait: shutdown no longer enqueues
-                # wakeups into the bounded work queue. This also covers a
-                # worker that starts waiting just before shutdown is set.
-                task = self._pending.get(timeout=self._SHUTDOWN_POLL_SECONDS)
-            except queue.Empty:
-                continue
+            from_pending = handoff_task is None
+            if handoff_task is not None:
+                # A full pending queue cannot make its only available consumer
+                # wait to put. This already-admitted deferred task keeps its
+                # atomic preclaim and is consumed by this worker locally.
+                task, handoff_task = handoff_task, None
+            else:
+                try:
+                    task = self._pending.get(timeout=self._SHUTDOWN_POLL_SECONDS)
+                except queue.Empty:
+                    continue
             try:
                 if task is None:
                     continue
@@ -1747,8 +1787,8 @@ class VerificationQueue:
                     self._results_cv.notify_all()
                 # review 2-31（A327）：完成收尾在同一 cv 块内——释放或**原子
                 # 移交**串行槽给 deferred 队首（preclaim），消除 discard→pop
-                # 分锁窗口；requeue 在 cv 外执行（有界队列可能阻塞，防 cv
-                # 死锁），期间 agent 保持 running 归属，新到达任务照常 defer。
+                # 分锁窗口；cv 外 put_nowait，满队列时本 worker 有界携带同一
+                # task，不重建身份/期限；期间 agent 保持 running 归属。
                 with self._results_cv:
                     self._results_cv.notify_all()
                     self._agent_running.discard(task.catalog_agent_id)
@@ -1762,10 +1802,14 @@ class VerificationQueue:
                         self._agent_deferred[task.catalog_agent_id] = waiting
                         self._results_cv.notify_all()
                 for d in requeue:
-                    self._pending.put(d)
+                    try:
+                        self._pending.put_nowait(d)
+                    except queue.Full:
+                        handoff_task = d
                 self._update_depth()
             finally:
-                self._pending.task_done()
+                if from_pending:
+                    self._pending.task_done()
 
     def _run_task_with_timeout(self, task: VerificationTask) -> VerificationTaskResult:
         started_at = self._now()

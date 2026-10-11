@@ -425,7 +425,8 @@ class EnrollmentAuthorizationApiTest(EnrollmentFixture):
         self._login_owner()
         preview = self.client.get(detail_url)
         self.assertEqual(preview.status_code, 200, preview.text)
-        self.assertEqual(preview.json()["user_code"], user_code)
+        self.assertNotIn("user_code", preview.json())
+        self.assertNotIn(user_code, preview.text)
         self.assertEqual(preview.json()["public_preview"]["name"], "Security Merchant A")
         # 预览不得泄漏设备码 / 运行时公钥 / 授权码。
         self.assertNotIn("device_code", preview.text)

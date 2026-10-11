@@ -228,6 +228,8 @@ def get_publication(
     if not publication_id:
         raise ValidationError("publication_id is required")
     with db_session(db_path) as conn:
+        from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
+        enforce_public_read_limit(conn, payload, surface="publication detail")
         row = publications_service.get_publication(conn, publication_id)
         if row is None:
             raise NotFoundError(f"Unknown publication: {publication_id}")

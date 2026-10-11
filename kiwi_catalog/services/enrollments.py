@@ -147,7 +147,9 @@ def public_enrollment(conn: sqlite3.Connection, enrollment_id: str) -> dict[str,
         status = "expired"
     else:
         status = str(row["status"])
-    return {"ok": True, "enrollment_id": enrollment_id, "user_code": row["user_code"],
+    # The device creation response is the sole user-code delivery. A session
+    # preview must not disclose the secret used to claim an unowned enrollment.
+    return {"ok": True, "enrollment_id": enrollment_id,
             "public_preview": json.loads(row["public_preview_json"]), "runtime_origin": row["runtime_origin"],
             "a2a_endpoint": row["a2a_endpoint"], "status": status, "requested_at": row["created_at"]}
 

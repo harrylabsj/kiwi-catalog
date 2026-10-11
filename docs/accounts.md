@@ -219,3 +219,9 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
   账号商家即使拥有旧 token，也不能用它发布 Listings。
 - 无账号存量商家的 Listings owner-token 路径默认关闭，仅迁移期间可显式
   设置 `KIWI_CATALOG_ENABLE_LEGACY_LISTINGS=on`；该开关不对账号商家生效。
+
+### 安全响应与登录预算
+
+`profile` 更新及重复 `token-request` 的响应保留 token 状态/商家元数据，但不回显明文。首次明确签发与已认证 `/me` 明示读取合同保持；后者记录不含原 token 的审计。enrollment 的 `user_code` 只在设备创建响应交给申请方，登录预览不回显，授权仍须申请方提供该码。
+
+`KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN` 默认为 10；空值、无效数值、0 或负数回退 10，正整数可调整预算。此配置不提供关闭登录/验证码/密码重置安全桶的选项。

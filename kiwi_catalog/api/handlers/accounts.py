@@ -94,7 +94,8 @@ def _login_rate_limit_per_15min() -> int:
 
     raw = os.environ.get(_LOGIN_RATE_LIMIT_PER_15MIN_ENV) or ""
     try:
-        return max(0, int(raw))
+        value = int(raw)
+        return value if value > 0 else 10
     except ValueError:
         return 10
 
@@ -430,7 +431,7 @@ def token_request(
     try:
         # 审查 P3：token-request 此前无限流——被拒/被吊销商户可循环重申请
         # 无限刷 admin 工单（每张需人工 reject）。复用登录限流的 env 值
-        # （0 = 禁用），按账号维度限流。
+        # （非正值回退安全默认），按账号维度限流。
         limit = _login_rate_limit_per_15min()
         if limit > 0:
             backend = SQLiteRateLimitBackend(
@@ -467,7 +468,7 @@ def token_request(
             purpose=str(payload.get("purpose") or ""),
             created_at=now_iso(),
         )
-    return {"ok": True, **result}
+    return {"ok": True, **_redact_token_plaintext(result)}
 
 
 def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -482,7 +483,7 @@ def profile(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             wechat=str(payload.get("wechat") or ""),
             agent_id=str(payload.get("agent_id") or ""),
         )
-        return {"ok": True, **view}
+        return {"ok": True, **_redact_token_plaintext(view)}
     finally:
         _ctx.__exit__(None, None, None)
 

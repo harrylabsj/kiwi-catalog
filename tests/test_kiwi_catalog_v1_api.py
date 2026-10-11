@@ -365,6 +365,11 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         )
 
         with db_session(self.db_path) as conn:
+            # A successful profile substitute must represent the complete stored pair.
+            from kiwi_catalog.agent_catalog.sqlite_repository import upsert_profile_endpoints
+            upsert_profile_endpoints(conn, self.cagt_id,
+                [{"kind": "ucp_profile", "url": "https://acme.example/ucp.json"}])
+            conn.commit()  # Complete fixture endpoint registration, not a service commit.
             service = VerificationService(conn)
             with mock.patch.object(
                 service,
@@ -383,10 +388,8 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             class _FakeProfiles:
                 card = _FakeCard()
                 ucp = None  # 参数求值需要属性存在；trust_evaluator 被 mock 忽略
-                urls = {
-                    "agent_card": "https://acme.example/a.json",
-                    "ucp_profile": "https://acme.example/u.json",
-                }
+                urls = {"agent_card": REGISTER_BODY["agent_card_url"],
+                    "ucp_profile": "https://acme.example/ucp.json"}
                 snapshot_ids = (1, 2)
 
             from kiwi_catalog.discovery.verifier import VerificationEvidence
@@ -400,6 +403,8 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                     expires_in_seconds=3600,
                 )
 
+            # The caller completes the first run result TX before another network run.
+            conn.commit()
             service2 = VerificationService(conn)
             service2._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
             service2._identity_verifier.verify_domain_control = _passing_domain_control  # type: ignore[method-assign]
@@ -445,10 +450,8 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
 
         class _FakeProfiles:
             card = _FakeCard()
-            urls = {
-                "agent_card": "https://acme.example/.well-known/agent-card.json",
-                "ucp_profile": "https://acme.example/ucp.json",
-            }
+            urls = {"agent_card": REGISTER_BODY["agent_card_url"],
+                    "ucp_profile": "https://acme.example/ucp.json"}
             snapshot_ids = (1, 2)
 
         def _failing_domain_control(_canonical: str, declared: dict | None = None) -> VerificationEvidence:
@@ -461,6 +464,11 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             )
 
         with db_session(self.db_path) as conn:
+            # A successful profile substitute must represent the complete stored pair.
+            from kiwi_catalog.agent_catalog.sqlite_repository import upsert_profile_endpoints
+            upsert_profile_endpoints(conn, self.cagt_id,
+                [{"kind": "ucp_profile", "url": "https://acme.example/ucp.json"}])
+            conn.commit()  # Complete fixture endpoint registration, not a service commit.
             set_state_domains(conn, self.cagt_id, verification_level="agent_verified")
             insert_verification(
                 conn,

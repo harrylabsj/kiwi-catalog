@@ -127,7 +127,7 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 - 每任务独立 SQLite 连接（不跨线程共享）、每任务 wall-clock 超时；
 - 超时后 supervisor 通知 runaway 线程放弃（**不再改写 ledger 结果**，
   与调用方拿到的 timeout 一致）；
-- crash recovery：重启后 pending/running 行重新入队（所有任务幂等）；
+- crash recovery：安全 pending 行可恢复入队；running 没有可靠未执行证据，重启后视为效果未知，保持同 agent 跨 kind 围栏，不自动重驱或按 TTL 清除。未知结果需人工核对效果；当前没有生产自动清 claim / admin 重驱 API。
 - 队列满 → fail-closed（注册仍成功但显式标注未入队，可稍后 verify）；
 - 单任务异常不杀 worker（并发预算不丢失）。
 
@@ -253,3 +253,7 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
   FTS/vector/语义搜索（v0.4 §8 MAY）；`/v1/listings/bulk-publish` 与
   listing_public_snapshots 历史快照表（v0.4 §14 optional）；refresh webhook
   （catalog → publisher 主动通知，v0.4 §15.1 MAY）。
+
+### 匿名观察统计与资源预算
+
+搜索关键词仍接受匿名观察，不代表已验证买家或真人。关键词聚合保留最近 7 个 UTC 日期，每日每类最多 1000 个新关键词；已接纳关键词继续累计，超过容量的新关键词仅不计入统计，不影响搜索结果。搜索及公开 publication 详情接入既有可信来源公开读预算（默认每 IP 每分钟 120），与心跳/写预算隔离。浏览计数表示已预算准入的详情请求量，不证明真人或跨 IP 唯一。

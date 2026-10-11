@@ -225,7 +225,7 @@ class MarketplaceASGIApp:
                 request_path=path,
             )
         finally:
-            _record_access_log()
+            await asyncio.to_thread(_record_access_log)
 
     @staticmethod
     async def _send_json(

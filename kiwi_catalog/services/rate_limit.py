@@ -85,10 +85,11 @@ class SQLiteRateLimitBackend:
         self._consume_count = 0
 
     def consume(self, *, key: str, window_start: str, limit: int) -> bool:
-        # 审查 P2：惰性清理——每 N 次消费顺带删过期窗口行（键空间此前只增不删）
+        # HTTP callers create a backend per request; the first consumption must
+        # prune too. Long-lived callers keep the existing periodic cadence.
         self._consume_count += 1
-        if self._consume_count % _RATE_LIMIT_PRUNE_EVERY == 0:
-            self._prune_expired_windows()
+        if self._consume_count == 1 or self._consume_count % _RATE_LIMIT_PRUNE_EVERY == 0:
+            self._prune_expired_windows(keep_window_start=window_start)
         cursor = self._conn.execute(
             f"""
             insert into {self._table}({self._key_column}, window_start, request_count, updated_at)
@@ -102,12 +103,20 @@ class SQLiteRateLimitBackend:
         )
         return cursor.rowcount == 1
 
-    def _prune_expired_windows(self) -> None:
+    def _prune_expired_windows(self, *, keep_window_start: str | None = None) -> None:
         cutoff = (_utc_now_naive() - timedelta(days=_RATE_LIMIT_RETENTION_DAYS)).isoformat()
         try:
-            self._conn.execute(
-                f"delete from {self._table} where window_start < ?", (cutoff,)
-            )
+            if keep_window_start is None:
+                self._conn.execute(
+                    f"delete from {self._table} where window_start < ?", (cutoff,)
+                )
+            else:
+                # A caller may supply a clock/window explicitly. Never reset
+                # the bucket it is consuming merely because wall time differs.
+                self._conn.execute(
+                    f"delete from {self._table} where window_start < ? and window_start <> ?",
+                    (cutoff, keep_window_start),
+                )
         except sqlite3.Error:
             # 清理失败不影响限流主路径（下一次消费再试）
             pass
