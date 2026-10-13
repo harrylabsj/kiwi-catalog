@@ -1031,6 +1031,11 @@ class AdminApplicationNotificationTest(unittest.TestCase):
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        # 本类只断言「接入申请」通知；注册本身也会通知运营（见
+        # RegistrationEmailTest），mock 掉以免污染 assert_called_once 计数。
+        registration_patch = mock.patch.object(accounts, "notify_admin_new_registration")
+        registration_patch.start()
+        self.addCleanup(registration_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
     def _register_and_apply(self) -> tuple[int, dict]:
@@ -1132,6 +1137,169 @@ class AdminApplicationNotificationTest(unittest.TestCase):
             cookie=cookie,
         )
         return status, applied
+
+
+class RegistrationEmailTest(unittest.TestCase):
+    """注册 → 通知运营邮箱；首次验证邮箱 → 发欢迎信。
+
+    语义要点与接入申请通知一致：两封都是**旁路**——SMTP 故障不得影响注册/验证
+    结果；且都必须在**事务提交之后**发出（发送时另开支路连接能读到已提交的行）。
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.db_path = os.path.join(tmp.name, "catalog.sqlite")
+        env = mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+                "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL": "1711496337@qq.com",
+            },
+            clear=True,
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        sender = mock.patch.object(accounts, "_send_email")
+        self.send = sender.start()
+        self.addCleanup(sender.stop)
+        self.app = create_catalog_app(self.db_path)
+
+    def register(self):
+        return _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({**REGISTER_BODY, "wechat": "acme-wechat"}).encode(),
+        )
+
+    def verify(self, code):
+        return _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/verify-email",
+            json.dumps({"email": REGISTER_BODY["email"], "code": code}).encode(),
+        )
+
+    def test_registration_notifies_admin_after_commit(self):
+        committed = []
+
+        def check_committed(to, subject, body):
+            with sqlite3.connect(self.db_path) as conn:
+                committed.append(
+                    conn.execute("select count(*) from merchant_accounts").fetchone()[0]
+                )
+
+        self.send.side_effect = check_committed
+        status, _, _ = self.register()
+        self.assertEqual(status, 200)
+        self.send.assert_called_once()
+        # 发信时账号已提交（旁路连接可见）——这正是「事务提交之后」的证明。
+        self.assertEqual(committed, [1])
+        to, subject, body = self.send.call_args.args
+        self.assertEqual(to, "1711496337@qq.com")
+        self.assertIn("Acme 商贸", subject)
+        for value in (
+            REGISTER_BODY["email"],
+            REGISTER_BODY["phone"],
+            "acme-wechat",
+            "merchant_id",
+            "待验证",
+        ):
+            self.assertIn(value, body)
+
+    def test_duplicate_registration_does_not_notify(self):
+        self.assertEqual(self.register()[0], 200)
+        self.send.reset_mock()
+        self.assertEqual(self.register()[0], 409)
+        self.send.assert_not_called()
+
+    def test_verification_email_failure_rolls_back_without_notifications(self):
+        """验证码邮件是 fail-closed：发信失败 → 注册回滚，运营也收不到通知。"""
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.send.side_effect = RuntimeError("smtp down")
+        from kiwi_catalog.api.handlers import accounts as handlers
+
+        with self.assertRaisesRegex(RuntimeError, "smtp down"):
+            handlers.register(self.db_path, REGISTER_BODY)
+        self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[1], "Kiwi 商家账号邮箱验证码")
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute("select count(*) from merchant_accounts").fetchone()[0], 0
+            )
+
+    def test_welcome_content_after_verification_commit_and_no_repeat(self):
+        _, registered, _ = self.register()
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.send.reset_mock()
+        committed = []
+
+        def check_committed(to, subject, body):
+            with sqlite3.connect(self.db_path) as conn:
+                committed.append(
+                    conn.execute("select email_verified from merchant_accounts").fetchone()[0]
+                )
+
+        self.send.side_effect = check_committed
+        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
+        self.send.assert_called_once()
+        self.assertEqual(committed, [1])
+        to, subject, body = self.send.call_args.args
+        self.assertEqual(to, REGISTER_BODY["email"])
+        self.assertEqual(subject, "欢迎成为 Kiwi 商家")
+        self.assertEqual(
+            body,
+            "Acme 商贸，\n\n"
+            "您好，感谢您注册成为kiwi 商家，欣赏您尝试新事物的勇气。"
+            "让我们一起开启Agentic Commerce 之旅。\n\n"
+            "我们的官网是: kiwi.harrylabsj.com , 有问题也可以随时添加我的微信（hhdshwe）联系。\n\n"
+            "感谢，\nKiwi 客服\n",
+        )
+        self.send.reset_mock()
+        # 重复验证 → 403，不重复发欢迎信。
+        self.assertEqual(self.verify(registered["verification_code"])[0], 403)
+        self.send.assert_not_called()
+
+    def test_invalid_verification_does_not_send_welcome(self):
+        self.register()
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.send.reset_mock()
+        self.assertEqual(self.verify("invalid")[0], 403)
+        self.send.assert_not_called()
+
+    def test_console_verification_does_not_send_welcome(self):
+        """console（开发/演示）模式不发真实邮件。"""
+        _, registered, _ = self.register()
+        self.send.reset_mock()
+        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
+        self.send.assert_not_called()
+
+    def test_notification_failures_do_not_break_registration_or_verification(self):
+        self.send.side_effect = RuntimeError("smtp down")
+        self.assertEqual(self.register()[0], 200)
+        # resend 在 console 模式随响应回新码（此步不发信，也不会发欢迎信）。
+        _, resent, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/resend-code",
+            json.dumps({"email": REGISTER_BODY["email"]}).encode(),
+        )
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.assertEqual(self.verify(resent["verification_code"])[0], 200)
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute("select email_verified from merchant_accounts").fetchone()[0], 1
+            )
+
+    def test_missing_admin_recipient_does_not_suppress_welcome(self):
+        """未配置运营邮箱只静默跳过注册通知，不影响后续欢迎信。"""
+        os.environ.pop("KIWI_CATALOG_ADMIN_NOTIFY_EMAIL")
+        _, registered, _ = self.register()
+        self.send.assert_not_called()
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
+        self.send.assert_called_once()
 
 
 if __name__ == "__main__":

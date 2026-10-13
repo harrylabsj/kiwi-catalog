@@ -300,6 +300,75 @@ _ADMIN_NOTIFY_EMAIL_ENV = "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL"
 _ADMIN_PORTAL_URL = "https://catalog.kiwi.harrylabsj.com/portal/dashboard"
 
 
+def notify_admin_new_registration(
+    *,
+    merchant_name: str,
+    account_email: str,
+    merchant_id: str,
+    account_id: int | str,
+    phone: str = "",
+    wechat: str = "",
+    created_at: str = "",
+) -> bool:
+    """商家**注册账号**（account 落库）后通知运营邮箱。
+
+    - 收件人同接入申请通知：env ``KIWI_CATALOG_ADMIN_NOTIFY_EMAIL``；未配置 →
+      返回 False 且不做任何事（本机/测试环境本就不发信，不是错误）。标题写明
+      「邮箱待验证」——此刻账号已建但 ``email_verified`` 仍为 0，商家尚不能登录。
+    - **不抛异常**：通知是旁路，SMTP 故障绝不能影响注册（与验证邮件的 fail-closed
+      语义刻意不同；先例见 services/access_log.py 的旁路写法）。调用方应在
+      **事务提交之后**调用。
+    - 返回是否真的发出（便于测试与日志）。
+    """
+    to = (os.environ.get(_ADMIN_NOTIFY_EMAIL_ENV) or "").strip()
+    if not to:
+        _LOGGER.warning("admin registration notification skipped: recipient is not configured")
+        return False
+    body = (
+        "新的商家注册（邮箱待验证）：\n\n"
+        f"商家名称：{merchant_name}\n"
+        f"账号邮箱：{account_email}\n"
+        f"联系电话：{phone or '(未填)'}\n"
+        f"微信：{wechat or '(未填)'}\n"
+        f"merchant_id：{merchant_id}\n"
+        f"account_id：{account_id}\n"
+        f"注册时间：{created_at}\n\n"
+        f"运营后台：{_ADMIN_PORTAL_URL}\n"
+    )
+    try:
+        # 标题单行化：商家名可含换行，避免 SMTP 头折行。
+        name = " ".join((merchant_name or account_email).splitlines())
+        _send_email(to, f"[Kiwi] 新商家注册：{name}", body)
+        return True
+    except Exception as exc:  # noqa: BLE001 —— 旁路：任何发信失败都不得影响注册
+        _LOGGER.warning("admin registration notification failed: %r", exc)
+        return False
+
+
+def send_welcome_email(*, merchant_name: str, account_email: str) -> bool:
+    """商家**首次验证邮箱**（事务提交后）发送欢迎信。
+
+    - 仅 smtp 模式发真实邮件；console/未配置模式返回 False（开发/演示环境本就
+      不发信，不是错误）。
+    - **不抛异常**：欢迎信是旁路，SMTP 故障不得影响邮箱验证结果。
+    """
+    if _verification_mode() != "smtp":
+        return False
+    body = (
+        f"{merchant_name}，\n\n"
+        "您好，感谢您注册成为kiwi 商家，欣赏您尝试新事物的勇气。"
+        "让我们一起开启Agentic Commerce 之旅。\n\n"
+        "我们的官网是: kiwi.harrylabsj.com , 有问题也可以随时添加我的微信（hhdshwe）联系。\n\n"
+        "感谢，\nKiwi 客服\n"
+    )
+    try:
+        _send_email(account_email, "欢迎成为 Kiwi 商家", body)
+        return True
+    except Exception as exc:  # noqa: BLE001 —— 旁路：失败不得影响邮箱验证
+        _LOGGER.warning("merchant welcome email failed: %r", exc)
+        return False
+
+
 def notify_admin_new_application(
     *,
     merchant_name: str,

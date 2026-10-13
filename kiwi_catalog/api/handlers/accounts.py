@@ -190,7 +190,7 @@ def register(
             phone=phone,
             wechat=wechat,
         )
-        return {
+        result = {
             "ok": True,
             "account_id": registered["account_id"],
             "email": registered["email"],
@@ -198,6 +198,18 @@ def register(
             # console 模式才返回明文验证码（smtp 模式为空串）
             "verification_code": registered.get("verification_code") or "",
         }
+    # 通知必须在事务提交之后：既保证账号与验证码已落库，也避免发信失败牵连注册
+    # ——notify_admin_new_registration 自身不抛异常（旁路语义）。
+    accounts_service.notify_admin_new_registration(
+        merchant_name=merchant_name,
+        account_email=str(registered["email"]),
+        merchant_id=str(registered["merchant_id"]),
+        account_id=registered["account_id"],
+        phone=phone,
+        wechat=wechat,
+        created_at=now_iso(),
+    )
+    return result
 
 
 def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -266,11 +278,18 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
         session_token = accounts_service.create_session(conn, int(account["account_id"]))
         view = accounts_service.account_view(conn, account)
         _audit_token_view(conn, account, view)
-        return {
+        result = {
             "ok": True,
             **_redact_token_plaintext(view),
             "__cookies__": [accounts_service.session_cookie_value(session_token)],
         }
+    # 欢迎信同样在提交之后发：验证结果已落库，发信失败不影响商家进入后台
+    # ——send_welcome_email 自身不抛异常（旁路语义）。
+    accounts_service.send_welcome_email(
+        merchant_name=str(account.get("merchant_name") or ""),
+        account_email=str(account["email"]),
+    )
+    return result
 
 
 def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
