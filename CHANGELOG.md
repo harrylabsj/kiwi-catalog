@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.6 — 2026-10-13
+
+- Registration and welcome emails. `notify_admin_new_registration` emails the operations inbox (`KIWI_CATALOG_ADMIN_NOTIFY_EMAIL`) after a merchant account commits — the subject carries「邮箱待验证」because the account exists but `email_verified` is still 0 at that moment, so the merchant cannot log in yet. `send_welcome_email` sends a one-off welcome note to the merchant on first successful email verification (smtp mode only; console/未配置模式返回 False). Both are side-channel: they never raise, so an SMTP failure cannot affect registration or verification — deliberately the opposite of the verification code's fail-closed semantics — and both are called **after** the `db_session` transaction commits.
+- **Repo/main alignment**: this behaviour shipped to production on 2026-10-09 as a runtime `patch` applied directly to `/opt/kiwi-catalog-0.5.5/.venv/.../site-packages` (see `runtime-email.patch`), which is why the running service sends the notification while `main` did not. The ported functions are byte-identical to the deployed code apart from docstrings/comments; the two call sites are otherwise unchanged.
+
 ## 0.5.5 — 2026-10-01
 
 - Launch preflight: new `kiwi_catalog.a2a.launch_preflight.issuance_preflight` reuses the existing fail-closed validators (`load_issuer_key_set`, `catalog_public_origin`) to check the issuance-required configuration — issuer key set (exactly one ACTIVE key via `KIWI_CATALOG_ISSUER_KEYS_FILE` or the single-key env fallback) and `KIWI_CATALOG_PUBLIC_ORIGIN` — and reports fixed codes (`ISSUER_KEY_OK`/`ISSUER_KEY_REJECTED`, `PUBLIC_ORIGIN_OK`/`PUBLIC_ORIGIN_REJECTED`). Read-only: no network access, no key generation, no private-key material or key-file paths in the report.
