@@ -574,17 +574,30 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         status, registered = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/register",
-            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
+            "/v1/accounts/register/code",
+            json.dumps({"email": email}).encode(),
         )
         self.assertEqual(status, 200, registered)
-        status, _ = _call_http(
+        status, ticket = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/verify-email",
+            "/v1/accounts/register/verify",
             json.dumps({"email": email, "code": registered["verification_code"]}).encode(),
         )
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, ticket)
+        status, registered = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register",
+            json.dumps({
+                "merchant_name": "Acme 商贸",
+                "email": email,
+                "password": "strong-pw-123",
+                "phone": "+86 138 0000 0000",
+                "verification_ticket": ticket["verification_ticket"],
+            }).encode(),
+        )
+        self.assertEqual(status, 200, registered)
         with db_session(self.db_path) as conn:
             account_id = conn.execute(
                 "select account_id from merchant_accounts where email = ?", (email,)

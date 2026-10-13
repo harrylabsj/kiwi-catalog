@@ -91,6 +91,20 @@ def _register_and_login(app, email: str, merchant_name: str) -> str:
     status, payload, _ = _call_http(
         app,
         "POST",
+        "/v1/accounts/register/code",
+        json.dumps({"email": email}).encode(),
+    )
+    assert status == 200, payload
+    status, payload, _ = _call_http(
+        app,
+        "POST",
+        "/v1/accounts/register/verify",
+        json.dumps({"email": email, "code": payload["verification_code"]}).encode(),
+    )
+    assert status == 200, payload
+    status, payload, headers = _call_http(
+        app,
+        "POST",
         "/v1/accounts/register",
         json.dumps(
             {
@@ -98,15 +112,9 @@ def _register_and_login(app, email: str, merchant_name: str) -> str:
                 "email": email,
                 "password": "strong-pw-123",
                 "phone": "+86 138 0000 0000",
+                "verification_ticket": payload["verification_ticket"],
             }
         ).encode(),
-    )
-    assert status == 200, payload
-    status, payload, headers = _call_http(
-        app,
-        "POST",
-        "/v1/accounts/verify-email",
-        json.dumps({"email": email, "code": payload["verification_code"]}).encode(),
     )
     assert status == 200, payload
     return headers["set-cookie"].split(";")[0]
@@ -504,18 +512,24 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
 
         with TestClient(self.app) as client:
             resp = client.post(
+                "/v1/accounts/register/code", json={"email": "fa@acme.example"}
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            code = resp.json()["verification_code"]
+            resp = client.post(
+                "/v1/accounts/register/verify",
+                json={"email": "fa@acme.example", "code": code},
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            resp = client.post(
                 "/v1/accounts/register",
                 json={
                     "merchant_name": "FastAPI 商贸",
                     "email": "fa@acme.example",
                     "password": "strong-pw-123",
                     "phone": "+86 138 0000 0000",
+                    "verification_ticket": resp.json()["verification_ticket"],
                 },
-            )
-            self.assertEqual(resp.status_code, 200, resp.text)
-            code = resp.json()["verification_code"]
-            resp = client.post(
-                "/v1/accounts/verify-email", json={"email": "fa@acme.example", "code": code}
             )
             self.assertEqual(resp.status_code, 200, resp.text)
             # Set-Cookie 带 Secure 属性，TestClient 的 http://testserver 不会回

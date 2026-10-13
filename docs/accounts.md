@@ -26,7 +26,7 @@ owner token 双路径（`api/auth.py`）：
 - **HMAC fallback**（legacy）：`owner_token(merchant_id) = HMAC-SHA256(
   KIWI_CATALOG_OWNER_TOKEN_SECRET, "kiwi-catalog-owner:"+merchant_id)`。
 
-## 2. 数据模型（当前 schema 41）
+## 2. 数据模型（当前 schema 42）
 
 | 表 | 用途 |
 | --- | --- |
@@ -35,6 +35,7 @@ owner token 双路径（`api/auth.py`）：
 | `merchants` | 商家影子表（admin dashboard 只读；**注册即创建**——`register_account` 经 `ensure_merchant_id` 同步 `insert or ignore`，审批/Agent 注册兜底；存量账号会话解析懒回填） |
 | `merchant_applications` | 接入申请（merchant_id、状态 pending/approved/rejected、工单字段） |
 | `merchant_application_limits` | 注册/登录/申请/公开资料发布/买家关注限流（per-email / per-actor / per-merchant / per-buyer 15min 窗口） |
+| `registration_verifications` | 邮箱先行注册的**预验证**记录（v42）：一邮箱一行。账号还不存在时验证码无处依附（v15 的 `verification_code_hash` 寄生在 `merchant_accounts` 行上），所以单独建表；验码通过后码作废、改发 15 分钟的一次性 `ticket_hash`，建号成功即删行。过期行由 `register/code` 顺手惰性清理 |
 | `merchant_tokens` | 签发 token（`token_encrypted` Fernet 加密存储，active/revoked；注册种入空 hash 的 revoked 占位行） |
 | `listing_plans` | 方案额度；free 初始为 20，可由管理员修改 |
 | `merchant_listing_entitlements` | 商家方案、资格状态和可选的单商家额度覆盖 |
@@ -50,8 +51,9 @@ owner token 双路径（`api/auth.py`）：
   落库 + 15 分钟过期）、v25（联系方式微信：merchant_accounts 加 `wechat`）、
   v29（商家公开资料 merchant_publications，M0）、v30（买家订阅：
   merchant_public_events + buyer_follows + merchant_publications.view_count，
-  M4）；v40（商品名额与治理暂停保护）、v41（未自定义的免费默认额度从 10 调整到 20）；
-  `CURRENT_SCHEMA_VERSION = 41`。
+  M4）；v40（商品名额与治理暂停保护）、v41（未自定义的免费默认额度从 10 调整到 20）、
+  v42（邮箱先行注册的预验证表 `registration_verifications`）；
+  `CURRENT_SCHEMA_VERSION = 42`。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
   ——token 明文永不落盘。
 
@@ -61,10 +63,12 @@ owner token 双路径（`api/auth.py`）：
 
 | 路由 | 语义 |
 | --- | --- |
-| `POST /v1/accounts/register` | 注册商家账号（**商家名称、电话必填** + 邮箱 + 密码；微信选填）→ 分配 merchant_id、影子 `merchants` 行和 free 商品方案（默认 20 个名额）→ 签发邮箱验证码；验证后才能公开发布 Listings |
+| `POST /v1/accounts/register/code` | **邮箱先行第一步**：为尚未注册的邮箱签发 6 位验证码（15 分钟）。邮箱已注册 → 409（明确提示，接受枚举代价换取 UX 清晰）。响应回显 `verification_code`（console 模式） |
+| `POST /v1/accounts/register/verify` | **第二步**：校验验证码 → 返回一次性 `verification_ticket`（15 分钟、单次使用）。失败一律同形 403，不区分"没发过码/码错/码过期" |
+| `POST /v1/accounts/register` | **第三步**：凭 `verification_ticket` 建号（**商家名称、电话必填** + 邮箱 + 密码 + 微信选填）→ 分配 merchant_id、影子 `merchants` 行和 free 商品方案（默认 20 个名额）→ **建号即 `email_verified=1`** 并自动登录（`__cookies__`）。ticket 缺失/过期 → 403；邮箱已注册 → 409 |
 | `POST /v1/accounts/login` | 校验 + 签发会话（`__cookies__` 透传）；邮箱未验证 → 403 |
-| `POST /v1/accounts/verify-email` | 验证码核验（通过后才可登录） |
-| `POST /v1/accounts/resend-code` | 重发验证码 |
+| `POST /v1/accounts/verify-email` | 验证码核验（通过后才可登录）。**legacy**：邮箱先行改造后不再有新账号处于未验证态，本端点只服务 2026-10-13 之前的存量账号 |
+| `POST /v1/accounts/resend-code` | 重发验证码。**legacy**：同上，且是存量未验证账号唯一的取码途径 |
 | `POST /v1/accounts/forgot-password` | 签发密码重置验证码；**防枚举**：邮箱不存在也返回同样的 ok 文案（不发码）；console 模式响应含 `reset_code`，smtp 模式发邮件 |
 | `POST /v1/accounts/reset-password` | 重置码 + 新密码改密；账号不存在与码错误统一 403（不区分）；成功后该账号全部会话失效、邮箱标记已验证 |
 | `POST /v1/accounts/logout` | 吊销会话 |
@@ -72,7 +76,32 @@ owner token 双路径（`api/auth.py`）：
 | `POST /v1/accounts/token-request` | 旧 owner-token 申请 API；不用于新 Listings 流程，门户不提供申请按钮 |
 | `GET /v1/accounts/profile` | 会话账号 + 名下 merchants 状态 |
 
-限流：register/login 均 15min 窗口 per-email（`merchant_application_limits`）。
+限流：全部走 `merchant_application_limits`、15 分钟窗口。登录链路 per-email
+（`register` / `login` / `verify-email` / `resend-code` / `forgot` / `reset-password`）。
+**发码与建号额外带 per-IP 前缀桶和全局发信预算**（`register-code:` /
+`register-code-ip:` / `register-code-email:global`，`register-verify:` /
+`register-verify-ip:`，以及建号侧的 `register:` / `register-ip:`）——发码是未认证
+端点向任意地址发信，只靠 per-email 挡不住轮换邮箱的邮件轰炸。
+
+### 3.1.1 邮箱先行注册流程（v42 起）
+
+```
+POST /v1/accounts/register/code    {email}              → 发码（邮箱已注册则 409）
+POST /v1/accounts/register/verify  {email, code}        → 换一次性 verification_ticket
+POST /v1/accounts/register         {email, password, merchant_name, phone, wechat,
+                                    verification_ticket} → 建号 + 自动登录
+```
+
+顺序是**先证明邮箱归属、再创建账号**：账号一旦存在就是可登录的，"已注册、
+邮箱待验证"的中间态对新账号不再出现（老流程下商家一旦中途放弃或填错邮箱，
+库里就留下一条永远无法登录、也无法回收的账号行）。
+
+- `verification_ticket` 是**必须**的，且由服务端强制校验——注册页把字段置灰
+  只是 UX，绕过页面直接调接口同样建不了号。
+- 之所以发一次性 ticket 而不是记一个"该邮箱 15 分钟内已验证"的时间戳：后者
+  是一个没有凭据的能力，任何知道该邮箱的人都能在窗口内抢先建号并设自己的
+  密码（账号接管）。ticket 只有真正读到过验证码的人持有。
+- 验证码邮件仍是 **fail-closed**：发不出去就整个事务回滚，不留半条待验证记录。
 
 ### 3.2 `/v1/merchants/*`（token 分发，owner/admin）
 

@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 41
+CURRENT_SCHEMA_VERSION = 42
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1394,32 @@ def migration_041_free_listing_limit(conn: sqlite3.Connection) -> None:
                     '{"old_limit":10,"new_limit":20}',?)""", (now,))
 
 
+def migration_042_registration_verifications(conn: sqlite3.Connection) -> None:
+    """邮箱先行注册的预验证记录（邮箱还不存在账号时的验证码宿主）。
+
+    v15 把验证码寄生在 merchant_accounts 行上；新流程要求"验证邮箱归属
+    之后才建号"，此刻没有账号行可依附，因此单独建表。验码通过后签发一次性
+    ticket（见 services/accounts.py 的 consume_registration_ticket）。过期行
+    的清理由 register/code 顺手去做（与 connector_identity_requests 同款惰性
+    策略），迁移本身不删数据。
+    """
+    conn.execute("""
+    create table if not exists registration_verifications (
+        email text primary key,
+        code_hash text not null default '',
+        code_expires_at text not null default '',
+        ticket_hash text not null default '',
+        ticket_expires_at text not null default '',
+        created_at text not null,
+        updated_at text not null
+    )
+    """)
+    conn.execute(
+        "create index if not exists idx_registration_verifications_expiry"
+        " on registration_verifications(code_expires_at)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1436,6 +1462,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(39, "enrollments", migration_039_enrollments),
     Migration(40, "listing_entitlements", migration_040_listing_entitlements),
     Migration(41, "free_listing_limit", migration_041_free_listing_limit),
+    Migration(42, "registration_verifications", migration_042_registration_verifications),
 )
 
 

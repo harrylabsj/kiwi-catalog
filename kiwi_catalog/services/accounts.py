@@ -45,7 +45,12 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kiwi_catalog.core.errors import ConflictError, ShoppingCliError, ValidationError
+from kiwi_catalog.core.errors import (
+    AuthError,
+    ConflictError,
+    ShoppingCliError,
+    ValidationError,
+)
 from kiwi_catalog.core.tokens import token_digest, token_matches
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
@@ -254,6 +259,133 @@ def issue_verification(
     raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
 
 
+def _registration_expiry(*, minutes: int = 15) -> str:
+    """15 分钟口径的过期时刻——与 store_verification_code / issue_password_reset
+    的硬编码 15 分钟同一约定（那两处暂未抽常量，此处不顺手改，避免混入无关改动）。"""
+    return (datetime.now(UTC) + timedelta(minutes=minutes)).replace(
+        microsecond=0
+    ).isoformat()
+
+
+def purge_expired_registrations(
+    conn: sqlite3.Connection, *, keep_seconds: int = 86_400
+) -> int:
+    """惰性清理预验证行：删掉过期超过 keep_seconds 的记录，返回删除条数。
+
+    形状参照 services/connector_identity.py 的 `delete ... where expires_at < ?`。
+    这里比 15 分钟多留一天，便于排查"商家说收到码但注册不上"这类工单；
+    调用方在 start 里顺手执行，不引独立定时任务。
+    """
+    cutoff = (
+        datetime.now(UTC) - timedelta(seconds=keep_seconds)
+    ).replace(microsecond=0).isoformat()
+    cursor = conn.execute(
+        "delete from registration_verifications"
+        " where coalesce(nullif(ticket_expires_at, ''), code_expires_at) < ?",
+        (cutoff,),
+    )
+    return int(cursor.rowcount or 0)
+
+
+def start_registration(conn: sqlite3.Connection, email: str) -> str:
+    """邮箱先行注册第一步：为「尚未注册」的邮箱签发注册验证码。
+
+    console 模式返回明文码（开发/演示，也是验收脚本的契约）；smtp 模式返回
+    空串。**发信失败抛异常**（fail-closed，与 issue_verification 同款语义）：
+    发不出码就整事务回滚，不留半条记录。
+
+    调用方必须先确认该邮箱未注册——这里不做存在性检查，重复注册由
+    register_account 的 UNIQUE 约束兜底。
+    """
+    normalized = str(email or "").strip().lower()
+    code = generate_verification_code()
+    now = now_iso()
+    conn.execute(
+        "insert into registration_verifications"
+        " (email, code_hash, code_expires_at, ticket_hash, ticket_expires_at,"
+        "  created_at, updated_at)"
+        " values (?, ?, ?, '', '', ?, ?)"
+        " on conflict(email) do update set"
+        " code_hash = excluded.code_hash,"
+        " code_expires_at = excluded.code_expires_at,"
+        # 重发即作废上一张 ticket：否则反复点"重新发送"能刷出多张有效凭据。
+        " ticket_hash = '',"
+        " ticket_expires_at = '',"
+        " updated_at = excluded.updated_at",
+        (normalized, token_digest(code), _registration_expiry(), now, now),
+    )
+    mode = _verification_mode()
+    if mode == "console":
+        return code
+    if mode == "smtp":
+        send_verification_email(normalized, code)
+        return ""
+    raise RuntimeError(
+        "email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)"
+    )
+
+
+def verify_registration_code(
+    conn: sqlite3.Connection, email: str, code: str
+) -> str:
+    """校验注册验证码：恒时比较 + 未过期；成则返回一次性 ticket，失败返回空串。
+
+    成功副作用：码当场作废（一次性）、签发 ``secrets.token_urlsafe(32)`` 的
+    ticket 并落 SHA-256、15 分钟过期。register_account 必须凭这张 ticket 才
+    建号——**不能只记"该邮箱已验证"的时间戳**，那等于一个没有凭据的能力：
+    任何知道该邮箱的人都能在窗口内抢先建号并设自己的密码（账号接管）。
+    ticket 只有真正读到过验证码的人持有。
+    """
+    normalized = str(email or "").strip().lower()
+    row = conn.execute(
+        "select code_hash, code_expires_at from registration_verifications where email = ?",
+        (normalized,),
+    ).fetchone()
+    if row is None:
+        return ""
+    stored_hash = str(row["code_hash"] or "")
+    if not stored_hash or not token_matches(
+        token_digest(str(code or "").strip()), stored_hash
+    ):
+        return ""
+    if str(row["code_expires_at"] or "") < now_iso():
+        return ""
+    ticket = secrets.token_urlsafe(32)
+    now = now_iso()
+    conn.execute(
+        "update registration_verifications set code_hash = '', code_expires_at = '',"
+        " ticket_hash = ?, ticket_expires_at = ?, updated_at = ? where email = ?",
+        (token_digest(ticket), _registration_expiry(), now, normalized),
+    )
+    return ticket
+
+
+def consume_registration_ticket(
+    conn: sqlite3.Connection, *, email: str, ticket: str
+) -> bool:
+    """校验并**一次性消费**注册 ticket；返回是否成功。
+
+    单条条件 DELETE 同时完成"比对 + 过期检查 + 标记已用"，SQLite 的写事务
+    串行化保证并发两个标签页只有一个拿到 rowcount == 1，另一个直接 403——
+    不会双双走到 INSERT 去撞 email 的 UNIQUE 约束。
+
+    这里不做恒时比较：比对的是 256 位熵的一次性 ticket，SQL 等值查找的时序
+    侧信道不适用。6 位验证码那条路径仍必须走 ``token_matches``。
+    """
+    if not ticket:
+        return False
+    cursor = conn.execute(
+        "delete from registration_verifications"
+        " where email = ? and ticket_hash = ? and ticket_expires_at > ?",
+        (
+            str(email or "").strip().lower(),
+            token_digest(str(ticket).strip()),
+            now_iso(),
+        ),
+    )
+    return cursor.rowcount == 1
+
+
 def verify_email_code(
     conn: sqlite3.Connection, account_id: int, code: str
 ) -> bool:
@@ -313,8 +445,8 @@ def notify_admin_new_registration(
     """商家**注册账号**（account 落库）后通知运营邮箱。
 
     - 收件人同接入申请通知：env ``KIWI_CATALOG_ADMIN_NOTIFY_EMAIL``；未配置 →
-      返回 False 且不做任何事（本机/测试环境本就不发信，不是错误）。标题写明
-      「邮箱待验证」——此刻账号已建但 ``email_verified`` 仍为 0，商家尚不能登录。
+      返回 False 且不做任何事（本机/测试环境本就不发信，不是错误）。账号在
+      此刻已可登录（邮箱先行：建号时 ``email_verified`` 即为 1）。
     - **不抛异常**：通知是旁路，SMTP 故障绝不能影响注册（与验证邮件的 fail-closed
       语义刻意不同；先例见 services/access_log.py 的旁路写法）。调用方应在
       **事务提交之后**调用。
@@ -325,7 +457,7 @@ def notify_admin_new_registration(
         _LOGGER.warning("admin registration notification skipped: recipient is not configured")
         return False
     body = (
-        "新的商家注册（邮箱待验证）：\n\n"
+        "新的商家注册：\n\n"
         f"商家名称：{merchant_name}\n"
         f"账号邮箱：{account_email}\n"
         f"联系电话：{phone or '(未填)'}\n"
@@ -600,14 +732,24 @@ def register_account(
     merchant_name: str = "",
     phone: str = "",
     wechat: str = "",
+    verification_ticket: str = "",
 ) -> dict[str, Any]:
     """注册商家账号（邮箱 + 密码 + 商家名称 + 联系方式）→ 建账号 + 分配
-    merchant_id + 影子 merchants 行 + 签发邮箱验证码。
+    merchant_id + 影子 merchants 行。
+
+    **邮箱先行**：调用前必须先走 register/code → register/verify 拿到一次性
+    ticket，本函数校验并消费它——这是"邮箱归属已证明"的唯一凭据。建号即
+    ``email_verified=1``（商家不必也不能再验证一次同一邮箱），因此"先注册
+    再验证"的中间态对新账号不再存在。
+
+    ``verification_ticket`` 默认空串：任何漏传的调用方**默认被拒**，不设
+    "缺失时跳过校验"的分支（那是一条静默旁路）。校验失败抛 ``AuthError``
+    （403）；任何后续步骤抛错都由调用方事务回滚——ticket 会随之归还，商家
+    不必重新验证。
 
     电话必填、微信选填（联系方式，注册即记、基本信息页可改）。注册即成为
     商家（admin dashboard 无需审批即可见）；商家令牌仍需在「我的账户」提交
-    申请工单并经 admin 审批签发。发送验证码失败 → RuntimeError → 注册事务
-    回滚（fail-closed）。
+    申请工单并经 admin 审批签发。
     """
     email = str(email or "").strip().lower()
     merchant_name = str(merchant_name or "").strip()
@@ -630,6 +772,12 @@ def register_account(
     if len(password) > 200:
         raise ValidationError("password too long")
 
+    # ticket 校验放在输入校验之后：否则 400 会被 403 掩盖，商家看不出是
+    # 字段填错还是验证过期。这里是**服务端**的唯一防线——页面上的字段解锁
+    # 只是 UX，绕过页面直接调接口必须同样被拒。
+    if not consume_registration_ticket(conn, email=email, ticket=verification_ticket):
+        raise AuthError("email verification required or expired — verify your email first")
+
     existing = conn.execute(
         "select account_id from merchant_accounts where email = ?", (email,)
     ).fetchone()
@@ -637,12 +785,18 @@ def register_account(
         raise ConflictError("email already registered")
 
     now = now_iso()
-    cursor = conn.execute(
-        "insert into merchant_accounts"
-        " (email, password_hash, status, merchant_name, phone, wechat, created_at, updated_at)"
-        " values (?, ?, 'active', ?, ?, ?, ?, ?)",
-        (email, hash_password(password), merchant_name, phone, wechat, now, now),
-    )
+    try:
+        cursor = conn.execute(
+            "insert into merchant_accounts"
+            " (email, password_hash, status, merchant_name, phone, wechat,"
+            "  email_verified, created_at, updated_at)"
+            " values (?, ?, 'active', ?, ?, ?, 1, ?, ?)",
+            (email, hash_password(password), merchant_name, phone, wechat, now, now),
+        )
+    except sqlite3.IntegrityError as exc:
+        # UNIQUE(email) 兜底：并发建号时先到的赢。IntegrityError 不是
+        # ShoppingCliError，不收敛会经错误映射变成 500 而不是 409。
+        raise ConflictError("email already registered") from exc
     account_id = int(cursor.lastrowid or 0)
     # 注册完成即分配平台 merchant_id（免费通道与审批商家同一身份空间），
     # 影子 merchants 行由 ensure_merchant_id 同步创建——注册即商家，admin
@@ -661,14 +815,12 @@ def register_account(
             " values (?, '', '', 'revoked', ?, ?)",
             (merchant_id, now, now),
         )
-    verification_code = issue_verification(conn, account_id, email)
     return {
         "account_id": account_id,
         "email": email,
         "merchant_id": merchant_id,
         "status": "active",  # 注册即商家；令牌状态单独看 token
-        "email_verified": False,
-        "verification_code": verification_code,  # console 模式才有值
+        "email_verified": True,  # 邮箱先行：建号时验证已完成（ticket 已消费）
     }
 
 

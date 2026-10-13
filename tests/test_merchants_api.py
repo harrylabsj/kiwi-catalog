@@ -142,17 +142,30 @@ class MerchantsApiTest(unittest.TestCase):
         status, payload, _ = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/register",
-            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": "strong-pw-123", "phone": "+86 138 0000 0000"}).encode(),
+            "/v1/accounts/register/code",
+            json.dumps({"email": email}).encode(),
         )
         self.assertEqual(status, 200, payload)
         code = payload["verification_code"]
         self.assertTrue(code, "console 模式应返回验证码")
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register/verify",
+            json.dumps({"email": email, "code": code}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
         status, payload, headers = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/verify-email",
-            json.dumps({"email": email, "code": code}).encode(),
+            "/v1/accounts/register",
+            json.dumps({
+                "merchant_name": "Acme 商贸",
+                "email": email,
+                "password": "strong-pw-123",
+                "phone": "+86 138 0000 0000",
+                "verification_ticket": payload["verification_ticket"],
+            }).encode(),
         )
         self.assertEqual(status, 200, payload)
         return headers["set-cookie"].split(";")[0].split("=", 1)[1]

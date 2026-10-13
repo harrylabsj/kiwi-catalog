@@ -104,18 +104,23 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
 
     def _register(self, email: str = "ops@acme.example") -> str:
-        """注册（console 模式）并验证邮箱，返回会话 token。"""
+        """邮箱先行注册（发码 → 验码换 ticket → 建号），返回会话 token。"""
         body = {**BASE_REGISTER_BODY, "email": email}
         status, payload, _ = _call_http(
-            self.app, "POST", "/v1/accounts/register", json.dumps(body).encode()
+            self.app, "POST", "/v1/accounts/register/code",
+            json.dumps({"email": email}).encode(),
         )
         self.assertEqual(status, 200, payload)
-        code = payload["verification_code"]
-        status, payload, headers = _call_http(
+        status, payload, _ = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/verify-email",
-            json.dumps({"email": email, "code": code}).encode(),
+            "/v1/accounts/register/verify",
+            json.dumps({"email": email, "code": payload["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        body["verification_ticket"] = payload["verification_ticket"]
+        status, payload, headers = _call_http(
+            self.app, "POST", "/v1/accounts/register", json.dumps(body).encode()
         )
         self.assertEqual(status, 200, payload)
         return headers["set-cookie"].split(";")[0].split("=", 1)[1]
@@ -361,14 +366,20 @@ class AccountCardGovernanceTest(unittest.TestCase):
     def _register(self, email: str = "ops@acme.example") -> str:
         body = {**BASE_REGISTER_BODY, "email": email}
         status, payload, _ = _call_http(
-            self.app, "POST", "/v1/accounts/register", json.dumps(body).encode()
+            self.app, "POST", "/v1/accounts/register/code",
+            json.dumps({"email": email}).encode(),
         )
         self.assertEqual(status, 200, payload)
-        status, payload, headers = _call_http(
+        status, payload, _ = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/verify-email",
+            "/v1/accounts/register/verify",
             json.dumps({"email": email, "code": payload["verification_code"]}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        body["verification_ticket"] = payload["verification_ticket"]
+        status, payload, headers = _call_http(
+            self.app, "POST", "/v1/accounts/register", json.dumps(body).encode()
         )
         self.assertEqual(status, 200, payload)
         return headers["set-cookie"].split(";")[0].split("=", 1)[1]

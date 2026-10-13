@@ -19,7 +19,7 @@ class AccountBoundariesTest(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.addCleanup(shutil.rmtree, fixture.tmp)
-        session, _ = fixture._register()
+        session = fixture._register()
         return fixture, session
 
     def test_unclaimed_enrollment_preview_does_not_disclose_authorization_code(self):

@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from kiwi_catalog.db.migrations import run_migrations
+from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION, run_migrations
 from kiwi_catalog.discovery import fetcher as fetcher_mod
 from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher, TrustPolicy, _resolve_and_validate
 
@@ -190,15 +190,15 @@ class MigrationOwnershipTest(unittest.TestCase):
                 raise RuntimeError("boom mid-chain")
 
         original = mig_mod.MIGRATIONS
-        run_migrations(conn)  # 迁到 CURRENT (41)
+        run_migrations(conn)  # 迁到 CURRENT
         with mock.patch.object(mig_mod, "MIGRATIONS", original + (_Boom,)):
-            conn.execute("pragma user_version = 41")  # 只触发 _Boom
+            conn.execute(f"pragma user_version = {CURRENT_SCHEMA_VERSION}")  # 只触发 _Boom
             with self.assertRaises(RuntimeError) as ctx:
                 run_migrations(conn)
             self.assertIn("boom mid-chain", str(ctx.exception))
             self.assertFalse(conn.in_transaction)  # own-tx 已收尾（回滚）
-        # 库未被 _Boom 半途写入破坏（v41 状态保持）
-        self.assertEqual(conn.execute("pragma user_version").fetchone()[0], 41)
+        # 库未被 _Boom 半途写入破坏（CURRENT 状态保持）
+        self.assertEqual(conn.execute("pragma user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
 
     def test_apply_exception_keeps_caller_outer_and_reraises_original(self):
         import tempfile
@@ -222,7 +222,7 @@ class MigrationOwnershipTest(unittest.TestCase):
         original = mig_mod.MIGRATIONS
         try:
             conn.execute("BEGIN")  # caller 外层事务
-            conn.execute("pragma user_version = 41")  # 跳过既有链，只触发 _Boom
+            conn.execute(f"pragma user_version = {CURRENT_SCHEMA_VERSION}")  # 跳过既有链，只触发 _Boom
             with mock.patch.object(mig_mod, "MIGRATIONS", original + (_Boom,)):
                 with self.assertRaises(RuntimeError) as ctx:
                     run_migrations(conn)
@@ -237,7 +237,7 @@ class MigrationOwnershipTest(unittest.TestCase):
         conn, run = self._fresh()
         run(conn)
         uv = conn.execute("pragma user_version").fetchone()[0]
-        self.assertEqual(uv, 41)
+        self.assertEqual(uv, CURRENT_SCHEMA_VERSION)
 
 if __name__ == "__main__":
     unittest.main()

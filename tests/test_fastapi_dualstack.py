@@ -355,13 +355,18 @@ class FastApiDualStackTest(unittest.TestCase):
             clear=False,
         ):
             with TestClient(self.app) as client:
+                resp = client.post(
+                    "/v1/accounts/register/code", json={"email": "hb@acme.example"}
+                )
+                self.assertEqual(resp.status_code, 200, resp.text)
+                resp = client.post("/v1/accounts/register/verify", json={
+                    "email": "hb@acme.example", "code": resp.json()["verification_code"],
+                })
+                self.assertEqual(resp.status_code, 200, resp.text)
                 resp = client.post("/v1/accounts/register", json={
                     "merchant_name": "HB 商贸", "email": "hb@acme.example",
                     "password": "strong-pw-123", "phone": "+86 138 0000 0000",
-                })
-                self.assertEqual(resp.status_code, 200, resp.text)
-                resp = client.post("/v1/accounts/verify-email", json={
-                    "email": "hb@acme.example", "code": resp.json()["verification_code"],
+                    "verification_ticket": resp.json()["verification_ticket"],
                 })
                 self.assertEqual(resp.status_code, 200, resp.text)
                 # TestClient 的 cookie jar 不会把 Secure cookie 回传给 http://testserver

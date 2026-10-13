@@ -760,6 +760,16 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         )
         return body
 
+    @app.post("/v1/accounts/register/code")
+    def v1_account_request_register_code(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        # 必须走 _rate_limit_ip_payload：否则 payload['_client_ip'] 为空，
+        # _client_ip_prefix 归 "unknown"，全体客户端共享一个 per-IP 桶。
+        return accounts_handlers.request_register_code(db_path, _rate_limit_ip_payload(request, payload))
+
+    @app.post("/v1/accounts/register/verify")
+    def v1_account_verify_register_code(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.verify_register_code(db_path, _rate_limit_ip_payload(request, payload))
+
     @app.post("/v1/accounts/register")
     def v1_account_register(request: _FastAPIRequest, payload: dict[str, Any]) -> _JSONResponse:
         return _account_response(accounts_handlers.register(db_path, _rate_limit_ip_payload(request, payload)))

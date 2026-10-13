@@ -291,6 +291,30 @@ create table if not exists merchant_accounts (
         updated_at text not null
     )
     """,
+    # v42 — 注册改为邮箱先行：先证明邮箱归属，再创建账号。账号还不存在时
+    # 验证码没有 merchant_accounts 行可依附（v15 的 verification_code_hash
+    # 寄生在账号行上），因此单独建表。一行一邮箱（email 主键、小写归一化）：
+    # code_hash 为 6 位码的 SHA-256 / code_expires_at 为 +15 分钟；验码通过后
+    # 码即作废，改发一次性 ticket_hash（secrets.token_urlsafe(32)，同样 15
+    # 分钟）——register 必须凭 ticket 建号。之所以不记"该邮箱已验证"的时间戳：
+    # 那是一个没有凭据的能力，任何知道该邮箱的人都能在窗口内抢先建号设密码
+    # （账号接管）；ticket 只有真正读到过验证码的人持有。建号即删除该行。
+    # 过期行由 register/code 顺手惰性清理——形状参照 connector_identity_requests。
+    """
+create table if not exists registration_verifications (
+        email text primary key,
+        code_hash text not null default '',
+        code_expires_at text not null default '',
+        ticket_hash text not null default '',
+        ticket_expires_at text not null default '',
+        created_at text not null,
+        updated_at text not null
+    )
+    """,
+    """
+create index if not exists idx_registration_verifications_expiry
+        on registration_verifications(code_expires_at)
+    """,
     """
 create table if not exists account_sessions (
         session_token_hash text primary key,

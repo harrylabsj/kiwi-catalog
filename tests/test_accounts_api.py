@@ -96,6 +96,67 @@ def _call_http(app, method: str, path: str, body: bytes = b"", cookie: str = "")
     return start.get("status", 500), payload, headers_out
 
 
+def register_via_api(
+    app,
+    *,
+    email: str = "ops@acme.example",
+    password: str = "strong-pw-123",
+    merchant_name: str = "Acme 商贸",
+    phone: str = "+86 138 0000 0000",
+    wechat: str = "",
+    db_path: str = "",
+    legacy_unverified: bool = False,
+) -> tuple[int, dict, dict]:
+    """走完邮箱先行的三步注册：register/code → register/verify → register。
+
+    返回**建号那一步**的 ``(status, payload, headers)``；成功时 ``headers``
+    带 ``set-cookie``（建号即自动登录），``payload["email_verified"] is True``。
+
+    ``legacy_unverified=True`` 时建号后把 ``email_verified`` 拨回 0，等价于
+    2026-10-13 之前注册、从未验证邮箱的存量账号。新流程已经不产生这种状态，
+    但线上仍有存量，且 ``/v1/accounts/verify-email``、``/v1/accounts/resend-code``
+    与登录页的 ``verify_block`` 分支仍要服务它们——相关测试用这个开关构造前置。
+    需要同时传 ``db_path``。
+    """
+    status, payload, _ = _call_http(
+        app, "POST", "/v1/accounts/register/code", json.dumps({"email": email}).encode()
+    )
+    if status != 200:
+        return status, payload, {}
+    ticket_status, ticket_payload, _ = _call_http(
+        app,
+        "POST",
+        "/v1/accounts/register/verify",
+        json.dumps({"email": email, "code": payload.get("verification_code") or ""}).encode(),
+    )
+    if ticket_status != 200:
+        return ticket_status, ticket_payload, {}
+    status, payload, headers = _call_http(
+        app,
+        "POST",
+        "/v1/accounts/register",
+        json.dumps(
+            {
+                "merchant_name": merchant_name,
+                "email": email,
+                "password": password,
+                "phone": phone,
+                "wechat": wechat,
+                "verification_ticket": ticket_payload["verification_ticket"],
+            }
+        ).encode(),
+    )
+    if legacy_unverified and status == 200:
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(db_path) as conn:
+            conn.execute(
+                "update merchant_accounts set email_verified = 0 where email = ?",
+                (email.strip().lower(),),
+            )
+    return status, payload, headers
+
+
 class AccountsApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
@@ -113,32 +174,17 @@ class AccountsApiTest(unittest.TestCase):
         self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
-    def _register(self) -> tuple[str, str]:
-        """注册（console 模式）并验证邮箱，返回会话 cookie + 验证码。"""
-        status, payload, headers = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps(REGISTER_BODY).encode(),
-        )
+    def _register(self) -> str:
+        """走完邮箱先行注册三步 → 建号即自动登录，返回会话 cookie 值。"""
+        status, payload, headers = register_via_api(self.app, **REGISTER_BODY)
         self.assertEqual(status, 200, payload)
         self.assertTrue(payload["ok"])
-        self.assertFalse(payload["email_verified"])
-        code = payload["verification_code"]
-        self.assertTrue(code, "console 模式应返回验证码")
-        # 验证邮箱 → 自动登录（Set-Cookie）
-        status, payload, headers = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/verify-email",
-            json.dumps({"email": REGISTER_BODY["email"], "code": code}).encode(),
-        )
-        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["email_verified"], "邮箱先行：建号时即已验证")
         set_cookie = headers.get("set-cookie", "")
         self.assertIn("kiwi_session=", set_cookie)
         self.assertIn("HttpOnly", set_cookie)
         self.assertIn("Secure", set_cookie)
-        return set_cookie.split(";")[0].split("=", 1)[1], code
+        return set_cookie.split(";")[0].split("=", 1)[1]
 
     def _approve_application_by_id(self, app_id: int) -> dict:
         # HTTP 审核端点已移私有仓；service 层与本地 CLI 同一实现
@@ -179,7 +225,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_register_creates_account_no_application_yet(self) -> None:
         """注册即商家：分配 merchant_id、影子行和 20 个免费商品名额。"""
-        session, _ = self._register()
+        session = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
         )
@@ -235,11 +281,8 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(status, 400, payload)
         self.assertIn("phone", payload.get("error", ""))
         # 微信缺省不影响注册
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps({**REGISTER_BODY, "email": "wx-ok@example.com", "wechat": ""}).encode(),
+        status, payload, _ = register_via_api(
+            self.app, email="wx-ok@example.com", wechat=""
         )
         self.assertEqual(status, 200, payload)
 
@@ -318,14 +361,16 @@ class AccountsApiTest(unittest.TestCase):
             conn.close()
 
     def test_register_duplicate_email_conflicts(self) -> None:
+        """同一邮箱重复注册：第一步发码就 409（明确提示，接受枚举换 UX 清晰）。"""
         self._register()
         status, payload, _ = _call_http(
             self.app,
             "POST",
-            "/v1/accounts/register",
-            json.dumps(REGISTER_BODY).encode(),
+            "/v1/accounts/register/code",
+            json.dumps({"email": REGISTER_BODY["email"]}).encode(),
         )
         self.assertEqual(status, 409, payload)
+        self.assertIn("already registered", payload.get("error", ""))
 
     def test_register_validation(self) -> None:
         status, payload, _ = _call_http(
@@ -370,15 +415,11 @@ class AccountsApiTest(unittest.TestCase):
     # ── 邮箱验证 ───────────────────────────────────────────────────────────
 
     def test_login_blocked_before_email_verification(self) -> None:
-        """未验证邮箱不能登录。"""
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps(REGISTER_BODY).encode(),
+        """legacy：建号时邮箱未验证（2026-10-13 之前的存量账号）不能登录。"""
+        status, payload, _ = register_via_api(
+            self.app, **REGISTER_BODY, db_path=self.db_path, legacy_unverified=True
         )
         self.assertEqual(status, 200, payload)
-        self.assertFalse(payload["email_verified"])
         status, payload, _ = _call_http(
             self.app,
             "POST",
@@ -389,11 +430,9 @@ class AccountsApiTest(unittest.TestCase):
         self.assertIn("not verified", payload.get("error", ""))
 
     def test_verify_email_wrong_code(self) -> None:
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps(REGISTER_BODY).encode(),
+        """legacy：存量未验证账号用错码走 verify-email → 403。"""
+        status, payload, _ = register_via_api(
+            self.app, **REGISTER_BODY, db_path=self.db_path, legacy_unverified=True
         )
         self.assertEqual(status, 200, payload)
         status, payload, _ = _call_http(
@@ -405,11 +444,13 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(status, 403, payload)
 
     def test_resend_code_works(self) -> None:
-        status, payload, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps(REGISTER_BODY).encode(),
+        """legacy：存量未验证账号靠 resend-code 取新码才能完成验证。
+
+        新流程不再产生未验证账号（邮箱先行，建号即已验证），这条路径如今
+        只服务存量账号——而且它们**没有别的取码途径**，所以必须一直保留。
+        """
+        status, payload, _ = register_via_api(
+            self.app, **REGISTER_BODY, db_path=self.db_path, legacy_unverified=True
         )
         self.assertEqual(status, 200, payload)
         status, payload, _ = _call_http(
@@ -433,7 +474,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── token 找回（核心：审批后"我的"可见明文）──────────────────────────
 
     def test_token_visible_after_approval(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         self._request_token(session)
         issued = self._approve_first_application()
         status, payload, _ = _call_http(
@@ -460,7 +501,7 @@ class AccountsApiTest(unittest.TestCase):
         self.assertNotIn(issued["token"], event[1])
 
     def test_login_then_me_after_approval(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         self._request_token(session)
         self._approve_first_application()
         status, payload, headers = _call_http(
@@ -479,7 +520,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_me_returns_error_not_empty_token_when_decrypt_fails(self) -> None:
         """审查 C-M3：/me 解密失败必须返回可诊断错误，绝不静默给空 token。"""
-        session, _ = self._register()
+        session = self._register()
         self._request_token(session)
         self._approve_first_application()
         status, payload, headers = _call_http(
@@ -507,7 +548,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── token-request ──────────────────────────────────────────────────────
 
     def test_token_request_with_merchant_info(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         # 非法 domain → 400（非空仍走 canonical 校验）
         status, payload, _ = _call_http(
@@ -544,7 +585,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_token_request_without_domain_allowed(self) -> None:
         """D7：domain 选填——空值申请建 pending 工单且 domain 存空。"""
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app, "POST", "/v1/accounts/token-request", b"{}", cookie=cookie
@@ -567,7 +608,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_token_request_invalid_domain_rejected(self) -> None:
         """非空 domain 仍走 canonical 校验：URL 形态 → 400，不落工单。"""
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app,
@@ -586,7 +627,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_token_request_with_domain_still_accepted(self) -> None:
         """老调用方带合法 domain 仍通过，且归一化落库（CLI/历史 API 兼容）。"""
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app,
@@ -603,7 +644,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_me_roundtrips_agent_id_from_application(self) -> None:
         """「基本信息」页的 Agent ID 来自申请工单，/me 需回显（投影含 agent_id）。"""
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app,
@@ -621,7 +662,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_token_request_after_rejection_allowed(self) -> None:
         """被拒绝后可重新申请：新建 pending 工单，原被拒工单保留为审计记录。"""
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         # 首次申请 → pending
         status, payload, _ = _call_http(
@@ -672,7 +713,7 @@ class AccountsApiTest(unittest.TestCase):
         """
         from kiwi_catalog.db.session import db_session
 
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         # 首次申请 → 批准
         status, payload, _ = _call_http(
@@ -722,7 +763,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── 账户基本信息 ───────────────────────────────────────────────────────
 
     def test_profile_update_and_view(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         # 更新基本信息
         status, payload, _ = _call_http(
@@ -745,7 +786,7 @@ class AccountsApiTest(unittest.TestCase):
         self.assertTrue(payload["created_at"])
 
     def test_token_request_carries_phone(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app,
@@ -769,7 +810,7 @@ class AccountsApiTest(unittest.TestCase):
 
     def test_accountless_application_links_account_on_approve(self) -> None:
         """无账号工单（account_id=0，匿名通道关闭前的存量数据）审批后按邮箱兜底关联账号。"""
-        session, _ = self._register()
+        session = self._register()
         # 直插 account_id=0 的工单（2026-08-12 起匿名提交端点已关闭，仅存量数据存在此形态）
         from kiwi_catalog.db.session import db_session, now_iso
 
@@ -818,7 +859,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── 登出 ───────────────────────────────────────────────────────────────
 
     def test_logout_invalidates_session(self) -> None:
-        session, _ = self._register()
+        session = self._register()
         cookie = f"kiwi_session={session}"
         status, payload, _ = _call_http(
             self.app, "POST", "/v1/accounts/logout", b"{}", cookie=cookie
@@ -854,11 +895,19 @@ class PasswordResetApiTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
 
     def _register(self, email: str = "ops@acme.example", password: str = "strong-pw-123") -> None:
-        status, payload, _ = _call_http(
+        """造一个 legacy 的「已注册、邮箱未验证」账号，供重置流程断言使用。
+
+        新流程建号时邮箱即已验证，所以这里走完注册后把 ``email_verified``
+        拨回 0——等价于 2026-10-13 之前注册、从未验证邮箱的存量账号。
+        重置流程"能收码即证明邮箱归属、顺带把 email_verified 置 1"这条
+        兜底只对这类账号还有意义。
+        """
+        status, payload, _ = register_via_api(
             self.app,
-            "POST",
-            "/v1/accounts/register",
-            json.dumps({"merchant_name": "Acme 商贸", "email": email, "password": password, "phone": "+86 138 0000 0000"}).encode(),
+            email=email,
+            password=password,
+            db_path=self.db_path,
+            legacy_unverified=True,
         )
         self.assertEqual(status, 200, payload)
 
@@ -1039,20 +1088,9 @@ class AdminApplicationNotificationTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
 
     def _register_and_apply(self) -> tuple[int, dict]:
-        """注册 → 验证邮箱（console）→ 提交接入申请，返回 (状态码, 响应)。"""
-        status, registered, _ = _call_http(
-            self.app, "POST", "/v1/accounts/register", json.dumps(REGISTER_BODY).encode()
-        )
+        """注册（邮箱先行三步，自动登录）→ 提交接入申请，返回 (状态码, 响应)。"""
+        status, registered, headers = register_via_api(self.app, **REGISTER_BODY)
         self.assertEqual(status, 200, registered)
-        status, verified, headers = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/verify-email",
-            json.dumps(
-                {"email": REGISTER_BODY["email"], "code": registered["verification_code"]}
-            ).encode(),
-        )
-        self.assertEqual(status, 200, verified)
         cookie = headers.get("set-cookie", "").split(";")[0]
         status, applied, _ = _call_http(
             self.app,
@@ -1165,36 +1203,62 @@ class RegistrationEmailTest(unittest.TestCase):
         self.addCleanup(sender.stop)
         self.app = create_catalog_app(self.db_path)
 
-    def register(self):
+    def code(self, email: str = REGISTER_BODY["email"]):
         return _call_http(
             self.app,
             "POST",
-            "/v1/accounts/register",
-            json.dumps({**REGISTER_BODY, "wechat": "acme-wechat"}).encode(),
+            "/v1/accounts/register/code",
+            json.dumps({"email": email}).encode(),
         )
 
-    def verify(self, code):
+    def verify(self, email: str, code: str):
         return _call_http(
             self.app,
             "POST",
-            "/v1/accounts/verify-email",
-            json.dumps({"email": REGISTER_BODY["email"], "code": code}).encode(),
+            "/v1/accounts/register/verify",
+            json.dumps({"email": email, "code": code}).encode(),
         )
 
-    def test_registration_notifies_admin_after_commit(self):
+    def register(self, ticket: str, **overrides):
+        body = {
+            **REGISTER_BODY,
+            "wechat": "acme-wechat",
+            "verification_ticket": ticket,
+            **overrides,
+        }
+        return _call_http(
+            self.app, "POST", "/v1/accounts/register", json.dumps(body).encode()
+        )
+
+    def _ticket(self, email: str = REGISTER_BODY["email"]) -> str:
+        """走完 register/code → register/verify，返回一次性 ticket。"""
+        status, payload, _ = self.code(email)
+        self.assertEqual(status, 200, payload)
+        status, payload, _ = self.verify(email, payload["verification_code"])
+        self.assertEqual(status, 200, payload)
+        return payload["verification_ticket"]
+
+    def test_register_auto_logs_in_and_notifies_admin_after_commit(self):
+        ticket = self._ticket()
+        self.send.reset_mock()
         committed = []
 
         def check_committed(to, subject, body):
             with sqlite3.connect(self.db_path) as conn:
                 committed.append(
-                    conn.execute("select count(*) from merchant_accounts").fetchone()[0]
+                    conn.execute("select email_verified from merchant_accounts").fetchone()[0]
                 )
 
         self.send.side_effect = check_committed
-        status, _, _ = self.register()
-        self.assertEqual(status, 200)
+        status, payload, headers = self.register(ticket)
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["email_verified"])
+        # 建号即自动登录（与 verify-email 通过后的行为一致）。
+        self.assertIn("kiwi_session=", headers.get("set-cookie", ""))
+        # console 模式不发欢迎信（send_welcome_email 只在 smtp 模式发），
+        # 所以这里只有运营通知一封。
         self.send.assert_called_once()
-        # 发信时账号已提交（旁路连接可见）——这正是「事务提交之后」的证明。
+        # 发信时账号已提交（旁路连接可见）——「事务提交之后」的证明。
         self.assertEqual(committed, [1])
         to, subject, body = self.send.call_args.args
         self.assertEqual(to, "1711496337@qq.com")
@@ -1204,33 +1268,13 @@ class RegistrationEmailTest(unittest.TestCase):
             REGISTER_BODY["phone"],
             "acme-wechat",
             "merchant_id",
-            "待验证",
         ):
             self.assertIn(value, body)
+        # 邮箱先行：建号时邮箱已验证，通知不再写「邮箱待验证」。
+        self.assertNotIn("待验证", body)
 
-    def test_duplicate_registration_does_not_notify(self):
-        self.assertEqual(self.register()[0], 200)
-        self.send.reset_mock()
-        self.assertEqual(self.register()[0], 409)
-        self.send.assert_not_called()
-
-    def test_verification_email_failure_rolls_back_without_notifications(self):
-        """验证码邮件是 fail-closed：发信失败 → 注册回滚，运营也收不到通知。"""
-        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
-        self.send.side_effect = RuntimeError("smtp down")
-        from kiwi_catalog.api.handlers import accounts as handlers
-
-        with self.assertRaisesRegex(RuntimeError, "smtp down"):
-            handlers.register(self.db_path, REGISTER_BODY)
-        self.send.assert_called_once()
-        self.assertEqual(self.send.call_args.args[1], "Kiwi 商家账号邮箱验证码")
-        with sqlite3.connect(self.db_path) as conn:
-            self.assertEqual(
-                conn.execute("select count(*) from merchant_accounts").fetchone()[0], 0
-            )
-
-    def test_welcome_content_after_verification_commit_and_no_repeat(self):
-        _, registered, _ = self.register()
+    def test_welcome_sent_after_register_commit_in_smtp_mode(self):
+        ticket = self._ticket()
         os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
         self.send.reset_mock()
         committed = []
@@ -1242,64 +1286,94 @@ class RegistrationEmailTest(unittest.TestCase):
                 )
 
         self.send.side_effect = check_committed
-        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
-        self.send.assert_called_once()
-        self.assertEqual(committed, [1])
-        to, subject, body = self.send.call_args.args
-        self.assertEqual(to, REGISTER_BODY["email"])
-        self.assertEqual(subject, "欢迎成为 Kiwi 商家")
+        status, payload, _ = self.register(ticket)
+        self.assertEqual(status, 200, payload)
+        # 欢迎信 + 运营通知，两封都在提交之后发（两次都读到已提交的行）。
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(committed, [1, 1])
+        welcome = next(
+            call.args
+            for call in self.send.call_args_list
+            if call.args[1] == "欢迎成为 Kiwi 商家"
+        )
+        self.assertEqual(welcome[0], REGISTER_BODY["email"])
         self.assertEqual(
-            body,
+            welcome[2],
             "Acme 商贸，\n\n"
             "您好，感谢您注册成为kiwi 商家，欣赏您尝试新事物的勇气。"
             "让我们一起开启Agentic Commerce 之旅。\n\n"
             "我们的官网是: kiwi.harrylabsj.com , 有问题也可以随时添加我的微信（hhdshwe）联系。\n\n"
             "感谢，\nKiwi 客服\n",
         )
+
+    def test_ticket_is_single_use(self):
+        """ticket 单次消费：重放必须被拒，不能重复建号。"""
+        ticket = self._ticket()
+        self.assertEqual(self.register(ticket)[0], 200)
         self.send.reset_mock()
-        # 重复验证 → 403，不重复发欢迎信。
-        self.assertEqual(self.verify(registered["verification_code"])[0], 403)
+        status, payload, _ = self.register(ticket)
+        self.assertEqual(status, 403, payload)
         self.send.assert_not_called()
 
-    def test_invalid_verification_does_not_send_welcome(self):
-        self.register()
-        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
-        self.send.reset_mock()
-        self.assertEqual(self.verify("invalid")[0], 403)
-        self.send.assert_not_called()
-
-    def test_console_verification_does_not_send_welcome(self):
-        """console（开发/演示）模式不发真实邮件。"""
-        _, registered, _ = self.register()
-        self.send.reset_mock()
-        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
-        self.send.assert_not_called()
-
-    def test_notification_failures_do_not_break_registration_or_verification(self):
-        self.send.side_effect = RuntimeError("smtp down")
-        self.assertEqual(self.register()[0], 200)
-        # resend 在 console 模式随响应回新码（此步不发信，也不会发欢迎信）。
-        _, resent, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/resend-code",
-            json.dumps({"email": REGISTER_BODY["email"]}).encode(),
-        )
-        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
-        self.assertEqual(self.verify(resent["verification_code"])[0], 200)
+    def test_register_without_ticket_is_rejected(self):
+        """服务端强制校验：页面把字段禁用只是 UX，绕过页面直接调接口同样被拒。"""
+        status, payload, _ = self.register("")
+        self.assertEqual(status, 403, payload)
+        self.assertIn("verification required", payload.get("error", ""))
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(
-                conn.execute("select email_verified from merchant_accounts").fetchone()[0], 1
+                conn.execute("select count(*) from merchant_accounts").fetchone()[0], 0
+            )
+
+    def test_bogus_ticket_is_rejected(self):
+        status, payload, _ = self.register("not-a-real-ticket")
+        self.assertEqual(status, 403, payload)
+
+    def test_wrong_code_does_not_issue_ticket(self):
+        self.assertEqual(self.code()[0], 200)
+        status, payload, _ = self.verify(REGISTER_BODY["email"], "000000")
+        self.assertEqual(status, 403, payload)
+        self.assertNotIn("verification_ticket", payload)
+
+    def test_duplicate_email_stops_at_the_code_step(self):
+        """已注册邮箱在第一步就被拦住：明确提示，且不重复发码。"""
+        self.assertEqual(self.register(self._ticket())[0], 200)
+        self.send.reset_mock()
+        status, payload, _ = self.code()
+        self.assertEqual(status, 409, payload)
+        self.assertIn("already registered", payload.get("error", ""))
+        self.send.assert_not_called()
+
+    def test_code_email_failure_leaves_no_pending_record(self):
+        """验证码邮件 fail-closed：发不出去就整事务回滚，不留半条记录。"""
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.send.side_effect = RuntimeError("smtp down")
+        from kiwi_catalog.api.handlers import accounts as handlers
+
+        with self.assertRaisesRegex(RuntimeError, "smtp down"):
+            handlers.request_register_code(
+                self.db_path, {"email": REGISTER_BODY["email"]}
+            )
+        self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[1], "Kiwi 商家账号邮箱验证码")
+        with sqlite3.connect(self.db_path) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from registration_verifications"
+                ).fetchone()[0],
+                0,
             )
 
     def test_missing_admin_recipient_does_not_suppress_welcome(self):
-        """未配置运营邮箱只静默跳过注册通知，不影响后续欢迎信。"""
+        """未配置运营邮箱只静默跳过注册通知，不影响欢迎信。"""
+        ticket = self._ticket()
         os.environ.pop("KIWI_CATALOG_ADMIN_NOTIFY_EMAIL")
-        _, registered, _ = self.register()
-        self.send.assert_not_called()
         os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
-        self.assertEqual(self.verify(registered["verification_code"])[0], 200)
+        self.send.reset_mock()
+        status, payload, _ = self.register(ticket)
+        self.assertEqual(status, 200, payload)
         self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[1], "欢迎成为 Kiwi 商家")
 
 
 if __name__ == "__main__":

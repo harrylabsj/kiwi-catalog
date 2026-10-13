@@ -2,8 +2,24 @@
 
 ## 0.5.6 — 2026-10-13
 
-- Registration and welcome emails. `notify_admin_new_registration` emails the operations inbox (`KIWI_CATALOG_ADMIN_NOTIFY_EMAIL`) after a merchant account commits — the subject carries「邮箱待验证」because the account exists but `email_verified` is still 0 at that moment, so the merchant cannot log in yet. `send_welcome_email` sends a one-off welcome note to the merchant on first successful email verification (smtp mode only; console/未配置模式返回 False). Both are side-channel: they never raise, so an SMTP failure cannot affect registration or verification — deliberately the opposite of the verification code's fail-closed semantics — and both are called **after** the `db_session` transaction commits.
-- **Repo/main alignment**: this behaviour shipped to production on 2026-10-09 as a runtime `patch` applied directly to `/opt/kiwi-catalog-0.5.5/.venv/.../site-packages` (see `runtime-email.patch`), which is why the running service sends the notification while `main` did not. The ported functions are byte-identical to the deployed code apart from docstrings/comments; the two call sites are otherwise unchanged.
+### 注册改为邮箱先行（breaking API change）
+
+- **先证明邮箱归属，再创建账号**。`POST /v1/accounts/register` 不再"建号 + 发验证码"，改为凭一次性 `verification_ticket` 建号。新端点是 `POST /v1/accounts/register/code`（发码）与 `POST /v1/accounts/register/verify`（验码换 ticket）。原先的顺序（填四个字段 → 建号 → 发码 → 商家再验证）会让**任何中途放弃或填错邮箱的注册都留下一条永远无法登录、也无法回收的账号行**——线上 20 个账号里有 2 条正是这种半成品。
+- 建号即 `email_verified=1`，注册成功即自动登录（`__cookies__`）。"已注册、邮箱待验证"这个中间态对新账号不再出现。
+- 新建表 `registration_verifications`（schema v42）：账号尚不存在时验证码无处依附，故单独建表，一邮箱一行；验码通过后码作废、改发 15 分钟的一次性 ticket；建号成功即删行，过期行由 `register/code` 顺手惰性清理。**ticket 是必需的**——只记"该邮箱 15 分钟内已验证"的时间戳等于一个没有凭据的能力，任何知道该邮箱的人都能在窗口内抢先建号并设自己的密码（账号接管）；ticket 只有读到过验证码的人持有。
+- 服务端强制校验 ticket：门户页把未验证字段置灰只是 UX，绕过页面直接调接口同样被拒。
+- 发码端点带 per-email + per-IP 前缀 + 全局发信预算三道闸（发信风险随发码步骤前移）；验码端点额外带 per-IP 桶。验证码邮件仍是 fail-closed：发不出去就整个事务回滚。
+- `/v1/accounts/verify-email` 与 `/v1/accounts/resend-code` **保留但转为 legacy**：它们如今只服务 2026-10-13 之前注册的存量未验证账号，且是这些账号唯一的取码途径——不能删。
+
+### 邮件
+
+- `notify_admin_new_registration` 在账号提交后通知运营邮箱（`KIWI_CATALOG_ADMIN_NOTIFY_EMAIL`）；`send_welcome_email` 在首次成功验证邮箱后给商家发欢迎信（仅 smtp 模式；console/未配置返回 False）。两封都是**旁路**：自身不抛异常，SMTP 故障绝不影响注册/验证——刻意与验证码的 fail-closed 语义相反——且都在 `db_session` 事务提交**之后**发出。
+- **Repo/main alignment**：这段行为自 2026-10-09 起以运行时 `patch` 的形式直接打在 `/opt/kiwi-catalog-0.5.5/.venv/.../site-packages` 上（见 `runtime-email.patch`），所以线上会发通知而 main 不会。移植过来的函数除 docstring/注释外与线上逐字节一致。
+- 邮箱先行之后建号时邮箱已验证，运营通知不再写「（邮箱待验证）」——那句话在这种情况下已经不成立。
+
+### 门户
+
+- `/portal/register` 重做为三段式：只有邮箱可填 → 发码/验码 → 其余字段解锁。未验证前商家名称/密码/电话/微信与「注册」按钮均为 `disabled`，并新增 `input:disabled` 的显式灰化样式（浏览器默认表现跨平台不一致，Safari 几乎看不出来）。
 
 ## 0.5.5 — 2026-10-01
 

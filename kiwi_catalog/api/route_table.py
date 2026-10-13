@@ -305,6 +305,23 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
     ),
 # ── /v1/accounts（商家账号，docs/accounts.md）───────────────────────────────
+# 邮箱先行注册：register/code（发码）→ register/verify（验码换 ticket）→
+# register（凭 ticket 建号 + 自动登录）。三段共用 register/ 前缀，读起来是
+# 一条流程；与 legacy 的 verify-email / resend-code 刻意区分开。
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/register/code",
+        lambda db_path, payload, query, **kw: _v1_account_request_register_code(
+            db_path, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/register/verify",
+        lambda db_path, payload, query, **kw: _v1_account_verify_register_code(
+            db_path, payload
+        ),
+    ),
 RouteEntry(
         {"POST"},
         "/v1/accounts/register",
@@ -683,6 +700,14 @@ def _v1_merchant_self(db_path, payload, query):
 
 
 # ── /v1/accounts wrapper（商家账号）──────────────────────────────────────
+
+
+def _v1_account_request_register_code(db_path, payload):
+    return accounts_handlers.request_register_code(db_path, payload)
+
+
+def _v1_account_verify_register_code(db_path, payload):
+    return accounts_handlers.verify_register_code(db_path, payload)
 
 
 def _v1_account_register(db_path, payload):

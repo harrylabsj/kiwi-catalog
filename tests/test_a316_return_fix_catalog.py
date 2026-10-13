@@ -54,7 +54,12 @@ def _raw_call(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict
 
     asyncio.run(call())
     status = received[0]["status"]
-    payload = json.loads(received[-1]["body"].decode() or "{}")
+    # 拼接**全部** body chunk：ASGI 以「最后一个空块」收尾，只取 received[-1]
+    # 会永远解析出 {}（此前没人用返回的 payload，所以没暴露）。
+    raw = b"".join(
+        m.get("body", b"") for m in received if m["type"] == "http.response.body"
+    )
+    payload = json.loads(raw.decode() or "{}")
     return status, payload
 
 
@@ -100,14 +105,11 @@ class TrustedIpRateLimitTest(unittest.TestCase):
                 body = json.dumps(
                     {
                         "email": f"a316-{i}@example.test",
-                        "password": "pw-123456",
-                        "merchant_name": f"M{i}",
-                        "phone": "13800000000",
                         # 伪造 payload IP：修复前每伪造一个新 IP 即换新桶，21 次全过
                         "_client_ip": f"10.{i}.0.{i}",
                     }
                 ).encode()
-                status, payload = _raw_call(app, "POST", "/v1/accounts/register", body)
+                status, payload = _raw_call(app, "POST", "/v1/accounts/register/code", body)
                 codes.append(status)
             # per-IP 桶 = max(1000*5,20)=20——同 peer 桶内第 21 次必须 429
             self.assertEqual(codes[-1], 429, f"spoofed-IP bucket not enforced: {codes}")
@@ -118,8 +120,6 @@ class ResendAntiEnumTest(unittest.TestCase):
 
     def test_unknown_email_response_shape_matches_known(self) -> None:
         from kiwi_catalog.api.app import create_catalog_app
-        from kiwi_catalog.db.session import db_session
-        from kiwi_catalog.services import accounts as accounts_service
 
         tmp = tempfile.mkdtemp()
         db_path = os.path.join(tmp, "catalog.sqlite")
@@ -133,15 +133,29 @@ class ResendAntiEnumTest(unittest.TestCase):
             clear=False,
         ):
             app = create_catalog_app(db_path)
-            known_body = json.dumps(
-                {"email": "known@example.test", "password": "pw-123456", "merchant_name": "K", "phone": "13800000000"}
-            ).encode()
-            _raw_call(app, "POST", "/v1/accounts/register", known_body)
-            with db_session(db_path) as conn:
-                account = accounts_service.account_by_email(conn, "known@example.test")
-                accounts_service.verify_email(conn, int(account["account_id"]), "", bypass=True) if hasattr(
-                    accounts_service, "verify_email"
-                ) else None
+            known_email = "known@example.test"
+            _, issued = _raw_call(
+                app, "POST", "/v1/accounts/register/code",
+                json.dumps({"email": known_email}).encode(),
+            )
+            _, ticket = _raw_call(
+                app, "POST", "/v1/accounts/register/verify",
+                json.dumps(
+                    {"email": known_email, "code": issued["verification_code"]}
+                ).encode(),
+            )
+            _raw_call(
+                app, "POST", "/v1/accounts/register",
+                json.dumps(
+                    {
+                        "email": known_email,
+                        "password": "pw-123456",
+                        "merchant_name": "K",
+                        "phone": "13800000000",
+                        "verification_ticket": ticket["verification_ticket"],
+                    }
+                ).encode(),
+            )
             known_status, known = _raw_call(
                 app, "POST", "/v1/accounts/resend-code", json.dumps({"email": "known@example.test"}).encode()
             )

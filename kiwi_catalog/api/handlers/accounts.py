@@ -29,7 +29,7 @@ from typing import Any
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 from kiwi_catalog.api.handlers.common import require_field
 from kiwi_catalog.api.handlers.hosted_publication import hosted_base_url
-from kiwi_catalog.core.errors import AuthError, ValidationError
+from kiwi_catalog.core.errors import AuthError, ConflictError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import account_agents as account_agents_service
 from kiwi_catalog.services import accounts as accounts_service
@@ -134,21 +134,131 @@ def _require_session(
     return _ctx, conn, account
 
 
+def request_register_code(
+    db_path: str | Path, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/accounts/register/code（公开）——邮箱先行注册第一步：发验证码。
+
+    邮箱已注册 → 409（**明确提示**，刻意接受枚举代价换取 UX 清晰：商家一眼
+    知道该去登录而不是等一封永远不来的验证码）。否则签发 6 位码并发信；
+    发信失败抛异常 → 事务回滚（fail-closed，与 issue_verification 同语义，
+    不留半条记录）。console 模式响应回显明文码（开发/演示，也是验收脚本的
+    契约）；smtp 模式只进邮箱。
+
+    限流三道闸（发信风险随发码步骤前移）：per-email + per-IP 前缀 + 全局
+    发信预算——只靠 per-email 挡不住轮换邮箱的邮件轰炸/垃圾中继。
+    """
+    email = str(require_field(payload, "email")).strip().lower()
+    with db_session(db_path) as conn:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"register-code:{email}",
+                limit=limit,
+                window_seconds=900,
+                description=f"register code ({limit}/15min per email)",
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"register-code-ip:{_client_ip_prefix(payload)}",
+                limit=max(limit * 5, 20),
+                window_seconds=900,
+                description=f"register code per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
+            )
+            enforce_rate_limit(
+                backend,
+                key="register-code-email:global",
+                limit=max(limit * 50, 200),
+                window_seconds=900,
+                description=(
+                    f"register code global email budget ({max(limit * 50, 200)}/15min)"
+                ),
+            )
+        if accounts_service.account_by_email(conn, email) is not None:
+            raise ConflictError("email already registered")
+        # 惰性清理过期预验证行（同 connector_identity_requests 的清理语义），
+        # 避免弃号邮箱永久占行。
+        accounts_service.purge_expired_registrations(conn)
+        code = accounts_service.start_registration(conn, email)
+    return {"ok": True, "email": email, "verification_code": code}
+
+
+def verify_register_code(
+    db_path: str | Path, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/accounts/register/verify（公开）——验码并签发一次性 ticket。
+
+    通过后返回 ``verification_ticket``（15 分钟、单次使用），register 必须凭
+    它建号。**不建号、不发会话**。
+
+    失败一律同形（邮箱没发过码 / 码错 / 码过期都在同一分支），不给侧信道
+    区分"这个邮箱正处在注册流程中"——沿用 review 3-64 的三态同形做法。
+    """
+    email = str(require_field(payload, "email")).strip().lower()
+    code = str(require_field(payload, "code")).strip()
+    with db_session(db_path) as conn:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            # 6 位码只有 1e6 空间：per-email 桶是穷举爆破的第一道闸。
+            enforce_rate_limit(
+                backend,
+                key=f"register-verify:{email}",
+                limit=limit,
+                window_seconds=900,
+                description=f"register code verification ({limit}/15min per email)",
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"register-verify-ip:{_client_ip_prefix(payload)}",
+                limit=max(limit * 5, 20),
+                window_seconds=900,
+                description=(
+                    f"register code verification per-IP ({max(limit * 5, 20)}/15min"
+                    " per IP prefix)"
+                ),
+            )
+        ticket = accounts_service.verify_registration_code(conn, email, code)
+        if not ticket:
+            raise AuthError("invalid or expired verification code")
+    return {
+        "ok": True,
+        "email": email,
+        "verification_ticket": ticket,
+        "expires_in": 900,
+    }
+
+
 def register(
     db_path: str | Path, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    """POST /v1/accounts/register（公开）——注册商家账号：商家名称 + 邮箱 +
-    密码 + 电话（必填）+ 微信（选填）。
+    """POST /v1/accounts/register（公开）——邮箱先行注册最后一步：建号 + 自动登录。
 
-    注册即成为商家（分配 merchant_id + 影子 merchants 行，admin dashboard
-    无需审批即可见）；签发邮箱验证码；不自动登录（verify-email 通过后才可登录）。
-    console 模式响应含 verification_code（开发/演示）；smtp 模式发邮件。
+    必须先走 register/code → register/verify 拿到 ``verification_ticket``
+    （15 分钟、单次使用）。**服务端强制**校验该凭据——页面上的字段解锁只是
+    UX，绕过页面直接调接口必须同样被拒。
+
+    建号即 ``email_verified=1``（本流程已证明邮箱归属），因此"已注册、邮箱
+    待验证"的中间态对新账号不再出现；注册成功即签发会话（与 verify-email
+    通过后的行为一致），商家不必再手工登录一次。
+
+    事务提交后再发欢迎信与运营通知（旁路，发信失败不影响建号）。
     """
-    email = str(require_field(payload, "email")).strip()
+    email = str(require_field(payload, "email")).strip().lower()
     password = str(require_field(payload, "password"))
     merchant_name = str(require_field(payload, "merchant_name")).strip()
     phone = str(require_field(payload, "phone")).strip()
     wechat = str(payload.get("wechat") or "").strip()
+    # 故意不用 require_field：ticket 校验由 register_account 在**字段校验之后**
+    # 执行，否则"商家名称必填"这类 400 会被 ticket 的 400 掩盖，商家看不出
+    # 到底是哪一步不对。
+    verification_ticket = str(payload.get("verification_ticket") or "").strip()
 
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
@@ -158,29 +268,17 @@ def register(
             )
             enforce_rate_limit(
                 backend,
-                key=f"register:{email.lower()}",
+                key=f"register:{email}",
                 limit=limit,
                 window_seconds=900,
                 description=f"account register ({limit}/15min per email)",
             )
-            # review 2-30：补 per-IP 桶——仅 per-email 限流挡不住轮换邮箱的
-            # 邮件轰炸/垃圾中继（smtp 模式下这是未认证端点向任意地址发信）。
-            # IP 截断前缀复用 enrollments 的 _client_ip 机制。
             enforce_rate_limit(
                 backend,
                 key=f"register-ip:{_client_ip_prefix(payload)}",
                 limit=max(limit * 5, 20),
                 window_seconds=900,
                 description=f"account register per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
-            )
-            # review 2-30（A316 收窄）：全局发信预算——per-email/per-IP 之外
-            # 的第三道（轮换邮箱+IP 仍受总量约束），在 register 落库发信前生效。
-            enforce_rate_limit(
-                backend,
-                key="register-email:global",
-                limit=max(limit * 50, 200),
-                window_seconds=900,
-                description=f"account register global email budget ({max(limit * 50, 200)}/15min)",
             )
         registered = accounts_service.register_account(
             conn,
@@ -189,17 +287,24 @@ def register(
             merchant_name=merchant_name,
             phone=phone,
             wechat=wechat,
+            verification_ticket=verification_ticket,
+        )
+        session_token = accounts_service.create_session(
+            conn, int(registered["account_id"])
         )
         result = {
             "ok": True,
             "account_id": registered["account_id"],
             "email": registered["email"],
-            "email_verified": False,
-            # console 模式才返回明文验证码（smtp 模式为空串）
-            "verification_code": registered.get("verification_code") or "",
+            "email_verified": True,
+            "__cookies__": [accounts_service.session_cookie_value(session_token)],
         }
-    # 通知必须在事务提交之后：既保证账号与验证码已落库，也避免发信失败牵连注册
-    # ——notify_admin_new_registration 自身不抛异常（旁路语义）。
+    # 两封信都在事务提交之后发：账号已落库，发信失败不得影响注册
+    # ——两个函数自身都不抛异常（旁路语义）。
+    accounts_service.send_welcome_email(
+        merchant_name=merchant_name,
+        account_email=str(registered["email"]),
+    )
     accounts_service.notify_admin_new_registration(
         merchant_name=merchant_name,
         account_email=str(registered["email"]),

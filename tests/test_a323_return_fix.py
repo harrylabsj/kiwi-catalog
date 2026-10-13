@@ -6,6 +6,7 @@ import time
 import unittest
 from unittest import mock
 
+from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
 from kiwi_catalog.discovery import fetcher as fetcher_mod
 from kiwi_catalog.discovery.fetcher import (
     FetchError,
@@ -155,7 +156,7 @@ class MigrationOwnershipTest(unittest.TestCase):
         conn, run = self._fresh()
         run(conn)
         uv = conn.execute("pragma user_version").fetchone()[0]
-        self.assertEqual(uv, 41)
+        self.assertEqual(uv, CURRENT_SCHEMA_VERSION)
         self.assertFalse(conn.in_transaction)
 
     def test_c4_outer_tx_stays_owned_by_caller(self):
@@ -188,7 +189,7 @@ class MigrationOwnershipTest(unittest.TestCase):
         self.assertTrue(conn.in_transaction)
         conn.commit()  # caller 决定提交
         uv = conn.execute("pragma user_version").fetchone()[0]
-        self.assertEqual(uv, 41)
+        self.assertEqual(uv, CURRENT_SCHEMA_VERSION)
         conn.close()
 
 

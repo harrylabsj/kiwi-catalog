@@ -77,17 +77,22 @@ class EnrollmentFixture(unittest.TestCase):
 
         self.app = create_catalog_app(self.db_path)
         self.client = TestClient(self.app, base_url="https://localhost")
+        issued = self.client.post(
+            "/v1/accounts/register/code", json={"email": self.owner}
+        )
+        self.assertEqual(issued.status_code, 200, issued.text)
+        ticket = self.client.post("/v1/accounts/register/verify", json={
+            "email": self.owner, "code": issued.json()["verification_code"],
+        })
+        self.assertEqual(ticket.status_code, 200, ticket.text)
         registered = self.client.post("/v1/accounts/register", json={
             "merchant_name": "Security Merchant A",
             "email": self.owner,
             "password": "strong-password-123",
             "phone": "+1 555 0200",
+            "verification_ticket": ticket.json()["verification_ticket"],
         })
         self.assertEqual(registered.status_code, 200, registered.text)
-        verified = self.client.post("/v1/accounts/verify-email", json={
-            "email": self.owner, "code": registered.json()["verification_code"],
-        })
-        self.assertEqual(verified.status_code, 200, verified.text)
         me = self.client.get("/v1/accounts/me")
         self.assertEqual(me.status_code, 200, me.text)
         self.merchant_id = me.json()["merchant_id"]
@@ -247,15 +252,20 @@ class EnrollmentSecurityTest(EnrollmentFixture):
         )
         # Create and login a second merchant account in the same isolated DB.
         email = "security-other@example.test"
+        issued = self.client.post(
+            "/v1/accounts/register/code", json={"email": email}
+        )
+        self.assertEqual(issued.status_code, 200, issued.text)
+        ticket = self.client.post("/v1/accounts/register/verify", json={
+            "email": email, "code": issued.json()["verification_code"],
+        })
+        self.assertEqual(ticket.status_code, 200, ticket.text)
         registered = self.client.post("/v1/accounts/register", json={
             "merchant_name": "Security Merchant B", "email": email,
             "password": "strong-password-456", "phone": "+1 555 0201",
+            "verification_ticket": ticket.json()["verification_ticket"],
         })
         self.assertEqual(registered.status_code, 200, registered.text)
-        verified = self.client.post("/v1/accounts/verify-email", json={
-            "email": email, "code": registered.json()["verification_code"],
-        })
-        self.assertEqual(verified.status_code, 200, verified.text)
         other_merchant_id = self.client.get("/v1/accounts/me").json()["merchant_id"]
         self.assertNotEqual(other_merchant_id, self.merchant_id)
 

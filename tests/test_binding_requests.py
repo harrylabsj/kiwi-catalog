@@ -158,12 +158,17 @@ class BindingRequestFlowTest(unittest.TestCase):
 
     def _register(self, email: str = "ops@acme.example") -> str:
         body = {**BASE_REGISTER_BODY, "email": email}
-        status, payload = _call(self.app, "POST", "/v1/accounts/register", body)
+        status, payload = _call(
+            self.app, "POST", "/v1/accounts/register/code", {"email": email}
+        )
         self.assertEqual(status, 200, payload)
         status, payload = _call(
-            self.app, "POST", "/v1/accounts/verify-email",
+            self.app, "POST", "/v1/accounts/register/verify",
             {"email": email, "code": payload["verification_code"]},
         )
+        self.assertEqual(status, 200, payload)
+        body["verification_ticket"] = payload["verification_ticket"]
+        status, payload = _call(self.app, "POST", "/v1/accounts/register", body)
         self.assertEqual(status, 200, payload)
         # verify-email 的 Set-Cookie 在响应头里（_call 不返回头）——登录拿会话
         return self._login(email)

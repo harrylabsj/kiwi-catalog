@@ -153,12 +153,17 @@ class CloudEndpointSyncTest(unittest.TestCase):
 
     def _register(self, email: str = "ops@acme.example") -> str:
         body = {**BASE_REGISTER_BODY, "email": email}
-        status, payload, _ = _call(self.app, "POST", "/v1/accounts/register", body)
+        status, payload, _ = _call(
+            self.app, "POST", "/v1/accounts/register/code", {"email": email}
+        )
         self.assertEqual(status, 200, payload)
         status, payload, _ = _call(
-            self.app, "POST", "/v1/accounts/verify-email",
+            self.app, "POST", "/v1/accounts/register/verify",
             {"email": email, "code": payload["verification_code"]},
         )
+        self.assertEqual(status, 200, payload)
+        body["verification_ticket"] = payload["verification_ticket"]
+        status, payload, _ = _call(self.app, "POST", "/v1/accounts/register", body)
         self.assertEqual(status, 200, payload)
         status, _payload, headers = _call(
             self.app, "POST", "/v1/accounts/login",
@@ -451,12 +456,18 @@ class CloudBindingVerificationSkipTest(unittest.TestCase):
     def _bound_agent(self) -> str:
         """注册 → 建接入记录 → 首绑请求 → 门户确认（带 D5 证据行）。返回 cagt。"""
         body = {**BASE_REGISTER_BODY, "email": "ops@acme.example"}
-        status, payload, _ = _call(self.app, "POST", "/v1/accounts/register", body)
+        status, payload, _ = _call(
+            self.app, "POST", "/v1/accounts/register/code",
+            {"email": "ops@acme.example"},
+        )
         self.assertEqual(status, 200, payload)
         status, payload, _ = _call(
-            self.app, "POST", "/v1/accounts/verify-email",
+            self.app, "POST", "/v1/accounts/register/verify",
             {"email": "ops@acme.example", "code": payload["verification_code"]},
         )
+        self.assertEqual(status, 200, payload)
+        body["verification_ticket"] = payload["verification_ticket"]
+        status, payload, _ = _call(self.app, "POST", "/v1/accounts/register", body)
         self.assertEqual(status, 200, payload)
         status, _p, headers = _call(
             self.app, "POST", "/v1/accounts/login",
