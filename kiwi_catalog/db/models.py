@@ -787,7 +787,8 @@ create table if not exists runtime_binding_requests (
         requested_at text not null,
         expires_at text not null,
         decided_at text not null default '',
-        decided_note text not null default ''
+        decided_note text not null default '',
+        access_config_version integer not null default 0
     )
     """,
     """
@@ -819,6 +820,34 @@ create table if not exists listing_entitlement_audit (
         actor text not null, action text not null, detail_json text not null,
         created_at text not null
     )
+    """,
+    # v43 — WorkBuddy 访问配置。分享码只存独立密钥的 Fernet 密文；公开投影
+    # 只读取 active 行，部分唯一索引保证每个 Agent 至多一个 active 版本。
+    """
+create table if not exists runtime_access_configs (
+        catalog_agent_id text not null,
+        config_version integer not null check(config_version >= 1),
+        provider text not null check(provider = 'workbuddy'),
+        access_mode text not null check(access_mode = 'share_parameter'),
+        parameter_name text not null check(parameter_name = 'sharecode'),
+        secret_ciphertext text not null,
+        key_id text not null,
+        adapter_version text not null check(adapter_version = 'workbuddy-share-v1'),
+        auth_mode text not null check(auth_mode = 'signature'),
+        status text not null check(status in ('pending','active','invalid','revoked')),
+        validated_at text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        primary key (catalog_agent_id, config_version)
+    ) without rowid
+    """,
+    """
+create unique index if not exists idx_runtime_access_configs_one_active
+        on runtime_access_configs(catalog_agent_id) where status = 'active'
+    """,
+    """
+create index if not exists idx_runtime_access_configs_agent_status
+        on runtime_access_configs(catalog_agent_id, status)
     """,
 ]
 

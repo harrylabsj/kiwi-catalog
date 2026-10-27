@@ -292,6 +292,7 @@ def catalog_agent_record(
     capabilities: list[dict[str, Any]] | None = None,
     endpoints: list[dict[str, Any]] | None = None,
     skills: list[dict[str, Any]] | None = None,
+    runtime_access: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """CatalogAgentRecord —— /v1/agents wire 形状（v0.3 §6/§7）。
 
@@ -355,4 +356,18 @@ def catalog_agent_record(
         record["handoff_destination_types"] = handoff
     if safe.get("last_verified_at"):
         record["last_verified_at"] = safe["last_verified_at"]
+    if runtime_access is not None:
+        # The caller supplies the active-only service projection. Keep this an
+        # explicit whitelist so storage fields can never enter a public record.
+        record["runtime_access"] = {
+            field: runtime_access[field]
+            for field in (
+                "provider",
+                "access_mode",
+                "parameter_name",
+                "config_version",
+                "adapter_version",
+                "auth_mode",
+            )
+        }
     return record

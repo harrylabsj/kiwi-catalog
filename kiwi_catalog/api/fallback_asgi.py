@@ -268,6 +268,11 @@ class MarketplaceASGIApp:
         )
         if override_status is not None:
             status = int(override_status)
+        # ``__no_store__``：受控凭据分发（merchant-access）禁止一切缓存；
+        # 元键先剥除，绝不进入响应体。
+        no_store = bool(response.get("__no_store__")) if isinstance(response, dict) else False
+        if no_store and isinstance(response, dict):
+            response = {k: v for k, v in response.items() if k != "__no_store__"}
         if html is not None:
             body = str(html).encode("utf-8")
             content_type = b"text/html; charset=utf-8"
@@ -275,7 +280,7 @@ class MarketplaceASGIApp:
         else:
             body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
             content_type = b"application/json"
-            extra_headers = []
+            extra_headers = [(b"cache-control", b"no-store")] if no_store else []
         # 安全响应头（KC-SEC-01 硬化）：凭据页/JSON API 一律 nosniff + 禁
         # Referrer 泄漏（admin token 已改 header-only，referrer 兜底防
         # 凭据随导航外泄）；frame-ancestors 只能经响应头传递（meta 忽略）。
@@ -305,7 +310,15 @@ class MarketplaceASGIApp:
         etag = compute_etag(body)
         # A conditional GET only revalidates a *successful* representation:
         # never 304 an error body (e.g. a 404 for If-None-Match: *).
-        if allow_304 and status == 200 and if_none_match and etag_matches(if_none_match, etag):
+        # ``__no_store__`` 响应不参与条件请求：受控凭据分发既不能 304，也不能
+        # 下发内容指纹 ETag（两栈一致；FastAPI 分支同样跳过）。
+        if (
+            allow_304
+            and status == 200
+            and not no_store
+            and if_none_match
+            and etag_matches(if_none_match, etag)
+        ):
             await send(
                 {
                     "type": "http.response.start",
@@ -315,13 +328,14 @@ class MarketplaceASGIApp:
             )
             await send({"type": "http.response.body", "body": b""})
             return
+        identity_headers = [] if no_store else [(b"etag", etag.encode("ascii"))]
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
                 "headers": [
                     (b"content-type", content_type),
-                    (b"etag", etag.encode("ascii")),
+                    *identity_headers,
                     (b"content-length", str(len(body)).encode("ascii")),
                     *extra_headers,
                 ],

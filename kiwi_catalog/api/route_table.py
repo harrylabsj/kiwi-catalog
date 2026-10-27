@@ -179,6 +179,13 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"PUT"},
+        "/v1/agents/{catalog_agent_id}/runtime-access",
+        lambda db_path, payload, query, catalog_agent_id: _update_runtime_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
         {"POST"},
         "/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke",
         lambda db_path, payload, query, catalog_agent_id, binding_id: _revoke_runtime_binding(
@@ -503,6 +510,13 @@ RouteEntry(
             db_path, merchant_id, payload
         ),
     ),
+RouteEntry(
+        {"GET"},
+        "/v1/me/merchant-access/{catalog_agent_id}",
+        lambda db_path, payload, query, catalog_agent_id: _v1_get_merchant_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
     # ── /v1/connector-identity（商家连接器一次性身份授权；merchant-buddy
     #    第 1 版设计 §3.2）。静态段 /exchange 必须先于 /{request_id} 参数段
     #    （_match_path 顺序匹配）。
@@ -586,6 +600,10 @@ def _reinstate_catalog_agent(db_path, catalog_agent_id, payload=None, query=None
 
 def _create_runtime_binding(db_path: str | Path, catalog_agent_id: str, payload: dict):
     return cloud_binding_handlers.create_runtime_binding(db_path, catalog_agent_id, payload)
+
+
+def _update_runtime_access(db_path: str | Path, catalog_agent_id: str, payload: dict):
+    return cloud_binding_handlers.update_runtime_access(db_path, catalog_agent_id, payload)
 
 
 def _revoke_runtime_binding(
@@ -828,6 +846,10 @@ def _v1_unfollow_merchant(db_path, merchant_id, payload):
 
 def _v1_list_my_follows(db_path, payload):
     return buyer_follows_handlers.list_my_follows(db_path, payload)
+
+
+def _v1_get_merchant_access(db_path, catalog_agent_id, payload=None):
+    return buyer_follows_handlers.get_merchant_access(db_path, catalog_agent_id, payload or {})
 
 
 def _v1_follow_updates(db_path, payload):

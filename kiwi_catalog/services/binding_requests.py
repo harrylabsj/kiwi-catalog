@@ -124,6 +124,7 @@ def create_request(
     key_jwk: dict[str, Any],
     thumbprint: str,
     signed_payload: dict[str, Any],
+    access_config_version: int = 0,
 ) -> dict[str, Any]:
     """落一条待确认接入请求（首绑分支；闸门已在 handler 全部通过）。
 
@@ -161,8 +162,8 @@ def create_request(
         "insert into runtime_binding_requests"
         " (binding_request_id, catalog_agent_id, merchant_id, runtime_origin, a2a_endpoint,"
         " key_id, key_thumbprint, key_jwk_json, generation, service_epoch, nonce,"
-        " status, requested_at, expires_at)"
-        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+        " status, requested_at, expires_at, access_config_version)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
         (
             request_id,
             agent_id,
@@ -177,6 +178,7 @@ def create_request(
             nonce,
             now,
             expires_at,
+            int(access_config_version),
         ),
     )
     append_catalog_audit(
@@ -351,6 +353,10 @@ def confirm_request(
         key_thumbprint=str(req["key_thumbprint"]), runtime_origin=str(req["runtime_origin"]),
         a2a_endpoint=str(req["a2a_endpoint"]), checked_at=now,
     )
+    # 首绑附带的 WorkBuddy 访问配置：随绑定确认同事务激活（M-02：首绑可先
+    # 提交配置，不形成验证死锁）。版本已前进（并发提交流）时保留 pending——
+    # 激活失败绝不回滚绑定本身。
+    _activate_linked_access_config(conn, agent_id, int(req["access_config_version"] or 0))
     append_catalog_audit(
         conn,
         catalog_agent_id=agent_id,
@@ -394,6 +400,13 @@ def reject_request(
         " where binding_request_id = ?",
         (now, note[:500], request_id),
     )
+    # 请求被拒：随请求暂存的访问配置一并失效（pending 不残留）。
+    linked = conn.execute(
+        "select access_config_version from runtime_binding_requests where binding_request_id = ?",
+        (request_id,),
+    ).fetchone()
+    if linked is not None and int(linked["access_config_version"] or 0) > 0:
+        _invalidate_linked_access_config(conn, agent_id, int(linked["access_config_version"]))
     append_catalog_audit(
         conn,
         catalog_agent_id=agent_id,
@@ -402,3 +415,39 @@ def reject_request(
         details={"binding_request_id": request_id, "note": note[:500]},
     )
     return {"ok": True, "status": "rejected", "binding_request_id": request_id}
+
+
+def _activate_linked_access_config(
+    conn: sqlite3.Connection, catalog_agent_id: str, access_config_version: int
+) -> None:
+    """激活随绑定请求暂存的访问配置（同事务；版本已前进时保留 pending）。
+
+    激活失败绝不回滚绑定本身——M-02 明确首绑不得被配置验证死锁；残留的
+    pending 由商家经 ``PUT /v1/agents/{id}/runtime-access`` 重新提交处理。
+    """
+    if access_config_version <= 0:
+        return
+    from kiwi_catalog.services.runtime_access import activate_runtime_access
+
+    try:
+        activate_runtime_access(
+            conn, catalog_agent_id=catalog_agent_id, config_version=access_config_version
+        )
+    except ConflictError:
+        return
+
+
+def _invalidate_linked_access_config(
+    conn: sqlite3.Connection, catalog_agent_id: str, access_config_version: int
+) -> None:
+    """使随请求暂存的访问配置失效（best-effort；状态机冲突不掩盖主流程）。"""
+    if access_config_version <= 0:
+        return
+    from kiwi_catalog.services.runtime_access import invalidate_runtime_access
+
+    try:
+        invalidate_runtime_access(
+            conn, catalog_agent_id=catalog_agent_id, config_version=access_config_version
+        )
+    except (ConflictError, NotFoundError):
+        return

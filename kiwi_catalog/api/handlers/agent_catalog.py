@@ -76,6 +76,7 @@ from kiwi_catalog.core.errors import (
 from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import agent_catalog_writes, buyer_search_events, buyer_stats, usage_metrics
+from kiwi_catalog.services.runtime_access import active_public_projections
 from kiwi_catalog.services.agent_catalog import (
     search_catalog_agents as _search_catalog_agents_service,
 )
@@ -949,6 +950,7 @@ def _record_row(
     caps_map: dict[str, list[dict[str, Any]]] | None = None,
     eps_map: dict[str, list[dict[str, Any]]] | None = None,
     skills_map: dict[str, list[dict[str, Any]]] | None = None,
+    runtime_access_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serialize a catalog agent row → CatalogAgentRecord（含 skills）。"""
     cagt_id = str(row.get("catalog_agent_id", ""))
@@ -965,6 +967,8 @@ def _record_row(
         skills = skills_map.get(cagt_id, [])
     else:
         skills = list_skills(conn, cagt_id)
+    if runtime_access_map is None:
+        runtime_access_map = active_public_projections(conn, [cagt_id])
     merchant: dict[str, Any] = {
         "id": row.get("merchant_id", ""),
         "name": row.get("merchant_name", ""),
@@ -978,6 +982,7 @@ def _record_row(
         capabilities=caps,
         endpoints=eps,
         skills=skills,
+        runtime_access=runtime_access_map.get(cagt_id),
     )
 
 
@@ -987,7 +992,8 @@ def _record_rows(rows: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
     caps_map = _list_capabilities_by_agent(conn, ids)
     eps_map = _list_endpoints_by_agent(conn, ids)
     skills_map = _list_skills_by_agent(conn, ids)
-    return [_record_row(row, conn, caps_map, eps_map, skills_map) for row in rows]
+    runtime_access_map = active_public_projections(conn, ids)
+    return [_record_row(row, conn, caps_map, eps_map, skills_map, runtime_access_map) for row in rows]
 
 
 def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:

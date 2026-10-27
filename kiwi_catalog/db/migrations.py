@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 42
+CURRENT_SCHEMA_VERSION = 43
 
 
 @dataclass(frozen=True)
@@ -1420,6 +1420,57 @@ def migration_042_registration_verifications(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_043_runtime_access_configs(conn: sqlite3.Connection) -> None:
+    """独立、版本化的 WorkBuddy 访问配置；只存密文，单 active 由索引兜底。"""
+    for statement in _RUNTIME_ACCESS_CONFIGS_DDL:
+        conn.execute(statement)
+    # 绑定请求 → 暂存配置版本的关联（D1 首绑附 access_config：请求创建时
+    # 暂存 pending，商家确认后同事务激活）。幂等 ALTER，已有列即跳过；完整
+    # 迁移链上该表必然存在，表缺失（裸库直调本迁移）时跳过。
+    tables = {
+        str(row[0])
+        for row in conn.execute("select name from sqlite_master where type = 'table'")
+    }
+    if (
+        "runtime_binding_requests" in tables
+        and not _column_exists(conn, "runtime_binding_requests", "access_config_version")
+    ):
+        conn.execute(
+            "alter table runtime_binding_requests"
+            " add column access_config_version integer not null default 0"
+        )
+
+
+_RUNTIME_ACCESS_CONFIGS_DDL = [
+    """
+create table if not exists runtime_access_configs (
+        catalog_agent_id text not null,
+        config_version integer not null check(config_version >= 1),
+        provider text not null check(provider = 'workbuddy'),
+        access_mode text not null check(access_mode = 'share_parameter'),
+        parameter_name text not null check(parameter_name = 'sharecode'),
+        secret_ciphertext text not null,
+        key_id text not null,
+        adapter_version text not null check(adapter_version = 'workbuddy-share-v1'),
+        auth_mode text not null check(auth_mode = 'signature'),
+        status text not null check(status in ('pending','active','invalid','revoked')),
+        validated_at text not null default '',
+        created_at text not null,
+        updated_at text not null,
+        primary key (catalog_agent_id, config_version)
+    ) without rowid
+    """,
+    """
+create unique index if not exists idx_runtime_access_configs_one_active
+        on runtime_access_configs(catalog_agent_id) where status = 'active'
+    """,
+    """
+create index if not exists idx_runtime_access_configs_agent_status
+        on runtime_access_configs(catalog_agent_id, status)
+    """,
+]
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1463,6 +1514,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(40, "listing_entitlements", migration_040_listing_entitlements),
     Migration(41, "free_listing_limit", migration_041_free_listing_limit),
     Migration(42, "registration_verifications", migration_042_registration_verifications),
+    Migration(43, "runtime_access_configs", migration_043_runtime_access_configs),
 )
 
 

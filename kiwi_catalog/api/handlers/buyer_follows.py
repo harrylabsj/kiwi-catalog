@@ -29,10 +29,16 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
-from kiwi_catalog.core.errors import AuthError, NotFoundError, ValidationError
+from kiwi_catalog.core.errors import (
+    AuthError,
+    NotFoundError,
+    PermissionDenied,
+    ValidationError,
+)
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services import buyer_follows as follows_service
+from kiwi_catalog.services import runtime_access as runtime_access_service
 from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
 _FOLLOW_RATE_LIMIT_PER_15MIN_ENV = "KIWI_CATALOG_FOLLOW_RATE_LIMIT_PER_15MIN"
@@ -182,3 +188,102 @@ def follow_updates(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
             "ok": True,
             "updates": follows_service.fetch_updates(conn, buyer_subject=buyer_subject),
         }
+
+
+_MERCHANT_ACCESS_RATE_LIMIT_ENV = "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN"
+
+
+def _merchant_access_rate_limit_per_15min() -> int:
+    raw = os.environ.get(_MERCHANT_ACCESS_RATE_LIMIT_ENV) or ""
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 60
+
+
+def _enforce_merchant_access_rate_limit(conn: Any, buyer_subject: str) -> None:
+    """受控凭据分发按买家限流（复用 merchant_application_limits 表）。
+
+    每次发放都做一次解密，且是可以在外部分发的凭据——限流既防刷也限住
+    审计与解密的放大面。``0`` 表示关闭（沿用既有数值约定）。
+    """
+    limit = _merchant_access_rate_limit_per_15min()
+    if limit <= 0:
+        return
+    backend = SQLiteRateLimitBackend(
+        conn, table="merchant_application_limits", key_column="actor_key"
+    )
+    enforce_rate_limit(
+        backend,
+        key=f"merchant-access:{buyer_subject}",
+        limit=limit,
+        window_seconds=900,
+        description=f"merchant access distribution ({limit}/15min per buyer)",
+    )
+
+
+def get_merchant_access(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/me/merchant-access/{catalog_agent_id}（会话 + 活跃关注；C-05）。
+
+    受控分享配置分发：仅已登录且**活跃关注**目标商家的 Buyer 可获取当前
+    active 版本（含 secret_value）；无会话/未关注 403（平台全局映射，见
+    G1 §2.4 偏差）、商家不存在或未 active、绑定/配置缺失统一 404（防枚举）。
+    响应标记 no-store——配置交付后即可被持有或再传播，不提供业务权限隔离
+    （G1 契约 §1.2/§2.4）。成功发放留审计（商家、配置版本、脱敏主体），
+    日志、审计与响应元数据均不含秘密。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    # tx1：认证 + 限流计数**独立提交**。``db_session`` 只在成功时提交，若把计数
+    # 放进后续查找的同一事务，403/404 拒绝会把它回滚——探测型滥用反而完全不受限。
+    with db_session(db_path) as conn:
+        account, buyer_subject = _require_buyer(conn, payload)
+        _enforce_merchant_access_rate_limit(conn, buyer_subject)
+    with db_session(db_path) as conn:
+        agent = conn.execute(
+            "select catalog_agent_id, merchant_id, administrative_state"
+            " from catalog_agents where catalog_agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        # 行政处置（suspended/rejected）与不存在同口径 404：被处置的商家不得
+        # 继续向 Buyer 发放平台门禁凭据。
+        if (
+            agent is None
+            or not str(agent["merchant_id"] or "").strip()
+            or str(agent["administrative_state"] or "") != "active"
+        ):
+            raise NotFoundError("catalog agent not found")
+        merchant_id = str(agent["merchant_id"])
+        follow = follows_service.get_follow(
+            conn, buyer_subject=buyer_subject, merchant_id=merchant_id
+        )
+        if follow is None or str(follow.get("status")) != "active":
+            raise PermissionDenied("an active follow of this merchant is required")
+        binding = conn.execute(
+            "select runtime_origin from runtime_bindings"
+            " where catalog_agent_id = ? and status = 'active'"
+            " order by binding_version desc limit 1",
+            (agent_id,),
+        ).fetchone()
+        config = runtime_access_service.active_runtime_access(conn, agent_id)
+        if binding is None or config is None:
+            raise NotFoundError("active runtime access configuration not found")
+        result = runtime_access_service.buyer_projection(
+            config, runtime_origin=str(binding["runtime_origin"])
+        )
+        # 发放审计：主体用账户不透明 id（与 buyer_followed 同一约定），不记秘密。
+        append_catalog_audit(
+            conn,
+            catalog_agent_id=agent_id,
+            actor=f"account:{account.get('account_id')}",
+            event="runtime_access_issued",
+            details={
+                "merchant_id": merchant_id,
+                "config_version": int(result["config_version"]),
+                "access_mode": str(result["access_mode"]),
+                "adapter_version": str(result["adapter_version"]),
+            },
+        )
+        result["__no_store__"] = True
+        return result

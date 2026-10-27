@@ -31,11 +31,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+from cryptography.exceptions import InvalidSignature
 
 from kiwi_catalog.a2a.binding_claims import jwk_thumbprint, read_runtime_binding
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
@@ -52,6 +56,7 @@ from kiwi_catalog.core.errors import (
 )
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
+from kiwi_catalog.services import runtime_access as runtime_access_service
 
 _LOG = logging.getLogger(__name__)
 
@@ -361,6 +366,14 @@ def create_runtime_binding(
     jws = str(payload.get("_binding_jws") or "").strip()
     if not jws:
         raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
+    # 首绑可附带 WorkBuddy 访问配置（G1 契约 §2.3.1）：此处只做形状校验，
+    # 暂存发生在各分支事务内（D1 随请求暂存、确认时激活；admin 兜底直接激活）。
+    access_config_raw = payload.get("access_config")
+    access_config = (
+        runtime_access_service.parse_access_config(access_config_raw)
+        if access_config_raw is not None
+        else None
+    )
     key_jwk = dict(binding["key_jwk"])
     thumbprint = jwk_thumbprint(key_jwk)
     management = _management_declaration(binding)
@@ -391,6 +404,12 @@ def create_runtime_binding(
                 # D1：落「待确认接入请求」（不写 active 绑定，不提前背书）
                 from kiwi_catalog.services import binding_requests as binding_requests_service
 
+                # 随请求暂存访问配置（pending，CAS 版本）；确认时同事务激活。
+                staged = None
+                if access_config is not None:
+                    staged = runtime_access_service.stage_runtime_access(
+                        conn, catalog_agent_id=agent_id, access_config=access_config
+                    )
                 result = binding_requests_service.create_request(
                     conn,
                     agent=agent,
@@ -398,7 +417,10 @@ def create_runtime_binding(
                     key_jwk=key_jwk,
                     thumbprint=thumbprint,
                     signed_payload=possession,
+                    access_config_version=int(staged["config_version"]) if staged else 0,
                 )
+                if staged is not None:
+                    result = {**result, "runtime_access": staged}
                 notify_request = result
             else:
                 # 运维兜底：admin + 持钥证明直接落 active 绑定（旧语义保留）。
@@ -412,8 +434,24 @@ def create_runtime_binding(
                     existing=None,
                     actor=f"admin+possession:{binding['key_id']}",
                 )
+                if access_config is not None:
+                    # admin 路径无网络挑战：配置随绑定直接激活（同 trusted 语义）。
+                    staged = runtime_access_service.stage_runtime_access(
+                        conn, catalog_agent_id=agent_id, access_config=access_config
+                    )
+                    result = {
+                        **result,
+                        "runtime_access": runtime_access_service.activate_runtime_access(
+                            conn, catalog_agent_id=agent_id, config_version=int(staged["config_version"])
+                        ),
+                    }
         else:
             # 轮换：必须由**当前活动绑定**的私钥签名（或管理员）。
+            if access_config is not None:
+                raise ValidationError(
+                    f"access_config is not accepted on rotation;"
+                    f" use PUT /v1/agents/{agent_id}/runtime-access"
+                )
             admin_token = str(payload.get("admin_token") or "")
             is_admin = bool(admin_token) and api_auth.admin_token_matches(admin_token, conn)
             if is_admin:
@@ -462,7 +500,6 @@ def create_runtime_binding(
 def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """持 enrollment grant + 完整请求签名 + 外部端点挑战自动首绑。"""
     import hashlib
-    import secrets
     from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
     from kiwi_catalog.a2a.request_signature import consume_request_nonce
     from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher
@@ -480,6 +517,12 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
     if not enrollment_id or not grant or not jws:
         raise ValidationError("enrollment_id, grant and x-kiwi-binding-jws are required")
     body = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    access_config_raw = payload.get("access_config")
+    access_config = (
+        runtime_access_service.parse_access_config(access_config_raw)
+        if access_config_raw is not None
+        else None
+    )
     with db_session(db_path) as conn:
         row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
@@ -526,87 +569,116 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
             return _enrollment_binding_result(conn, agent_id, row)
         challenge = secrets.token_urlsafe(32)
         origin = str(row["runtime_origin"]).rstrip("/")
+        # 随 enrollment 首绑暂存访问配置（pending；CAS 版本）。已 bound 的重入
+        # 路径不走这里——配置更新统一由 PUT runtime-access 处理。
+        staged = None
+        if access_config is not None:
+            staged = runtime_access_service.stage_runtime_access(
+                conn, catalog_agent_id=agent_id, access_config=access_config
+            )
         challenge_request = {"enrollment_id": enrollment_id, "challenge": challenge, "origin": origin,
             "key_thumbprint": thumb, "audience": "kiwi-catalog", "issued_at": now_iso(),
             "expires_at": (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)).isoformat()}
     # Network challenge outside SQL transaction. ProfileFetcher pins verified public IP, bounds body and rejects redirects.
-    try:
-        result = ProfileFetcher(TrustPolicy.defaults(), timeout=5).post_json(
-            origin + "/.well-known/kiwi-binding-challenge", challenge_request, timeout=5)
-    except FetchError as exc:
-        # 出口网络失败（DNS/连接/TLS 握手/超时）统一收敛为既有可诊断 409；
-        # 日志只记自有码 + 异常类型名，不记 URL/异常原文，不放宽任何安全边界。
-        # C6：客户端可见面有意保持粗粒度——旧 Runtime 把本 409 映射为
-        # BIND_REJECTED（"目录拒绝了本次绑定请求"），精确拒绝原因只在服务端
-        # 日志（BIND_CHALLENGE_DELIVERY_FAILED）；两仓口径对齐见 A17 报告 C6，
-        # 不在本协议版本扩大响应面。
-        _LOG.warning(
-            "runtime binding challenge delivery failed: code=%s stage=challenge_delivery agent=%s error_type=%s",
-            BIND_DIAG_CHALLENGE_DELIVERY_FAILED, _log_safe_id(agent_id), type(exc).__name__,
+    # 带码挑战：分享参数只追加在发送地址上（网关验码后剥除），不进入任何签名材料。
+    challenge_url = origin + "/.well-known/kiwi-binding-challenge"
+    if access_config is not None:
+        challenge_url = runtime_access_service.append_share_parameter(
+            challenge_url, str(access_config["secret_value"])
         )
-        raise ConflictError("runtime endpoint challenge failed; retry when the public HTTPS service is reachable") from exc
-    if result.status_code != 200:
-        _deny(BIND_DIAG_CHALLENGE_REJECTED, "challenge_delivery", agent_id,
-              "runtime endpoint challenge failed", detail=f"status={result.status_code}")
     try:
-        response = json.loads(result.body)
-    except (ValueError, TypeError) as exc:
-        _deny(BIND_DIAG_CHALLENGE_JSON, "challenge_response", agent_id,
-              "runtime endpoint challenge returned invalid JSON", cause=exc)
-    if not isinstance(response, dict) or set(response) != {"enrollment_id", "challenge", "origin", "key_thumbprint", "audience", "issued_at", "expires_at", "key_id", "signature"}:
-        _deny(BIND_DIAG_CHALLENGE_SHAPE, "challenge_response", agent_id,
-              "runtime endpoint challenge response shape is invalid")
-    for key, value in challenge_request.items():
-        if response.get(key) != value:
-            _deny(BIND_DIAG_CHALLENGE_MISMATCH, "challenge_response", agent_id,
-                  "runtime endpoint challenge response mismatch")
-    if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
-        _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_response", agent_id,
-              "runtime endpoint challenge expired")
-    try:
-        verify_binding_possession(jws=str(response["signature"]), public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
-            **{k: response[k] for k in challenge_request}, "key_id": row["key_id"], "purpose": "kiwi-binding-challenge"})
-    except PermissionDenied:
-        _deny_logged(BIND_DIAG_POSSESSION_INVALID, "challenge_response", agent_id)
-        raise
-    challenge_jws_payload = _read_jws_payload(str(response["signature"]))
-    _check_enrollment_exp({**challenge_jws_payload, "exp": response["expires_at"]})
-    with db_session(db_path) as conn:
-        row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
-        agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
-        if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
-            _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_commit", agent_id,
-                  "runtime endpoint challenge expired")
-        if row is None or row["status"] != "authorized" or row["grant_expires_at"] <= now_iso() or row["merchant_id"] != agent["merchant_id"] or agent["administrative_state"] != "active":
-            _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
-                  "enrollment authorization changed during endpoint challenge")
-        if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"] or int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]) or "runtime:bind" not in json.loads(row["scopes_json"]):
-            _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
-                  "enrollment grant changed during endpoint challenge")
         try:
-            consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(challenge_jws_payload.get("nonce", "")), issued_at=str(challenge_jws_payload.get("issued_at", "")))
+            result = ProfileFetcher(TrustPolicy.defaults(), timeout=5).post_json(
+                challenge_url, challenge_request, timeout=5)
+        except FetchError as exc:
+            # 出口网络失败（DNS/连接/TLS 握手/超时）统一收敛为既有可诊断 409；
+            # 日志只记自有码 + 异常类型名，不记 URL/异常原文，不放宽任何安全边界。
+            # C6：客户端可见面有意保持粗粒度——旧 Runtime 把本 409 映射为
+            # BIND_REJECTED（"目录拒绝了本次绑定请求"），精确拒绝原因只在服务端
+            # 日志（BIND_CHALLENGE_DELIVERY_FAILED）；两仓口径对齐见 A17 报告 C6，
+            # 不在本协议版本扩大响应面。
+            _LOG.warning(
+                "runtime binding challenge delivery failed: code=%s stage=challenge_delivery agent=%s error_type=%s",
+                BIND_DIAG_CHALLENGE_DELIVERY_FAILED, _log_safe_id(agent_id), type(exc).__name__,
+            )
+            raise ConflictError("runtime endpoint challenge failed; retry when the public HTTPS service is reachable") from exc
+        if result.status_code != 200:
+            _deny(BIND_DIAG_CHALLENGE_REJECTED, "challenge_delivery", agent_id,
+                  "runtime endpoint challenge failed", detail=f"status={result.status_code}")
+        try:
+            response = json.loads(result.body)
+        except (ValueError, TypeError) as exc:
+            _deny(BIND_DIAG_CHALLENGE_JSON, "challenge_response", agent_id,
+                  "runtime endpoint challenge returned invalid JSON", cause=exc)
+        if not isinstance(response, dict) or set(response) != {"enrollment_id", "challenge", "origin", "key_thumbprint", "audience", "issued_at", "expires_at", "key_id", "signature"}:
+            _deny(BIND_DIAG_CHALLENGE_SHAPE, "challenge_response", agent_id,
+                  "runtime endpoint challenge response shape is invalid")
+        for key, value in challenge_request.items():
+            if response.get(key) != value:
+                _deny(BIND_DIAG_CHALLENGE_MISMATCH, "challenge_response", agent_id,
+                      "runtime endpoint challenge response mismatch")
+        if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
+            _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_response", agent_id,
+                  "runtime endpoint challenge expired")
+        try:
+            verify_binding_possession(jws=str(response["signature"]), public_jwk=json.loads(row["key_jwk_json"]), expected_fields={
+                **{k: response[k] for k in challenge_request}, "key_id": row["key_id"], "purpose": "kiwi-binding-challenge"})
         except PermissionDenied:
-            _deny_logged(BIND_DIAG_POSSESSION_REPLAY, "challenge_commit", agent_id)
+            _deny_logged(BIND_DIAG_POSSESSION_INVALID, "challenge_response", agent_id)
             raise
-        version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
-        if version != int(row["expected_binding_version"]):
-            raise ConflictError("binding version changed since enrollment authorization")
-        outcome = _insert_active_binding(conn, agent=agent, binding=binding, key_jwk=dict(binding["key_jwk"]),
-            thumbprint=thumb, management=_management_declaration(binding), existing=_current_active_binding(conn, agent_id), actor=f"enrollment:{enrollment_id}")
-        changed = conn.execute("update enrollments set status='bound',binding_id=?,consumed_at=? where enrollment_id=? and status='authorized'",
-                               (outcome["binding_id"], now_iso(), enrollment_id)).rowcount
-        if changed != 1:
-            raise ConflictError("enrollment grant was concurrently consumed")
-        from kiwi_catalog.discovery._validation import canonical_domain_of
-        conn.execute("update catalog_agents set canonical_domain=?, updated_at=? where catalog_agent_id=?",
-                     (canonical_domain_of(str(row["runtime_origin"])), now_iso(), agent_id))
-        from kiwi_catalog.services.binding_requests import record_active_binding_evidence
-        record_active_binding_evidence(
-            conn, catalog_agent_id=agent_id, binding_id=str(outcome["binding_id"]),
-            key_thumbprint=thumb, runtime_origin=str(row["runtime_origin"]),
-            a2a_endpoint=str(row["a2a_endpoint"]), checked_at=now_iso(),
-        )
-        return _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
+        challenge_jws_payload = _read_jws_payload(str(response["signature"]))
+        _check_enrollment_exp({**challenge_jws_payload, "exp": response["expires_at"]})
+        with db_session(db_path) as conn:
+            row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+            agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
+            if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
+                _deny(BIND_DIAG_CHALLENGE_EXPIRED, "challenge_commit", agent_id,
+                      "runtime endpoint challenge expired")
+            if row is None or row["status"] != "authorized" or row["grant_expires_at"] <= now_iso() or row["merchant_id"] != agent["merchant_id"] or agent["administrative_state"] != "active":
+                _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
+                      "enrollment authorization changed during endpoint challenge")
+            if hashlib.sha256(grant.encode()).hexdigest() != row["grant_hash"] or int(binding["generation"]) != int(row["generation"]) or int(binding["service_epoch"]) != int(row["service_epoch"]) or "runtime:bind" not in json.loads(row["scopes_json"]):
+                _deny(BIND_DIAG_ENROLLMENT_CHANGED, "challenge_commit", agent_id,
+                      "enrollment grant changed during endpoint challenge")
+            try:
+                consume_request_nonce(conn, key_id=str(row["key_id"]), nonce=str(challenge_jws_payload.get("nonce", "")), issued_at=str(challenge_jws_payload.get("issued_at", "")))
+            except PermissionDenied:
+                _deny_logged(BIND_DIAG_POSSESSION_REPLAY, "challenge_commit", agent_id)
+                raise
+            version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
+            if version != int(row["expected_binding_version"]):
+                raise ConflictError("binding version changed since enrollment authorization")
+            outcome = _insert_active_binding(conn, agent=agent, binding=binding, key_jwk=dict(binding["key_jwk"]),
+                thumbprint=thumb, management=_management_declaration(binding), existing=_current_active_binding(conn, agent_id), actor=f"enrollment:{enrollment_id}")
+            changed = conn.execute("update enrollments set status='bound',binding_id=?,consumed_at=? where enrollment_id=? and status='authorized'",
+                                   (outcome["binding_id"], now_iso(), enrollment_id)).rowcount
+            if changed != 1:
+                raise ConflictError("enrollment grant was concurrently consumed")
+            from kiwi_catalog.discovery._validation import canonical_domain_of
+            conn.execute("update catalog_agents set canonical_domain=?, updated_at=? where catalog_agent_id=?",
+                         (canonical_domain_of(str(row["runtime_origin"])), now_iso(), agent_id))
+            from kiwi_catalog.services.binding_requests import record_active_binding_evidence
+            record_active_binding_evidence(
+                conn, catalog_agent_id=agent_id, binding_id=str(outcome["binding_id"]),
+                key_thumbprint=thumb, runtime_origin=str(row["runtime_origin"]),
+                a2a_endpoint=str(row["a2a_endpoint"]), checked_at=now_iso(),
+            )
+            if staged is not None:
+                # 绑定落库后同事务激活访问配置；版本已前进（并发提交流）时保留
+                # pending——激活失败绝不回滚绑定本身（M-02：不形成验证死锁）。
+                try:
+                    runtime_access_service.activate_runtime_access(
+                        conn, catalog_agent_id=agent_id,
+                        config_version=int(staged["config_version"]),
+                    )
+                except ConflictError:
+                    pass
+            return _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
+    except BaseException:
+        # 挑战或提交失败：随绑暂存的访问配置不得残留 pending（旧 active 不受影响）。
+        if staged is not None:
+            _invalidate_staged_best_effort(db_path, agent_id, int(staged["config_version"]))
+        raise
 
 
 def _check_enrollment_exp(signed: dict[str, Any]) -> None:
@@ -689,3 +761,289 @@ def revoke_runtime_binding(
             details={"binding_id": target},
         )
         return {"binding_id": target, "status": "revoked", "changed": True}
+
+
+# ── WorkBuddy 访问配置：更新/撤销（G1 契约 §2.3；C-03）────────────────────
+
+_ACCESS_CHALLENGE_WINDOW_SECONDS = 120
+_CHALLENGE_RESPONSE_FIELDS = frozenset({"proof_jws", "key_id", "key_thumbprint", "subject_digest"})
+
+
+def _endpoint_path(a2a_endpoint: str) -> str:
+    """从绑定的 A2A 端点取路径（运行时挑战的 expectedPath 必须与之精确一致）。"""
+    from urllib.parse import urlsplit
+
+    return urlsplit(a2a_endpoint).path or "/"
+
+
+def _build_endpoint_challenge(
+    *,
+    agent_id: str,
+    merchant_id: str,
+    origin: str,
+    path: str,
+    key_thumbprint: str,
+    generation: int,
+) -> dict[str, Any]:
+    """构造 /control/challenge 挑战（结构对齐 kiwi 运行时 proofs.ts BindingChallenge）。"""
+    issued = datetime.now(UTC).replace(microsecond=0)
+    return {
+        "challenge_id": f"rac_{secrets.token_urlsafe(24)}",
+        "purpose": "endpoint",
+        "nonce": secrets.token_urlsafe(32),
+        "agent_id": agent_id,
+        "merchant_id": merchant_id,
+        "origin": origin,
+        "path": path,
+        "key_thumbprint": key_thumbprint,
+        "generation": int(generation),
+        "issued_at": issued.isoformat(),
+        "expires_at": (issued + timedelta(seconds=_ACCESS_CHALLENGE_WINDOW_SECONDS)).isoformat(),
+    }
+
+
+def _challenge_subject(challenge: dict[str, Any]) -> bytes:
+    """挑战主体的规范化字节——**逐字段对齐** proofs.ts challengeSubject 的键序。"""
+    subject = {
+        "agent_id": challenge["agent_id"],
+        "challenge_id": challenge["challenge_id"],
+        "expires_at": challenge["expires_at"],
+        "generation": challenge["generation"],
+        "issued_at": challenge["issued_at"],
+        "key_thumbprint": challenge["key_thumbprint"],
+        "merchant_id": challenge["merchant_id"],
+        "nonce": challenge["nonce"],
+        "origin": challenge["origin"],
+        "path": challenge["path"],
+        "purpose": challenge["purpose"],
+    }
+    return json.dumps(subject, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _verify_endpoint_challenge_proof(
+    proof_jws: str, challenge: dict[str, Any], public_jwk: dict[str, Any]
+) -> bytes:
+    """验运行时挑战证明，返回挑战主体字节（供 subject_digest 对账）。
+
+    与 proofs.ts verifyBindingChallengeProof 对齐：固定 EdDSA；公钥取自 active
+    binding（挑战 key_thumbprint 即该绑定指纹，等价于按指纹钉死钥匙）；证明
+    负载必须恰好等于挑战主体，不接受任何自由文本签名。
+    """
+    from kiwi_catalog.a2a.request_signature import _b64url_decode, _public_key_from_jwk
+
+    try:
+        header_segment, payload_segment, signature_segment = str(proof_jws).split(".")
+        header = json.loads(_b64url_decode(header_segment))
+        signature = _b64url_decode(signature_segment)
+        payload = _b64url_decode(payload_segment)
+    except Exception as exc:
+        raise ValidationError("malformed endpoint challenge proof") from exc
+    if not isinstance(header, dict) or header.get("alg") != "EdDSA":
+        raise PermissionDenied("endpoint challenge proof alg is not allowed")
+    if datetime.fromisoformat(str(challenge["expires_at"])) <= datetime.now(UTC):
+        raise PermissionDenied("endpoint challenge expired")
+    subject = _challenge_subject(challenge)
+    try:
+        public_key = _public_key_from_jwk(dict(public_jwk))
+        public_key.verify(signature, f"{header_segment}.{payload_segment}".encode("ascii"))
+    except InvalidSignature as exc:
+        raise PermissionDenied("endpoint challenge proof verification failed") from exc
+    if payload != subject:
+        raise PermissionDenied("endpoint challenge proof subject mismatch")
+    return subject
+
+
+def _run_endpoint_challenge(
+    *, origin: str, challenge: dict[str, Any], secret: str, public_jwk: dict[str, Any]
+) -> None:
+    """事务外带码端点挑战：POST /control/challenge?sharecode=… 并核验证明。
+
+    分享参数只出现在发送地址上（网关验码后剥除），不进入挑战体或签名材料；
+    网络失败收敛为可诊断 409，日志只记自有码与异常类型名。
+    """
+    from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher
+    from kiwi_catalog.discovery.trust import TrustPolicy
+    from kiwi_catalog.services.runtime_access import append_share_parameter
+
+    agent_id = str(challenge["agent_id"])
+    url = append_share_parameter(origin.rstrip("/") + "/control/challenge", secret)
+    try:
+        result = ProfileFetcher(TrustPolicy.defaults(), timeout=5).post_json(
+            url, {"challenge": challenge}, timeout=5
+        )
+    except FetchError as exc:
+        _LOG.warning(
+            "runtime access challenge delivery failed: code=%s stage=challenge_delivery agent=%s error_type=%s",
+            BIND_DIAG_CHALLENGE_DELIVERY_FAILED, _log_safe_id(agent_id), type(exc).__name__,
+        )
+        raise ConflictError(
+            "runtime endpoint challenge failed; retry when the public HTTPS service is reachable"
+        ) from exc
+    if result.status_code != 200:
+        _deny(BIND_DIAG_CHALLENGE_REJECTED, "challenge_delivery", agent_id,
+              "runtime endpoint challenge failed", detail=f"status={result.status_code}")
+    try:
+        response = json.loads(result.body)
+    except (ValueError, TypeError) as exc:
+        _deny(BIND_DIAG_CHALLENGE_JSON, "challenge_response", agent_id,
+              "runtime endpoint challenge returned invalid JSON", cause=exc)
+    if not isinstance(response, dict) or set(response) != _CHALLENGE_RESPONSE_FIELDS:
+        _deny(BIND_DIAG_CHALLENGE_SHAPE, "challenge_response", agent_id,
+              "runtime endpoint challenge response shape is invalid")
+    subject = _verify_endpoint_challenge_proof(str(response["proof_jws"]), challenge, public_jwk)
+    digest = f"sha256:{hashlib.sha256(subject).hexdigest()}"
+    if str(response["subject_digest"]) != digest:
+        _deny(BIND_DIAG_CHALLENGE_MISMATCH, "challenge_response", agent_id,
+              "runtime endpoint challenge subject digest mismatch")
+
+
+def _invalidate_staged_best_effort(
+    db_path: str | Path, catalog_agent_id: str, config_version: int
+) -> None:
+    """挑战失败后使暂存版本失效（清理动作；失败不掩盖原始错误）。"""
+    try:
+        with db_session(db_path) as conn:
+            runtime_access_service.invalidate_runtime_access(
+                conn, catalog_agent_id=catalog_agent_id, config_version=config_version
+            )
+    except Exception:
+        _LOG.warning(
+            "runtime access staged invalidation failed: agent=%s version=%s",
+            _log_safe_id(catalog_agent_id), config_version,
+        )
+
+
+def update_runtime_access(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """PUT /v1/agents/{id}/runtime-access —— 更新/撤销 WorkBuddy 访问配置。
+
+    授权：当前 active binding 私钥签名，覆盖 method、path、body digest、agent、
+    binding/key/origin/service_epoch + exp（≤2min）+ nonce（重放存储消费）。
+    流程：tx1 校验并暂存 pending（CAS 版本）→ 事务外带码端点挑战（撤销跳过）
+    → tx2 重查绑定与状态后原子激活/撤销。任何失败保留旧 active 版本；响应只
+    返回脱敏元数据，绝不回显 secret_value。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
+    binding_ref = payload.get("binding")
+    if not isinstance(binding_ref, dict) or not str(binding_ref.get("binding_id") or "").strip():
+        raise ValidationError("binding.binding_id is required")
+    config = runtime_access_service.parse_access_config(payload.get("access_config"))
+    body = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    with db_session(db_path) as conn:  # tx1：校验 + 暂存
+        agent = conn.execute(
+            "select * from catalog_agents where catalog_agent_id = ?", (agent_id,)
+        ).fetchone()
+        if agent is None:
+            raise NotFoundError("catalog agent not found")
+        binding = _current_active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("no active runtime binding for this agent")
+        signed = verify_runtime_request(
+            conn,
+            catalog_agent_id=agent_id,
+            jws=jws,
+            expected_fields={
+                "method": "PUT",
+                "path": f"/v1/agents/{agent_id}/runtime-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body),
+                "catalog_agent_id": agent_id,
+                "binding_id": str(binding["binding_id"]),
+                "key_id": str(binding["key_id"]),
+                "runtime_origin": str(binding["runtime_origin"]),
+                "service_epoch": int(binding["service_epoch"]),
+            },
+        )
+        _check_enrollment_exp(signed)
+        if str(agent["administrative_state"]) != "active":
+            _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id,
+                  "catalog agent is not active")
+        if config["access_mode"] == "none":
+            # 撤销：无新版本可暂存，直接进入 tx2 的原子撤销。
+            staged_version = 0
+        else:
+            staged = runtime_access_service.stage_runtime_access(
+                conn, catalog_agent_id=agent_id, access_config=config
+            )
+            staged_version = int(staged["config_version"])
+        binding_origin = str(binding["runtime_origin"])
+        # 挑战体里的 origin 与运行时 expectedOrigin 精确比较：运行时侧的
+        # publicOrigin 已归一（无尾部斜杠），这里同样归一，仅用于构造挑战。
+        challenge_origin = binding_origin.rstrip("/")
+        binding_epoch = int(binding["service_epoch"])
+        binding_key_jwk_json = str(binding["key_jwk_json"])
+        merchant_id = str(binding["merchant_id"] or "").strip()
+        challenge_request = None
+        if config["access_mode"] != "none":
+            if not merchant_id:
+                # 运行时对空 merchant_id 只会回 400 invalid_challenge；这里提前
+                # 给出可诊断的状态冲突，不发无意义请求。
+                raise ConflictError("runtime binding has no merchant identity")
+            challenge_request = _build_endpoint_challenge(
+                agent_id=agent_id,
+                merchant_id=merchant_id,
+                origin=challenge_origin,
+                path=_endpoint_path(str(binding["a2a_endpoint"])),
+                key_thumbprint=str(binding["key_thumbprint"]),
+                generation=int(binding["service_epoch"]),
+            )
+    if challenge_request is not None:
+        try:
+            _run_endpoint_challenge(
+                origin=binding_origin,
+                challenge=challenge_request,
+                secret=str(config["secret_value"]),
+                public_jwk=json.loads(binding_key_jwk_json),
+            )
+        except BaseException:
+            _invalidate_staged_best_effort(db_path, agent_id, staged_version)
+            raise
+    try:
+        with db_session(db_path) as conn:  # tx2：重查后原子激活/撤销
+            agent = conn.execute(
+                "select administrative_state from catalog_agents where catalog_agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            if agent is None or str(agent["administrative_state"]) != "active":
+                raise ConflictError("catalog agent changed during endpoint challenge")
+            current = _current_active_binding(conn, agent_id)
+            if (
+                current is None
+                or str(current["binding_id"]) != str(binding_ref["binding_id"])
+                or int(current["service_epoch"]) != binding_epoch
+            ):
+                raise ConflictError("runtime binding changed during endpoint challenge")
+            if config["access_mode"] == "none":
+                projection = runtime_access_service.revoke_runtime_access(
+                    conn, catalog_agent_id=agent_id, access_config=config
+                )
+                event = "runtime_access_revoked"
+            else:
+                projection = runtime_access_service.activate_runtime_access(
+                    conn, catalog_agent_id=agent_id, config_version=staged_version
+                )
+                event = "runtime_access_updated"
+            append_catalog_audit(
+                conn,
+                catalog_agent_id=agent_id,
+                actor=f"runtime:{current['binding_id']}",
+                event=event,
+                details={
+                    "config_version": int(projection["config_version"]),
+                    "access_mode": str(projection["access_mode"]),
+                    "status": str(projection["status"]),
+                },
+            )
+            return {"ok": True, "runtime_access": projection}
+    except BaseException:
+        # 契约 §2.3.3：失败保留旧 active，新版本标 invalid——不得残留 pending。
+        # 事务已回滚，失效动作必须在独立事务里做。
+        if staged_version > 0:
+            _invalidate_staged_best_effort(db_path, agent_id, staged_version)
+        raise

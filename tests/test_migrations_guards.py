@@ -468,5 +468,72 @@ class Migration038RuntimeBindingRequestsTest(unittest.TestCase):
             conn.close()
 
 
+class Migration043RuntimeAccessConfigsTest(unittest.TestCase):
+    """v43 独立访问配置表：状态约束、密文字段与单 active 索引。"""
+
+    def test_table_created_with_indexes_and_idempotent(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import migration_043_runtime_access_configs
+
+            migration_043_runtime_access_configs(conn)
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(runtime_access_configs)").fetchall()
+            }
+            for expected in (
+                "catalog_agent_id",
+                "config_version",
+                "provider",
+                "access_mode",
+                "parameter_name",
+                "secret_ciphertext",
+                "key_id",
+                "adapter_version",
+                "auth_mode",
+                "status",
+                "validated_at",
+                "created_at",
+                "updated_at",
+            ):
+                self.assertIn(expected, columns)
+            self.assertNotIn("secret_value", columns)
+            indexes = {
+                str(row[1])
+                for row in conn.execute("pragma index_list(runtime_access_configs)").fetchall()
+            }
+            self.assertIn("idx_runtime_access_configs_one_active", indexes)
+            self.assertIn("idx_runtime_access_configs_agent_status", indexes)
+            # 绑定请求 → 暂存配置版本的关联列（幂等 ALTER，重复执行不报错）。
+            request_columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(runtime_binding_requests)").fetchall()
+            }
+            self.assertIn("access_config_version", request_columns)
+
+            def insert(version: int, status: str) -> None:
+                conn.execute(
+                    "insert into runtime_access_configs (catalog_agent_id, config_version,"
+                    " provider, access_mode, parameter_name, secret_ciphertext, key_id,"
+                    " adapter_version, auth_mode, status, created_at, updated_at)"
+                    " values ('cagt_1', ?, 'workbuddy', 'share_parameter', 'sharecode',"
+                    " 'ciphertext', 'key-v1', 'workbuddy-share-v1', 'signature', ?, ?, ?)",
+                    (version, status, _TS, _TS),
+                )
+
+            insert(1, "active")
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert(2, "active")
+            conn.rollback()
+            insert(1, "active")
+            insert(2, "invalid")
+            with self.assertRaises(sqlite3.IntegrityError):
+                insert(3, "bogus")
+            conn.rollback()
+            migration_043_runtime_access_configs(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
+from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
+from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
@@ -258,8 +260,13 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             response.headers["referrer-policy"] = "no-referrer"
             response.headers["content-security-policy"] = "frame-ancestors 'none'"
 
-            # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）
-            if request.method == "GET" and response.status_code == 200:
+            # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）；
+            # no-store 路由（受控凭据分发）不参与缓存与条件请求。
+            if (
+                request.method == "GET"
+                and response.status_code == 200
+                and "no-store" not in response.headers.get("cache-control", "").lower()
+            ):
                 body = b"".join([chunk async for chunk in response.body_iterator])
                 etag = compute_etag(body)
                 headers = dict(response.headers)
@@ -567,6 +574,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _create_runtime_binding(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+
+    @app.put("/v1/agents/{catalog_agent_id}/runtime-access")
+    def update_runtime_access_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return cloud_binding_handlers.update_runtime_access(
             db_path, catalog_agent_id, _cloud_payload(payload, request)
         )
 
@@ -1022,6 +1037,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         merchant_id: str, request: _FastAPIRequest
     ) -> dict[str, Any]:
         return _v1_unfollow_merchant(db_path, merchant_id, _account_payload(request, {}))
+
+    @app.get("/v1/me/merchant-access/{catalog_agent_id}")
+    def get_merchant_access_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = buyer_follows_handlers.get_merchant_access(
+            db_path, catalog_agent_id, _account_payload(request, {})
+        )
+        no_store = bool(result.pop("__no_store__", False))
+        headers = {"cache-control": "no-store"} if no_store else None
+        return _JSONResponse(result, headers=headers)
 
     # 扩展路由挂钩（docs/extensions.md）：基表注册完再让扩展包挂自己的
     # FastAPI 路由；fail-soft 由 run_fastapi_hooks 负责。
