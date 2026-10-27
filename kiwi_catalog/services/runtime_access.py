@@ -60,11 +60,16 @@ _KEY_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def custody_enabled() -> bool:
-    """目录代管分享码的**总开关**：默认关闭，`1/true/on` 才启用。
+    """目录代管分享码的总开关：**默认启用**，`0/false/off/no` 显式停用。
 
-    关闭时：不得创建/激活新的托管配置，Buyer 也不再发放；撤销与读取仍然可用，
-    这样运营可以在平台规则变化时立刻止血，而商家仍能干净地撤回。"""
-    return str(os.environ.get(CUSTODY_ENV) or "").strip().lower() in {"1", "true", "on", "yes"}
+    产品决定（2026-10-27）：代管的门槛是**商家逐户显式授权**（见
+    `runtime_access_consents`），而不是默认关停；本开关只作为运营的**紧急停用**
+    手段——关闭后不得创建/激活新的托管配置、Buyer 停止发放，但撤销与读取仍然
+    可用，商家能干净地撤回。"""
+    raw = str(os.environ.get(CUSTODY_ENV) or "").strip().lower()
+    if raw == "":
+        return True
+    return raw not in {"0", "false", "off", "no"}
 
 
 def append_share_parameter(url: str, secret: str) -> str:

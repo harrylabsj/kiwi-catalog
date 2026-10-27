@@ -607,6 +607,23 @@ class RuntimeAccessApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 404, payload)
 
+    def test_custody_is_enabled_by_default_and_the_switch_is_an_emergency_stop(self) -> None:
+        from kiwi_catalog.services import runtime_access as runtime_access_service
+
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KIWI_CATALOG_ACCESS_CUSTODY_ENABLED", None)
+            self.assertTrue(runtime_access_service.custody_enabled())
+        for value in ("0", "false", "off", "no", "OFF"):
+            with unittest.mock.patch.dict(
+                os.environ, {"KIWI_CATALOG_ACCESS_CUSTODY_ENABLED": value}, clear=False
+            ):
+                self.assertFalse(runtime_access_service.custody_enabled(), value)
+        for value in ("1", "true", "on"):
+            with unittest.mock.patch.dict(
+                os.environ, {"KIWI_CATALOG_ACCESS_CUSTODY_ENABLED": value}, clear=False
+            ):
+                self.assertTrue(runtime_access_service.custody_enabled(), value)
+
     def test_custody_switch_blocks_new_configuration_and_distribution(self) -> None:
         buyer_session = self._register_and_follow()
         with unittest.mock.patch.dict(
