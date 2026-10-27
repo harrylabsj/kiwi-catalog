@@ -335,6 +335,30 @@ class RuntimeAccessApiTest(unittest.TestCase):
         )
         return _call(self.app, "PUT", f"/v1/agents/{self.cagt}/runtime-access", body, signature=sig)
 
+    def _read_access(self, *, pem: str | None = None, signature: str | None = None):
+        """签名 GET：body_digest 覆盖空对象（契约：GET 也走同一授权模型）。"""
+        pem = pem or self.runtime_pem
+        body: dict = {}
+        sig = signature if signature is not None else _jws(
+            pem,
+            RUNTIME_ORIGIN,
+            {
+                "method": "GET",
+                "path": f"/v1/agents/{self.cagt}/runtime-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body),
+                "catalog_agent_id": self.cagt,
+                "binding_id": self.binding_id,
+                "key_id": RUNTIME_ORIGIN,
+                "runtime_origin": RUNTIME_ORIGIN,
+                "service_epoch": 7,
+            },
+            with_exp=True,
+        )
+        return _call(
+            self.app, "GET", f"/v1/agents/{self.cagt}/runtime-access", signature=sig
+        )
+
     def _config_row(self, version: int, cagt: str | None = None) -> sqlite3.Row | None:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -512,6 +536,63 @@ class RuntimeAccessApiTest(unittest.TestCase):
             self.app, "POST", f"/v1/agents/{self.cagt}/runtime-bindings", body, signature=sig
         )
         self.assertEqual(status, 400, payload)
+
+    # ── 商家侧权威读 ─────────────────────────────────────────────────────
+
+    def test_signed_read_returns_redacted_state_and_current_version(self) -> None:
+        status, payload = self._read_access()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["config_version"], 1)
+        projection = payload["runtime_access"]
+        self.assertEqual(projection["status"], "active")
+        self.assertEqual(projection["config_version"], 1)
+        self.assertEqual(projection["provider"], "workbuddy")
+        self.assertNotIn("secret_value", json.dumps(payload))
+        self.assertNotIn("secret_ciphertext", json.dumps(payload))
+
+    def test_signed_read_reports_revoked_state_and_head_version(self) -> None:
+        with unittest.mock.patch.object(
+            ProfileFetcher, "post_json", side_effect=self._challenge_stub()
+        ):
+            self._put_access(_revoke_config(1))
+        status, payload = self._read_access()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["config_version"], 1)
+        self.assertEqual(payload["runtime_access"]["status"], "revoked")
+
+    def test_signed_read_requires_the_active_binding_key(self) -> None:
+        wrong_pem, _wrong_jwk = _runtime_key()
+        status, payload = self._read_access(pem=wrong_pem)
+        self.assertEqual(status, 403, payload)
+
+    def test_signed_read_requires_a_signature(self) -> None:
+        status, payload = _call(
+            self.app, "GET", f"/v1/agents/{self.cagt}/runtime-access"
+        )
+        self.assertEqual(status, 400, payload)
+
+    def test_signed_read_nonce_cannot_be_replayed(self) -> None:
+        body: dict = {}
+        sig = _jws(
+            self.runtime_pem,
+            RUNTIME_ORIGIN,
+            {
+                "method": "GET",
+                "path": f"/v1/agents/{self.cagt}/runtime-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body),
+                "catalog_agent_id": self.cagt,
+                "binding_id": self.binding_id,
+                "key_id": RUNTIME_ORIGIN,
+                "runtime_origin": RUNTIME_ORIGIN,
+                "service_epoch": 7,
+            },
+            with_exp=True,
+        )
+        first = self._read_access(signature=sig)
+        replay = self._read_access(signature=sig)
+        self.assertEqual(first[0], 200, first[1])
+        self.assertEqual(replay[0], 403, replay[1])
 
     # ── 撤销 ─────────────────────────────────────────────────────────────
 

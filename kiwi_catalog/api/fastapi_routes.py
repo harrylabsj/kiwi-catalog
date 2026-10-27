@@ -585,6 +585,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, catalog_agent_id, _cloud_payload(payload, request)
         )
 
+    @app.get("/v1/agents/{catalog_agent_id}/runtime-access")
+    def read_runtime_access_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> dict[str, Any]:
+        return cloud_binding_handlers.read_runtime_access(
+            db_path, catalog_agent_id, _cloud_payload({}, request)
+        )
+
     @app.post("/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke")
     def revoke_runtime_binding_route(
         catalog_agent_id: str,

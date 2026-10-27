@@ -186,6 +186,13 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/runtime-access",
+        lambda db_path, payload, query, catalog_agent_id: _read_runtime_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
         {"POST"},
         "/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke",
         lambda db_path, payload, query, catalog_agent_id, binding_id: _revoke_runtime_binding(
@@ -604,6 +611,10 @@ def _create_runtime_binding(db_path: str | Path, catalog_agent_id: str, payload:
 
 def _update_runtime_access(db_path: str | Path, catalog_agent_id: str, payload: dict):
     return cloud_binding_handlers.update_runtime_access(db_path, catalog_agent_id, payload)
+
+
+def _read_runtime_access(db_path: str | Path, catalog_agent_id: str, payload: dict):
+    return cloud_binding_handlers.read_runtime_access(db_path, catalog_agent_id, payload)
 
 
 def _revoke_runtime_binding(

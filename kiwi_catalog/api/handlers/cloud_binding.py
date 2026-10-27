@@ -913,6 +913,65 @@ def _invalidate_staged_best_effort(
         )
 
 
+def read_runtime_access(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/agents/{id}/runtime-access —— 商家侧权威读（M-03）。
+
+    与 PUT 同一授权模型（当前 active binding 私钥签名，method=GET、body_digest
+    覆盖空对象、exp ≤2min、nonce 一次性消费）。只返回**脱敏**状态：最新版本
+    的状态、版本号与六个公开字段，永不回显 share code 或密文。
+
+    没有它，Runtime 在本地状态丢失（重装/恢复/换机）后无法得知 head 版本，
+    更新与撤销会一直撞 CAS；工作台也无法区分 pending/invalid/revoked。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    with db_session(db_path) as conn:
+        agent = conn.execute(
+            "select * from catalog_agents where catalog_agent_id = ?", (agent_id,)
+        ).fetchone()
+        if agent is None:
+            raise NotFoundError("catalog agent not found")
+        binding = _current_active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("no active runtime binding for this agent")
+        signed = verify_runtime_request(
+            conn,
+            catalog_agent_id=agent_id,
+            jws=jws,
+            expected_fields={
+                "method": "GET",
+                "path": f"/v1/agents/{agent_id}/runtime-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest({}),
+                "catalog_agent_id": agent_id,
+                "binding_id": str(binding["binding_id"]),
+                "key_id": str(binding["key_id"]),
+                "runtime_origin": str(binding["runtime_origin"]),
+                "service_epoch": int(binding["service_epoch"]),
+            },
+        )
+        _check_enrollment_exp(signed)
+        if str(agent["administrative_state"]) != "active":
+            _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id,
+                  "catalog agent is not active")
+        latest = runtime_access_service.latest_runtime_access(conn, agent_id)
+        return {
+            "ok": True,
+            "config_version": int(latest["config_version"]) if latest is not None else 0,
+            "runtime_access": (
+                runtime_access_service.merchant_projection(latest)
+                if latest is not None
+                else None
+            ),
+        }
+
+
 def update_runtime_access(
     db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
