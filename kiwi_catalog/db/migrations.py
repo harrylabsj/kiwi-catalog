@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 44
+CURRENT_SCHEMA_VERSION = 46
 
 
 @dataclass(frozen=True)
@@ -1491,6 +1491,45 @@ create table if not exists runtime_access_consents (
 ]
 
 
+def migration_045_runtime_access_revoked_reason(conn: sqlite3.Connection) -> None:
+    """记录配置被废弃的原因：替换（superseded）与商家撤销（merchant_revoked）要能分开。"""
+    tables = {
+        str(row[0])
+        for row in conn.execute("select name from sqlite_master where type = 'table'")
+    }
+    if "runtime_access_configs" in tables and not _column_exists(
+        conn, "runtime_access_configs", "revoked_reason"
+    ):
+        conn.execute(
+            "alter table runtime_access_configs"
+            " add column revoked_reason text not null default ''"
+        )
+
+
+def migration_046_runtime_access_faults(conn: sqlite3.Connection) -> None:
+    """买家报告的门禁失败（C-06）：只存"哪个商家、哪个买家、何时、什么码"，
+    不存分享码本身；同一买家同一商家同一码在同一时刻只记一次（主键去重）。"""
+    for statement in _RUNTIME_ACCESS_FAULTS_DDL:
+        conn.execute(statement)
+
+
+_RUNTIME_ACCESS_FAULTS_DDL = [
+    """
+create table if not exists runtime_access_faults (
+        catalog_agent_id text not null,
+        buyer_key text not null,
+        code text not null check(code in ('gate_rejected','config_missing')),
+        occurred_at text not null,
+        primary key (catalog_agent_id, buyer_key, code, occurred_at)
+    ) without rowid
+    """,
+    """
+create index if not exists idx_runtime_access_faults_agent_time
+        on runtime_access_faults(catalog_agent_id, occurred_at)
+    """,
+]
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1536,6 +1575,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(42, "registration_verifications", migration_042_registration_verifications),
     Migration(43, "runtime_access_configs", migration_043_runtime_access_configs),
     Migration(44, "runtime_access_consents", migration_044_runtime_access_consents),
+    Migration(45, "runtime_access_revoked_reason", migration_045_runtime_access_revoked_reason),
+    Migration(46, "runtime_access_faults", migration_046_runtime_access_faults),
 )
 
 

@@ -965,6 +965,7 @@ def read_runtime_access(
         return {
             "ok": True,
             "config_version": int(latest["config_version"]) if latest is not None else 0,
+            "recent_faults": runtime_access_service.recent_faults(conn, agent_id),
             "custody_enabled": runtime_access_service.custody_enabled(),
             "consent": (
                 {

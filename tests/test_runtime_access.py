@@ -25,6 +25,7 @@ from kiwi_catalog.core.errors import ConflictError, NotFoundError, ValidationErr
 from kiwi_catalog.db.migrations import (
     migration_043_runtime_access_configs,
     migration_044_runtime_access_consents,
+    migration_045_runtime_access_revoked_reason,
 )
 from kiwi_catalog.services.runtime_access import (
     ACTIVE_KEY_ENV,
@@ -67,6 +68,7 @@ class RuntimeAccessTest(unittest.TestCase):
         self.conn.row_factory = sqlite3.Row
         migration_043_runtime_access_configs(self.conn)
         migration_044_runtime_access_consents(self.conn)
+        migration_045_runtime_access_revoked_reason(self.conn)
         # 授权必须绑定真实商家：服务层会在激活时读 catalog_agents.merchant_id。
         self.conn.execute(
             "create table if not exists catalog_agents"

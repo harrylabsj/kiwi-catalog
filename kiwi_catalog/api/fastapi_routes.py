@@ -1046,6 +1046,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         return _v1_unfollow_merchant(db_path, merchant_id, _account_payload(request, {}))
 
+    @app.post("/v1/me/merchant-access/{catalog_agent_id}/fault")
+    def report_merchant_access_fault_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = buyer_follows_handlers.report_merchant_access_fault(
+            db_path, catalog_agent_id, _account_payload(request, payload)
+        )
+        no_store = bool(result.pop("__no_store__", False))
+        headers = {"cache-control": "no-store"} if no_store else None
+        return _JSONResponse(result, headers=headers)
+
     @app.get("/v1/me/merchant-access/{catalog_agent_id}")
     def get_merchant_access_route(
         catalog_agent_id: str, request: _FastAPIRequest

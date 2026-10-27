@@ -27,6 +27,8 @@ import re
 import sqlite3
 from typing import Any
 
+from datetime import UTC, datetime, timedelta
+
 from kiwi_catalog.core.errors import ConflictError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import now_iso
 
@@ -240,6 +242,8 @@ def merchant_projection(row: sqlite3.Row) -> dict[str, Any]:
     return {
         **result,
         "status": str(row["status"]),
+        # 旧版本被新版本替换（superseded）与商家主动撤销（merchant_revoked）要能分开。
+        "status_reason": str(row["revoked_reason"] or ""),
         "validated_at": str(row["validated_at"]),
         "updated_at": str(row["updated_at"]),
     }
@@ -269,6 +273,50 @@ def row_secret(row: sqlite3.Row, *, statuses: frozenset[str] = frozenset({"pendi
     if str(row["status"]) not in statuses:
         raise ConflictError("runtime access configuration is not usable")
     return decrypt_secret(str(row["secret_ciphertext"]), str(row["key_id"]))
+
+
+FAULT_CODES = frozenset({"gate_rejected", "config_missing"})
+FAULT_WINDOW_HOURS = 24
+FAULT_RETENTION_DAYS = 7
+
+
+def record_fault(
+    conn: sqlite3.Connection, *, catalog_agent_id: str, buyer_key: str, code: str
+) -> None:
+    """记录一次买家侧门禁失败（C-06）。只存脱敏买家键与自有码，不存分享码。"""
+    if code not in FAULT_CODES:
+        raise ValidationError("runtime access fault code is not supported")
+    if not catalog_agent_id or not buyer_key:
+        raise ValidationError("runtime access fault is missing its subject")
+    now = now_iso()
+    conn.execute(
+        "insert or ignore into runtime_access_faults"
+        " (catalog_agent_id, buyer_key, code, occurred_at) values (?, ?, ?, ?)",
+        (catalog_agent_id, buyer_key, code, now),
+    )
+    # 有界保留：只留最近一周，避免被重复上报撑大。
+    cutoff = (datetime.now(UTC) - timedelta(days=FAULT_RETENTION_DAYS)).isoformat()
+    conn.execute(
+        "delete from runtime_access_faults where catalog_agent_id = ? and occurred_at < ?",
+        (catalog_agent_id, cutoff),
+    )
+
+
+def recent_faults(
+    conn: sqlite3.Connection, catalog_agent_id: str, *, hours: int = FAULT_WINDOW_HOURS
+) -> dict[str, Any]:
+    """最近窗口内的失败聚合：只给计数与最后时间，绝不暴露是哪个买家。"""
+    cutoff = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
+    row = conn.execute(
+        "select count(*) as total, max(occurred_at) as last_at from runtime_access_faults"
+        " where catalog_agent_id = ? and occurred_at >= ?",
+        (catalog_agent_id, cutoff),
+    ).fetchone()
+    return {
+        "count": int(row["total"] or 0),
+        "last_at": str(row["last_at"] or ""),
+        "window_hours": hours,
+    }
 
 
 def record_consent(
@@ -376,8 +424,8 @@ def activate_runtime_access(
         raise ConflictError("catalog agent has no merchant identity")
     now = now_iso()
     conn.execute(
-        "update runtime_access_configs set status = 'revoked', updated_at = ?"
-        " where catalog_agent_id = ? and status = 'active'",
+        "update runtime_access_configs set status = 'revoked', revoked_reason = 'superseded',"
+        " updated_at = ? where catalog_agent_id = ? and status = 'active'",
         (now, catalog_agent_id),
     )
     changed = conn.execute(
@@ -433,8 +481,8 @@ def revoke_runtime_access(
         (now, catalog_agent_id),
     )
     conn.execute(
-        "update runtime_access_configs set status = 'revoked', updated_at = ?"
-        " where catalog_agent_id = ? and status = 'active'",
+        "update runtime_access_configs set status = 'revoked', revoked_reason = 'merchant_revoked',"
+        " updated_at = ? where catalog_agent_id = ? and status = 'active'",
         (now, catalog_agent_id),
     )
     # 撤销 = 撤回代管授权：不再需要持有任何凭据，密文一并清空。

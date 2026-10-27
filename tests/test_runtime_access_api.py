@@ -424,6 +424,8 @@ class RuntimeAccessApiTest(unittest.TestCase):
         new_row = self._config_row(2)
         assert old_row is not None and new_row is not None
         self.assertEqual(old_row["status"], "revoked")
+        # 被新版本替换 ≠ 商家撤销：原因必须可区分。
+        self.assertEqual(old_row["revoked_reason"], "superseded")
         self.assertEqual(new_row["status"], "active")
         self.assertNotEqual(new_row["secret_ciphertext"], SHARE_SECRET_V2)
 
@@ -626,6 +628,47 @@ class RuntimeAccessApiTest(unittest.TestCase):
             self.assertEqual(status, 200, payload)
             self.assertEqual(self._config_row(1)["status"], "revoked")
 
+    # ── 门禁失败上报（C-06）──────────────────────────────────────────────
+
+    def test_buyer_fault_report_is_visible_to_the_merchant(self) -> None:
+        session = self._register_and_follow()
+        status, payload = _call(
+            self.app, "POST", f"/v1/me/merchant-access/{self.cagt}/fault",
+            {"code": "gate_rejected"}, cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, payload)
+        status, read = self._read_access()
+        self.assertEqual(status, 200, read)
+        self.assertEqual(read["recent_faults"]["count"], 1)
+        self.assertEqual(read["recent_faults"]["window_hours"], 24)
+        # 只给计数与时间，不暴露是哪个买家。
+        self.assertNotIn(session, json.dumps(read))
+
+    def test_fault_report_requires_an_active_follow(self) -> None:
+        session = self._register("buyer-fault-nofollow@example.com")
+        status, payload = _call(
+            self.app, "POST", f"/v1/me/merchant-access/{self.cagt}/fault",
+            {"code": "gate_rejected"}, cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 403, payload)
+
+    def test_fault_report_rejects_unknown_codes(self) -> None:
+        session = self._register_and_follow()
+        status, payload = _call(
+            self.app, "POST", f"/v1/me/merchant-access/{self.cagt}/fault",
+            {"code": "everything_is_fine"}, cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 400, payload)
+
+    def test_fault_report_is_no_store(self) -> None:
+        session = self._register_and_follow()
+        status, _payload, headers = _call_full(
+            self.app, "POST", f"/v1/me/merchant-access/{self.cagt}/fault",
+            {"code": "config_missing"}, cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("cache-control"), "no-store")
+
     # ── 商家侧权威读 ─────────────────────────────────────────────────────
 
     def test_signed_read_returns_redacted_state_and_current_version(self) -> None:
@@ -648,6 +691,7 @@ class RuntimeAccessApiTest(unittest.TestCase):
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["config_version"], 1)
         self.assertEqual(payload["runtime_access"]["status"], "revoked")
+        self.assertEqual(payload["runtime_access"]["status_reason"], "merchant_revoked")
 
     def test_signed_read_requires_the_active_binding_key(self) -> None:
         wrong_pem, _wrong_jwk = _runtime_key()
@@ -693,6 +737,7 @@ class RuntimeAccessApiTest(unittest.TestCase):
             status, payload = self._put_access(_revoke_config(1))
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["runtime_access"]["status"], "revoked")
+        self.assertEqual(payload["runtime_access"]["status_reason"], "merchant_revoked")
         self.assertEqual(seen_urls, [], "撤销不得发起网络挑战")
         self.assertEqual(self._config_row(1)["status"], "revoked")
         # 公开投影移除；Buyer 获取 404。

@@ -518,6 +518,13 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"POST"},
+        "/v1/me/merchant-access/{catalog_agent_id}/fault",
+        lambda db_path, payload, query, catalog_agent_id: _v1_report_merchant_access_fault(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
         {"GET"},
         "/v1/me/merchant-access/{catalog_agent_id}",
         lambda db_path, payload, query, catalog_agent_id: _v1_get_merchant_access(
@@ -861,6 +868,12 @@ def _v1_list_my_follows(db_path, payload):
 
 def _v1_get_merchant_access(db_path, catalog_agent_id, payload=None):
     return buyer_follows_handlers.get_merchant_access(db_path, catalog_agent_id, payload or {})
+
+
+def _v1_report_merchant_access_fault(db_path, catalog_agent_id, payload=None):
+    return buyer_follows_handlers.report_merchant_access_fault(
+        db_path, catalog_agent_id, payload or {}
+    )
 
 
 def _v1_follow_updates(db_path, payload):

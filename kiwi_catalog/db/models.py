@@ -838,6 +838,7 @@ create table if not exists runtime_access_configs (
         validated_at text not null default '',
         created_at text not null,
         updated_at text not null,
+        revoked_reason text not null default '',
         primary key (catalog_agent_id, config_version)
     ) without rowid
     """,
@@ -848,6 +849,20 @@ create unique index if not exists idx_runtime_access_configs_one_active
     """
 create index if not exists idx_runtime_access_configs_agent_status
         on runtime_access_configs(catalog_agent_id, status)
+    """,
+    # v46 — 买家报告的门禁失败（C-06）。只存商家/买家/时间/码，不存分享码。
+    """
+create table if not exists runtime_access_faults (
+        catalog_agent_id text not null,
+        buyer_key text not null,
+        code text not null check(code in ('gate_rejected','config_missing')),
+        occurred_at text not null,
+        primary key (catalog_agent_id, buyer_key, code, occurred_at)
+    ) without rowid
+    """,
+    """
+create index if not exists idx_runtime_access_faults_agent_time
+        on runtime_access_faults(catalog_agent_id, occurred_at)
     """,
     # v44 — 商家对"目录代管分享码"的显式授权（撤回后 revoked_at 非空即失效）。
     """

@@ -25,6 +25,7 @@ list（GET 我的关注）/ updates（GET 主动拉取增量更新）。全部**
 from __future__ import annotations
 
 import os
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -220,6 +221,47 @@ def _enforce_merchant_access_rate_limit(conn: Any, buyer_subject: str) -> None:
         window_seconds=900,
         description=f"merchant access distribution ({limit}/15min per buyer)",
     )
+
+
+def report_merchant_access_fault(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/me/merchant-access/{id}/fault —— 买家上报门禁失败（C-06）。
+
+    授权与会话规则与受控获取一致（已登录 + 活跃关注 + 限流）；只记录
+    `gate_rejected` / `config_missing` 两种自有码。**不改变配置状态**：单个买家的
+    失败可能是他那边的问题，商家在工作台看到计数后自行判断是否换码。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    code = str(payload.get("code") or "").strip()
+    if code not in runtime_access_service.FAULT_CODES:
+        raise ValidationError("fault code is not supported")
+    with db_session(db_path) as conn:
+        _account, buyer_subject = _require_buyer(conn, payload)
+        _enforce_merchant_access_rate_limit(conn, buyer_subject)
+        agent = conn.execute(
+            "select catalog_agent_id, merchant_id, administrative_state"
+            " from catalog_agents where catalog_agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if (
+            agent is None
+            or not str(agent["merchant_id"] or "").strip()
+            or str(agent["administrative_state"] or "") != "active"
+        ):
+            raise NotFoundError("catalog agent not found")
+        follow = follows_service.get_follow(
+            conn, buyer_subject=buyer_subject, merchant_id=str(agent["merchant_id"])
+        )
+        if follow is None or str(follow.get("status")) != "active":
+            raise PermissionDenied("an active follow of this merchant is required")
+        runtime_access_service.record_fault(
+            conn,
+            catalog_agent_id=agent_id,
+            buyer_key=hashlib.sha256(buyer_subject.encode("utf-8")).hexdigest()[:16],
+            code=code,
+        )
+        return {"ok": True, "recorded": code, "__no_store__": True}
 
 
 def get_merchant_access(

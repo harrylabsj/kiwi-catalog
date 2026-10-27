@@ -585,5 +585,41 @@ class Migration044RuntimeAccessConsentsTest(unittest.TestCase):
             conn.close()
 
 
+class Migration045RuntimeAccessRevokedReasonTest(unittest.TestCase):
+    """v45：给访问配置加可区分的废弃原因（替换 / 商家撤销）。"""
+
+    def test_column_added_idempotently(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import (
+                migration_043_runtime_access_configs,
+                migration_045_runtime_access_revoked_reason,
+            )
+
+            migration_043_runtime_access_configs(conn)
+            migration_045_runtime_access_revoked_reason(conn)
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(runtime_access_configs)").fetchall()
+            }
+            self.assertIn("revoked_reason", columns)
+            conn.execute(
+                "insert into runtime_access_configs (catalog_agent_id, config_version,"
+                " provider, access_mode, parameter_name, secret_ciphertext, key_id,"
+                " adapter_version, auth_mode, status, created_at, updated_at)"
+                " values ('cagt_1', 1, 'workbuddy', 'share_parameter', 'sharecode',"
+                " 'ciphertext', 'key-v1', 'workbuddy-share-v1', 'signature', 'revoked', ?, ?)",
+                (_TS, _TS),
+            )
+            reason = conn.execute(
+                "select revoked_reason from runtime_access_configs where catalog_agent_id = 'cagt_1'"
+            ).fetchone()[0]
+            self.assertEqual(reason, "")
+            # 重复执行不报错。
+            migration_045_runtime_access_revoked_reason(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
