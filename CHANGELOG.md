@@ -2,13 +2,14 @@
 
 ## 0.5.7 — 2026-10-27
 
-### WorkBuddy 分享码访问配置（schema v43）
+### WorkBuddy 分享码访问配置（schema v44）
 
 - **商家登记一次访问配置，Catalog 代 Buyer 完成平台门禁**。新增 `runtime_access_configs` 表：分享码只存 Fernet 密文，密钥与 owner secret、业务签名密钥相互独立（`KIWI_CATALOG_ACCESS_CONFIG_KEYS_JSON` 存 `{key_id: fernet_key}`，`KIWI_CATALOG_ACCESS_CONFIG_ACTIVE_KEY_ID` 指定当前加密 key；未配置、未知 key 或解密失败一律 fail-closed）。每个 Agent 最多一个 `active` 版本由部分唯一索引兜底。
 - **写入面**：首绑 `POST /v1/agents/{id}/runtime-bindings` 可附带 `access_config`（D1 请求随后确认激活、enrollment 随绑定激活、admin 兜底直接激活）；更新/撤销 `PUT /v1/agents/{id}/runtime-access` 由当前 active binding 私钥签名，中间经带码 `/control/challenge` 持钥证明。失败保留旧 `active` 版本并把新版本标 `invalid`，不残留 `pending`。
 - **读取面**：`GET /v1/me/merchant-access/{catalog_agent_id}` 只对已登录且活跃关注该商家的 Buyer 返回当前 active 配置（`Cache-Control: no-store`，按 Buyer 限流：`KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN`，默认 60，`0` 关闭；成功发放写 `runtime_access_issued` 审计），被行政处置（`suspended`/`rejected`）的商家与不存在同口径 404。`/v1/agents` 新增只含 active 元数据的 `runtime_access` 公开投影，任何公开面都不含分享码。
 - 双栈一致：fallback ASGI 栈的 `__no_store__` 响应不再下发 ETag、不再参与条件请求（此前会按 `If-None-Match` 返回 304）。
-- **部署约束（breaking）**：schema v43 在旧包里无法打开（`user_version > CURRENT_SCHEMA_VERSION` 直接拒绝），因此必须先上新代码、且**不能回滚到旧包**。契约锁重钉到 kiwi `82c1cfcb`（bundle `5be0f0e8`）。
+- **代管授权（政策风险控制，schema v44）**：商家必须显式授权"目录代管分享码并只在其已接受的采购方关注时出示"（条款版本 `workbuddy-share-v1-2026-10-27`）才能提交配置；授权落 `runtime_access_consents`，激活时同事务记录。撤回（`access_mode: none`）会**同时清空密文**并记录 `revoked_at`——不再出现"状态已撤销但凭据还在库里"。Buyer 发放要求"总开关开启 + 授权有效 + 配置 active"三者同时成立。新增运营止血开关 `KIWI_CATALOG_ACCESS_CUSTODY_ENABLED`（默认关闭；关闭后不得新建/激活，Buyer 停止发放，撤销与读取仍可用）。
+- **部署约束（breaking）**：schema v44 在旧包里无法打开（`user_version > CURRENT_SCHEMA_VERSION` 直接拒绝），因此必须先上新代码、且**不能回滚到旧包**。契约锁重钉到 kiwi `82c1cfcb`（bundle `5be0f0e8`）。
 - 本版本不改变现有商家/ Buyer 的普通流程：未配置访问能力的商家，公开记录与绑定行为逐字节不变。
 
 ## 0.5.6 — 2026-10-13

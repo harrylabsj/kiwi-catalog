@@ -22,7 +22,10 @@ from unittest import mock
 from cryptography.fernet import Fernet
 
 from kiwi_catalog.core.errors import ConflictError, NotFoundError, ValidationError
-from kiwi_catalog.db.migrations import migration_043_runtime_access_configs
+from kiwi_catalog.db.migrations import (
+    migration_043_runtime_access_configs,
+    migration_044_runtime_access_consents,
+)
 from kiwi_catalog.services.runtime_access import (
     ACTIVE_KEY_ENV,
     KEYS_ENV,
@@ -54,6 +57,7 @@ def _config(expected_version: int, *, secret: str = _SECRET) -> dict[str, object
         "adapter_version": "workbuddy-share-v1",
         "auth_mode": "signature",
         "expected_version": expected_version,
+        "consent": {"terms_version": "workbuddy-share-v1-2026-10-27", "granted": True},
     }
 
 
@@ -62,10 +66,24 @@ class RuntimeAccessTest(unittest.TestCase):
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         migration_043_runtime_access_configs(self.conn)
+        migration_044_runtime_access_consents(self.conn)
+        # 授权必须绑定真实商家：服务层会在激活时读 catalog_agents.merchant_id。
+        self.conn.execute(
+            "create table if not exists catalog_agents"
+            " (catalog_agent_id text primary key, merchant_id text not null)"
+        )
+        self.conn.execute(
+            "insert into catalog_agents (catalog_agent_id, merchant_id) values (?, 'mkt_test')",
+            (_AGENT,),
+        )
         self.keys = {"key-v1": Fernet.generate_key().decode("ascii")}
         self.env = mock.patch.dict(
             os.environ,
-            {KEYS_ENV: __import__("json").dumps(self.keys), ACTIVE_KEY_ENV: "key-v1"},
+            {
+                KEYS_ENV: __import__("json").dumps(self.keys),
+                ACTIVE_KEY_ENV: "key-v1",
+                "KIWI_CATALOG_ACCESS_CUSTODY_ENABLED": "1",
+            },
             clear=False,
         )
         self.env.start()

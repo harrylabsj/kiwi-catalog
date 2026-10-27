@@ -535,5 +535,55 @@ class Migration043RuntimeAccessConfigsTest(unittest.TestCase):
             conn.close()
 
 
+class Migration044RuntimeAccessConsentsTest(unittest.TestCase):
+    """v44 代管授权表：单主键、撤回时间、条款版本与会话状态约束。"""
+
+    def test_table_created_with_constraints_and_idempotent(self) -> None:
+        _, conn = _legacy_db()
+        try:
+            from kiwi_catalog.db.migrations import migration_044_runtime_access_consents
+
+            migration_044_runtime_access_consents(conn)
+            columns = {
+                str(row[1])
+                for row in conn.execute("pragma table_info(runtime_access_consents)").fetchall()
+            }
+            for expected in (
+                "catalog_agent_id",
+                "merchant_id",
+                "scope",
+                "terms_version",
+                "granted_at",
+                "revoked_at",
+            ):
+                self.assertIn(expected, columns)
+            # 未授权/非法 scope 一律拒绝。
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into runtime_access_consents"
+                    " (catalog_agent_id, merchant_id, scope, terms_version, granted_at)"
+                    " values ('cagt_1', 'mkt_1', 'other_scope', 'v1', ?)",
+                    (_TS,),
+                )
+            conn.rollback()
+            conn.execute(
+                "insert into runtime_access_consents"
+                " (catalog_agent_id, merchant_id, scope, terms_version, granted_at)"
+                " values ('cagt_1', 'mkt_1', 'directory_custody', 'v1', ?)",
+                (_TS,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "insert into runtime_access_consents"
+                    " (catalog_agent_id, merchant_id, scope, terms_version, granted_at)"
+                    " values ('cagt_1', 'mkt_1', 'directory_custody', 'v1', ?)",
+                    (_TS,),
+                )
+            conn.rollback()
+            migration_044_runtime_access_consents(conn)
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 43
+CURRENT_SCHEMA_VERSION = 44
 
 
 @dataclass(frozen=True)
@@ -1471,6 +1471,26 @@ create index if not exists idx_runtime_access_configs_agent_status
 ]
 
 
+def migration_044_runtime_access_consents(conn: sqlite3.Connection) -> None:
+    """商家对"目录代管分享码"的显式授权；撤回后自动失效。"""
+    for statement in _RUNTIME_ACCESS_CONSENTS_DDL:
+        conn.execute(statement)
+
+
+_RUNTIME_ACCESS_CONSENTS_DDL = [
+    """
+create table if not exists runtime_access_consents (
+        catalog_agent_id text primary key,
+        merchant_id text not null,
+        scope text not null check(scope = 'directory_custody'),
+        terms_version text not null,
+        granted_at text not null,
+        revoked_at text not null default ''
+    ) without rowid
+    """,
+]
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1515,6 +1535,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(41, "free_listing_limit", migration_041_free_listing_limit),
     Migration(42, "registration_verifications", migration_042_registration_verifications),
     Migration(43, "runtime_access_configs", migration_043_runtime_access_configs),
+    Migration(44, "runtime_access_consents", migration_044_runtime_access_consents),
 )
 
 

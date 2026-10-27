@@ -260,6 +260,11 @@ def get_merchant_access(
         )
         if follow is None or str(follow.get("status")) != "active":
             raise PermissionDenied("an active follow of this merchant is required")
+        # 代管总开关与商家授权都是发放前提：任一失效即停止发放（与不存在同口径）。
+        if not runtime_access_service.custody_enabled():
+            raise NotFoundError("active runtime access configuration not found")
+        if runtime_access_service.active_consent(conn, agent_id) is None:
+            raise NotFoundError("active runtime access configuration not found")
         binding = conn.execute(
             "select runtime_origin from runtime_bindings"
             " where catalog_agent_id = ? and status = 'active'"

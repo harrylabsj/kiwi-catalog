@@ -38,6 +38,10 @@ AUTH_MODE = "signature"
 SECRET_MAX_LENGTH = 4096
 KEYS_ENV = "KIWI_CATALOG_ACCESS_CONFIG_KEYS_JSON"
 ACTIVE_KEY_ENV = "KIWI_CATALOG_ACCESS_CONFIG_ACTIVE_KEY_ID"
+CUSTODY_ENV = "KIWI_CATALOG_ACCESS_CUSTODY_ENABLED"
+CUSTODY_SCOPE = "directory_custody"
+#: 商家授权代管的条款版本。文案变化时必须换版本，旧版本授权自动失效。
+CONSENT_TERMS_VERSION = "workbuddy-share-v1-2026-10-27"
 
 _SHARE_FIELDS = {
     "provider",
@@ -47,8 +51,18 @@ _SHARE_FIELDS = {
     "adapter_version",
     "auth_mode",
     "expected_version",
+    "consent",
 }
+_CONSENT_FIELDS = {"terms_version", "granted"}
 _KEY_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def custody_enabled() -> bool:
+    """目录代管分享码的**总开关**：默认关闭，`1/true/on` 才启用。
+
+    关闭时：不得创建/激活新的托管配置，Buyer 也不再发放；撤销与读取仍然可用，
+    这样运营可以在平台规则变化时立刻止血，而商家仍能干净地撤回。"""
+    return str(os.environ.get(CUSTODY_ENV) or "").strip().lower() in {"1", "true", "on", "yes"}
 
 
 def append_share_parameter(url: str, secret: str) -> str:
@@ -105,6 +119,14 @@ def parse_access_config(value: Any) -> dict[str, Any]:
     secret = value.get("secret_value")
     if not isinstance(secret, str) or not secret or len(secret) > SECRET_MAX_LENGTH:
         raise ValidationError("access_config.secret_value is invalid")
+    # 代管授权是**必填**的：没有商家明确同意，密文不进库。
+    consent = value.get("consent")
+    if not isinstance(consent, dict) or set(consent) != _CONSENT_FIELDS:
+        raise ValidationError("access_config.consent is required")
+    if consent.get("granted") is not True:
+        raise ValidationError("access_config.consent.granted must be true")
+    if consent.get("terms_version") != CONSENT_TERMS_VERSION:
+        raise ValidationError("access_config.consent.terms_version is not the current terms")
     return {field: value[field] for field in _SHARE_FIELDS}
 
 
@@ -249,10 +271,56 @@ def row_secret(row: sqlite3.Row, *, statuses: frozenset[str] = frozenset({"pendi
     return decrypt_secret(str(row["secret_ciphertext"]), str(row["key_id"]))
 
 
+def record_consent(
+    conn: sqlite3.Connection, *, catalog_agent_id: str, merchant_id: str, terms_version: str
+) -> None:
+    """记录（或刷新）商家对目录代管的授权。同事务内调用，失败一起回滚。"""
+    if terms_version != CONSENT_TERMS_VERSION:
+        raise ValidationError("consent terms version is not the current terms")
+    now = now_iso()
+    conn.execute(
+        "insert into runtime_access_consents"
+        " (catalog_agent_id, merchant_id, scope, terms_version, granted_at, revoked_at)"
+        " values (?, ?, ?, ?, ?, '')"
+        " on conflict(catalog_agent_id) do update set"
+        " merchant_id = excluded.merchant_id, scope = excluded.scope,"
+        " terms_version = excluded.terms_version, granted_at = excluded.granted_at,"
+        " revoked_at = ''",
+        (catalog_agent_id, merchant_id, CUSTODY_SCOPE, terms_version, now),
+    )
+
+
+def active_consent(conn: sqlite3.Connection, catalog_agent_id: str) -> sqlite3.Row | None:
+    """当前有效的代管授权（未撤回且条款版本仍是现行版本）。"""
+    return conn.execute(
+        "select * from runtime_access_consents"
+        " where catalog_agent_id = ? and revoked_at = '' and terms_version = ?",
+        (catalog_agent_id, CONSENT_TERMS_VERSION),
+    ).fetchone()
+
+
+def revoke_consent(conn: sqlite3.Connection, catalog_agent_id: str) -> None:
+    """撤回授权：同时把该商家所有密文清空（不只是状态翻转）。"""
+    now = now_iso()
+    conn.execute(
+        "update runtime_access_consents set revoked_at = ?"
+        " where catalog_agent_id = ? and revoked_at = ''",
+        (now, catalog_agent_id),
+    )
+    # 密文不再需要：清成空串，避免"状态已撤销但凭据还躺在库里"。
+    conn.execute(
+        "update runtime_access_configs set secret_ciphertext = '', updated_at = ?"
+        " where catalog_agent_id = ?",
+        (now, catalog_agent_id),
+    )
+
+
 def stage_runtime_access(
     conn: sqlite3.Connection, *, catalog_agent_id: str, access_config: Any
 ) -> dict[str, Any]:
     """Insert a new pending version using the latest version as the CAS head."""
+    if not custody_enabled():
+        raise ConflictError("directory custody of share parameters is disabled")
     config = parse_access_config(access_config)
     if config["access_mode"] == "none":
         raise ValidationError("use revoke_runtime_access for access_mode none")
@@ -293,11 +361,19 @@ def activate_runtime_access(
     conn: sqlite3.Connection, *, catalog_agent_id: str, config_version: int
 ) -> dict[str, Any]:
     """Atomically activate only the latest still-pending version after validation."""
+    if not custody_enabled():
+        raise ConflictError("directory custody of share parameters is disabled")
     row = _config_row(conn, catalog_agent_id, config_version)
     if str(row["status"]) != "pending":
         raise ConflictError("runtime access configuration is not pending")
     if _head_version(conn, catalog_agent_id) != config_version:
         raise ConflictError("runtime access version conflict")
+    agent = conn.execute(
+        "select merchant_id from catalog_agents where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    ).fetchone()
+    if agent is None or not str(agent["merchant_id"] or "").strip():
+        raise ConflictError("catalog agent has no merchant identity")
     now = now_iso()
     conn.execute(
         "update runtime_access_configs set status = 'revoked', updated_at = ?"
@@ -311,6 +387,12 @@ def activate_runtime_access(
     )
     if changed.rowcount != 1:
         raise ConflictError("runtime access configuration activation conflict")
+    record_consent(
+        conn,
+        catalog_agent_id=catalog_agent_id,
+        merchant_id=str(agent["merchant_id"]),
+        terms_version=CONSENT_TERMS_VERSION,
+    )
     return merchant_projection(_config_row(conn, catalog_agent_id, config_version))
 
 
@@ -355,6 +437,8 @@ def revoke_runtime_access(
         " where catalog_agent_id = ? and status = 'active'",
         (now, catalog_agent_id),
     )
+    # 撤销 = 撤回代管授权：不再需要持有任何凭据，密文一并清空。
+    revoke_consent(conn, catalog_agent_id)
     return merchant_projection(_config_row(conn, catalog_agent_id, int(active["config_version"])))
 
 

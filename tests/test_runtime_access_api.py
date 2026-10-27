@@ -59,6 +59,7 @@ A2A_ENDPOINT = f"{RUNTIME_ORIGIN}/a2a"
 CATALOG_ORIGIN = "https://catalog.example"
 SHARE_SECRET_V1 = "sharecode-alpha-1"
 SHARE_SECRET_V2 = "sharecode-beta-2"
+CONSENT_TERMS = "workbuddy-share-v1-2026-10-27"
 
 
 def _access_config(secret: str, expected_version: int) -> dict:
@@ -70,6 +71,7 @@ def _access_config(secret: str, expected_version: int) -> dict:
         "adapter_version": "workbuddy-share-v1",
         "auth_mode": "signature",
         "expected_version": expected_version,
+        "consent": {"terms_version": CONSENT_TERMS, "granted": True},
     }
 
 
@@ -218,6 +220,7 @@ class RuntimeAccessApiTest(unittest.TestCase):
                     {"ka-test-v1": fernet_key}
                 ),
                 "KIWI_CATALOG_ACCESS_CONFIG_ACTIVE_KEY_ID": "ka-test-v1",
+                "KIWI_CATALOG_ACCESS_CUSTODY_ENABLED": "1",
             },
             clear=False,
         )
@@ -536,6 +539,92 @@ class RuntimeAccessApiTest(unittest.TestCase):
             self.app, "POST", f"/v1/agents/{self.cagt}/runtime-bindings", body, signature=sig
         )
         self.assertEqual(status, 400, payload)
+
+    # ── 代管授权（政策风险控制）───────────────────────────────────────────
+
+    def test_submit_without_consent_is_rejected(self) -> None:
+        config = _access_config(SHARE_SECRET_V2, 1)
+        config.pop("consent")
+        with unittest.mock.patch.object(
+            ProfileFetcher, "post_json", side_effect=self._challenge_stub()
+        ):
+            status, payload = self._put_access(config)
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(self._config_row(1)["status"], "active")
+
+    def test_submit_with_stale_terms_version_is_rejected(self) -> None:
+        config = _access_config(SHARE_SECRET_V2, 1)
+        config["consent"] = {"terms_version": "workbuddy-share-v0-outdated", "granted": True}
+        status, payload = self._put_access(config)
+        self.assertEqual(status, 400, payload)
+
+    def test_consent_is_recorded_and_reported(self) -> None:
+        status, payload = self._read_access()
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["custody_enabled"])
+        self.assertEqual(
+            payload["consent"],
+            {
+                "granted": True,
+                "scope": "directory_custody",
+                "terms_version": CONSENT_TERMS,
+                "granted_at": payload["consent"]["granted_at"],
+            },
+        )
+
+    def test_revoke_clears_ciphertext_and_retracts_consent(self) -> None:
+        before = self._config_row(1)
+        assert before is not None
+        self.assertNotEqual(before["secret_ciphertext"], "")
+        with unittest.mock.patch.object(
+            ProfileFetcher, "post_json", side_effect=self._challenge_stub()
+        ):
+            status, payload = self._put_access(_revoke_config(1))
+        self.assertEqual(status, 200, payload)
+        after = self._config_row(1)
+        assert after is not None
+        # 撤回 = 不再持有凭据：密文被清空，而不只是状态翻转。
+        self.assertEqual(after["secret_ciphertext"], "")
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            consent = conn.execute(
+                "select * from runtime_access_consents where catalog_agent_id = ?",
+                (self.cagt,),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(consent)
+        self.assertNotEqual(consent["revoked_at"], "")
+        status, payload = self._read_access()
+        self.assertEqual(payload["consent"], {"granted": False})
+        buyer_session = self._register_and_follow()
+        status, payload = _call(
+            self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+            cookie=f"kiwi_session={buyer_session}",
+        )
+        self.assertEqual(status, 404, payload)
+
+    def test_custody_switch_blocks_new_configuration_and_distribution(self) -> None:
+        buyer_session = self._register_and_follow()
+        with unittest.mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_ACCESS_CUSTODY_ENABLED": "0"}, clear=False
+        ):
+            with unittest.mock.patch.object(
+                ProfileFetcher, "post_json", side_effect=self._challenge_stub()
+            ):
+                status, payload = self._put_access(_access_config(SHARE_SECRET_V2, 1))
+            self.assertEqual(status, 409, payload)
+            # 已有 active 配置也不再发放。
+            status, payload = _call(
+                self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+                cookie=f"kiwi_session={buyer_session}",
+            )
+            self.assertEqual(status, 404, payload)
+            # 撤销仍然可用：止血不等于把商家锁死。
+            status, payload = self._put_access(_revoke_config(1))
+            self.assertEqual(status, 200, payload)
+            self.assertEqual(self._config_row(1)["status"], "revoked")
 
     # ── 商家侧权威读 ─────────────────────────────────────────────────────
 

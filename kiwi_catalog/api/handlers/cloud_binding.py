@@ -961,9 +961,21 @@ def read_runtime_access(
             _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id,
                   "catalog agent is not active")
         latest = runtime_access_service.latest_runtime_access(conn, agent_id)
+        consent = runtime_access_service.active_consent(conn, agent_id)
         return {
             "ok": True,
             "config_version": int(latest["config_version"]) if latest is not None else 0,
+            "custody_enabled": runtime_access_service.custody_enabled(),
+            "consent": (
+                {
+                    "granted": True,
+                    "scope": runtime_access_service.CUSTODY_SCOPE,
+                    "terms_version": str(consent["terms_version"]),
+                    "granted_at": str(consent["granted_at"]),
+                }
+                if consent is not None
+                else {"granted": False}
+            ),
             "runtime_access": (
                 runtime_access_service.merchant_projection(latest)
                 if latest is not None

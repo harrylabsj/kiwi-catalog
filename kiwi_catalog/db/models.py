@@ -849,6 +849,17 @@ create unique index if not exists idx_runtime_access_configs_one_active
 create index if not exists idx_runtime_access_configs_agent_status
         on runtime_access_configs(catalog_agent_id, status)
     """,
+    # v44 — 商家对"目录代管分享码"的显式授权（撤回后 revoked_at 非空即失效）。
+    """
+create table if not exists runtime_access_consents (
+        catalog_agent_id text primary key,
+        merchant_id text not null,
+        scope text not null check(scope = 'directory_custody'),
+        terms_version text not null,
+        granted_at text not null,
+        revoked_at text not null default ''
+    ) without rowid
+    """,
 ]
 
 
