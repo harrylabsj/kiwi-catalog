@@ -1266,6 +1266,78 @@ class UndeliverableRecipientTest(unittest.TestCase):
         self.assertFalse(issubclass(RuntimeError, ValidationError))
 
 
+class EnrollmentPreviewCodeTest(unittest.TestCase):
+    """门户「连接此服务并发布」页要显示配对码。
+
+    配对码只能经**有账号会话**的详情读拿到：`public_enrollment()` 依旧不含它
+    （无会话预览不得泄漏认领用的秘密），但门户页面靠 `d.user_code` 显示配对码并
+    启用确认按钮——此前两边不一致，页面永远空白且按钮禁用。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.db_path = os.path.join(self.tmp, "catalog.sqlite")
+        env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+            },
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        self.app = create_catalog_app(self.db_path)
+
+    def _seed_enrollment(self, enrollment_id: str = "enr_seed_pending") -> str:
+        from datetime import UTC, datetime, timedelta
+        from kiwi_catalog.db.session import db_session
+
+        expires = (datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=10)).isoformat()
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into enrollments(enrollment_id, device_code_hash, user_code, status, key_id,"
+                " key_thumbprint, key_jwk_json, runtime_origin, a2a_endpoint, public_preview_json,"
+                " created_at, expires_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    enrollment_id, "hash", "A6BBAD2A", "ready_for_authorization", "kid",
+                    "sha256:tp", "{}", "https://shop.example", "https://shop.example/a2a",
+                    json.dumps({"name": "Seed", "url": "https://shop.example"}), "2026-10-28T09:00:00+00:00", expires,
+                ),
+            )
+        return expires
+
+    def _session(self) -> str:
+        status, payload, headers = register_via_api(self.app, **REGISTER_BODY)
+        self.assertEqual(status, 200, payload)
+        return headers.get("set-cookie", "").split(";")[0].split("=", 1)[1]
+
+    def test_authenticated_detail_exposes_the_pairing_code_for_the_portal(self) -> None:
+        enrollment_id = "enr_seed_pending"
+        self._seed_enrollment(enrollment_id)
+        session = self._session()
+        status, payload, _ = _call_http(
+            self.app, "GET", f"/v1/accounts/enrollments/{enrollment_id}", b"", cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload.get("user_code"), "A6BBAD2A")
+        self.assertEqual(payload.get("status"), "ready_for_authorization")
+
+    def test_sessionless_preview_never_discloses_the_code(self) -> None:
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import enrollments as service
+
+        enrollment_id = "enr_seed_pending"
+        self._seed_enrollment(enrollment_id)
+        with db_session(self.db_path) as conn:
+            preview = service.public_enrollment(conn, enrollment_id)
+        self.assertNotIn("user_code", preview)
+        status, _, _ = _call_http(self.app, "GET", f"/v1/accounts/enrollments/{enrollment_id}", b"")
+        self.assertEqual(status, 403)
+
+
 class RegistrationEmailTest(unittest.TestCase):
     """注册 → 通知运营邮箱；首次验证邮箱 → 发欢迎信。
 

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.9 — 2026-10-28
+
+- **门户「连接此服务并发布」页拿不到配对码**：`public_enrollment()` 自 2026-10-11 的加固起不再返回 `user_code`（无会话预览不得泄漏认领用的秘密），但门户页面仍按 `d.user_code` 渲染并据此启用确认按钮，结果是配对码永远空白、按钮永远禁用，商家无法完成 Runtime 绑定。现在账号会话态的详情读（`GET /v1/accounts/enrollments/{id}`）在 `ready_for_authorization`/`authorized` 状态下返回配对码；无会话路径与 `public_enrollment()` 本身保持不含该字段。
 ## 0.5.8 — 2026-10-28
 
 - **注册/重置发码遇到"收件人被拒收"改为 400**：`smtplib.SMTPRecipientsRefused`（服务端拒绝该地址，典型如格式合法但不存在的邮箱）此前会冒泡成 **500**，让用户可修复的输入错误看起来像服务端故障。现在验证码与密码重置两条 fail-closed 路径统一映射为 400 `email address is not deliverable`；连接失败、认证失败、未配置 SMTP 仍然抛异常（服务端问题不伪装成 4xx），注册事务照旧回滚、不留半条记录。

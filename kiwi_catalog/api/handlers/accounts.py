@@ -780,10 +780,16 @@ def enrollment_detail(db_path: str | Path, enrollment_id: str, payload: dict[str
         enforce_rate_limit(backend, key=f"enrollment-view:{account.get('account_id')}", limit=30,
                            window_seconds=900, description="enrollment preview lookup")
         result = service.public_enrollment(conn, enrollment_id)
-        row = conn.execute("select merchant_id from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        row = conn.execute("select merchant_id, user_code from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         if row and row["merchant_id"] and row["merchant_id"] != account["merchant_id"]:
             from kiwi_catalog.core.errors import NotFoundError
             raise NotFoundError("enrollment not found")
+        # 配对码只发给**已登录商家会话**：门户的「连接此服务并发布」页要把它显示
+        # 出来，让商家与 Runtime 终端上的内容人工核对后再确认。`public_enrollment`
+        # 仍然不含 user_code（无会话的预览路径不得泄漏认领用的秘密）；这里是有
+        # 账号会话的专用读，泄露面等价于「拿到授权页 URL 且已登录本目录」。
+        if row is not None and str(result.get("status")) in ("ready_for_authorization", "authorized"):
+            result["user_code"] = str(row["user_code"] or "")
         result["merchant_name"] = account.get("merchant_name", "")
         return result
     finally:
