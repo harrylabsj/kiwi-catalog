@@ -1266,12 +1266,12 @@ class UndeliverableRecipientTest(unittest.TestCase):
         self.assertFalse(issubclass(RuntimeError, ValidationError))
 
 
-class EnrollmentPreviewCodeTest(unittest.TestCase):
-    """门户「连接此服务并发布」页要显示配对码。
+class EnrollmentAuthorizationContractTest(unittest.TestCase):
+    """门户「连接此服务并发布」的授权口径（2026-10-28 起）。
 
-    配对码只能经**有账号会话**的详情读拿到：`public_enrollment()` 依旧不含它
-    （无会话预览不得泄漏认领用的秘密），但门户页面靠 `d.user_code` 显示配对码并
-    启用确认按钮——此前两边不一致，页面永远空白且按钮禁用。
+    - 预览**不返回**配对码（`test_a422` 的不变量不变）；
+    - 确认只靠登录会话 + 显式点击；请求里带了码就必须对，错码照旧拒绝；
+    - 已有活动绑定的商家不能被另一把密钥的 enrollment 静默顶替。
     """
 
     def setUp(self) -> None:
@@ -1284,6 +1284,7 @@ class EnrollmentPreviewCodeTest(unittest.TestCase):
                 "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
                 "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
                 "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+                "KIWI_CATALOG_PUBLIC_BASE_URL": "https://catalog.example",
             },
             clear=False,
         )
@@ -1291,7 +1292,7 @@ class EnrollmentPreviewCodeTest(unittest.TestCase):
         self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
-    def _seed_enrollment(self, enrollment_id: str = "enr_seed_pending") -> str:
+    def _seed_enrollment(self, enrollment_id: str = "enr_seed_pending", key_id: str = "kid-a") -> None:
         from datetime import UTC, datetime, timedelta
         from kiwi_catalog.db.session import db_session
 
@@ -1302,40 +1303,72 @@ class EnrollmentPreviewCodeTest(unittest.TestCase):
                 " key_thumbprint, key_jwk_json, runtime_origin, a2a_endpoint, public_preview_json,"
                 " created_at, expires_at) values(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    enrollment_id, "hash", "A6BBAD2A", "ready_for_authorization", "kid",
+                    enrollment_id, "hash", "A6BBAD2A", "ready_for_authorization", key_id,
                     "sha256:tp", "{}", "https://shop.example", "https://shop.example/a2a",
                     json.dumps({"name": "Seed", "url": "https://shop.example"}), "2026-10-28T09:00:00+00:00", expires,
                 ),
             )
-        return expires
 
     def _session(self) -> str:
         status, payload, headers = register_via_api(self.app, **REGISTER_BODY)
         self.assertEqual(status, 200, payload)
         return headers.get("set-cookie", "").split(";")[0].split("=", 1)[1]
 
-    def test_authenticated_detail_exposes_the_pairing_code_for_the_portal(self) -> None:
-        enrollment_id = "enr_seed_pending"
-        self._seed_enrollment(enrollment_id)
-        session = self._session()
+    def _authorize(self, cookie: str, enrollment_id: str, body: dict) -> dict:
+        from kiwi_catalog.api.handlers import accounts as accounts_handlers
+
+        return accounts_handlers.authorize_enrollment(
+            self.db_path,
+            enrollment_id,
+            {"_cookie": cookie, "_origin": "https://catalog.example", **body},
+        )
+
+    def test_preview_never_exposes_the_code_and_confirm_works_without_it(self) -> None:
+        from kiwi_catalog.db.session import db_session
+
+        self._seed_enrollment()
+        cookie = f"kiwi_session={self._session()}"
         status, payload, _ = _call_http(
-            self.app, "GET", f"/v1/accounts/enrollments/{enrollment_id}", b"", cookie=f"kiwi_session={session}"
+            self.app, "GET", "/v1/accounts/enrollments/enr_seed_pending", b"", cookie=cookie
         )
         self.assertEqual(status, 200, payload)
-        self.assertEqual(payload.get("user_code"), "A6BBAD2A")
-        self.assertEqual(payload.get("status"), "ready_for_authorization")
-
-    def test_sessionless_preview_never_discloses_the_code(self) -> None:
-        from kiwi_catalog.db.session import db_session
-        from kiwi_catalog.services import enrollments as service
-
-        enrollment_id = "enr_seed_pending"
-        self._seed_enrollment(enrollment_id)
+        self.assertNotIn("user_code", payload)
+        payload = self._authorize(cookie, "enr_seed_pending", {})
+        self.assertEqual(payload.get("status"), "authorized")
         with db_session(self.db_path) as conn:
-            preview = service.public_enrollment(conn, enrollment_id)
-        self.assertNotIn("user_code", preview)
-        status, _, _ = _call_http(self.app, "GET", f"/v1/accounts/enrollments/{enrollment_id}", b"")
-        self.assertEqual(status, 403)
+            row = conn.execute(
+                "select status, merchant_id from enrollments where enrollment_id='enr_seed_pending'"
+            ).fetchone()
+        self.assertEqual(row["status"], "authorized")
+        self.assertNotEqual(row["merchant_id"], "")
+
+    def test_wrong_code_is_still_refused(self) -> None:
+        self._seed_enrollment()
+        cookie = f"kiwi_session={self._session()}"
+        from kiwi_catalog.core.errors import ConflictError
+
+        with self.assertRaises(ConflictError):
+            self._authorize(cookie, "enr_seed_pending", {"user_code": "WRONG"})
+
+    def test_active_binding_cannot_be_replaced_by_another_key(self) -> None:
+        from kiwi_catalog.db.session import db_session
+
+        self._seed_enrollment(key_id="kid-intruder")
+        cookie = f"kiwi_session={self._session()}"
+        with db_session(self.db_path) as conn:
+            account = conn.execute("select merchant_id from merchant_accounts limit 1").fetchone()
+            conn.execute(
+                "insert into runtime_bindings(binding_id, catalog_agent_id, merchant_id, runtime_origin,"
+                " a2a_endpoint, key_id, key_thumbprint, key_jwk_json, binding_version, service_epoch, status,"
+                " created_at, updated_at) values('bind_existing','cagt_x',?,?,'https://shop.example/a2a',"
+                " 'kid-existing','sha256:tp','{}',1,1,'active',?,'')",
+                (account["merchant_id"], "https://shop.example", "2026-10-28T09:00:00+00:00"),
+            )
+        from kiwi_catalog.core.errors import ConflictError
+
+        with self.assertRaises(ConflictError) as raised:
+            self._authorize(cookie, "enr_seed_pending", {})
+        self.assertIn("already has an active Runtime binding", str(raised.exception))
 
 
 class RegistrationEmailTest(unittest.TestCase):

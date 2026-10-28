@@ -780,20 +780,41 @@ def enrollment_detail(db_path: str | Path, enrollment_id: str, payload: dict[str
         enforce_rate_limit(backend, key=f"enrollment-view:{account.get('account_id')}", limit=30,
                            window_seconds=900, description="enrollment preview lookup")
         result = service.public_enrollment(conn, enrollment_id)
-        row = conn.execute("select merchant_id, user_code from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
+        row = conn.execute("select merchant_id from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         if row and row["merchant_id"] and row["merchant_id"] != account["merchant_id"]:
             from kiwi_catalog.core.errors import NotFoundError
             raise NotFoundError("enrollment not found")
-        # 配对码只发给**已登录商家会话**：门户的「连接此服务并发布」页要把它显示
-        # 出来，让商家与 Runtime 终端上的内容人工核对后再确认。`public_enrollment`
-        # 仍然不含 user_code（无会话的预览路径不得泄漏认领用的秘密）；这里是有
-        # 账号会话的专用读，泄露面等价于「拿到授权页 URL 且已登录本目录」。
-        if row is not None and str(result.get("status")) in ("ready_for_authorization", "authorized"):
-            result["user_code"] = str(row["user_code"] or "")
         result["merchant_name"] = account.get("merchant_name", "")
         return result
     finally:
         ctx.__exit__(None, None, None)
+
+
+def _refuse_binding_takeover(conn, account: dict[str, Any], row: Any) -> None:
+    """已有活动绑定的商家，不能被另把密钥的 enrollment 静默顶替。
+
+    授权页 URL 可以被转发（10 分钟有效），而页面上的店铺预览由发起方控制：没有
+    配对码核对时，诱骗商家点一下就能把攻击者的 Runtime 绑到商家的目录身份上。
+    同一把密钥重跑 `kiwi merchant connect` 仍允许（正常续办/重发名片）；换密钥
+    重绑必须先由当前绑定停止（`runtime stop` / 后台断开）或走运营处置。
+    """
+    from kiwi_catalog.core.errors import ConflictError
+
+    merchant_id = str(account.get("merchant_id") or "")
+    if merchant_id == "":
+        return
+    active = conn.execute(
+        "select binding_id, key_id from runtime_bindings where merchant_id=? and status='active'",
+        (merchant_id,),
+    ).fetchone()
+    if active is None:
+        return
+    if str(active["key_id"] or "") == str(row["key_id"] or ""):
+        return
+    raise ConflictError(
+        "this merchant already has an active Runtime binding; connect again from that runtime "
+        "or disconnect it before binding a different one"
+    )
 
 
 def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -823,13 +844,18 @@ def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[
         row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         if row is None:
             raise NotFoundError("enrollment not found")
+        presented_code = str(payload.get("user_code", "") or "").strip().upper()
         if (row["status"] not in ("ready_for_authorization", "authorized")
                 or (row["status"] == "ready_for_authorization" and row["expires_at"] <= now_iso())
                 or (row["status"] == "authorized" and row["grant_expires_at"] <= now_iso())
-                or str(row["user_code"]).upper() != str(payload.get("user_code", "")).strip().upper()
+                # 配对码是可选的附加校验：带了就必须对（错码一律拒），不带则只靠
+                # 登录会话 + 显式确认。门户页面不展示码（无会话预览不得泄漏它），
+                # 所以「页面必须带码」这条在 2026-10-28 起取消——见 CHANGELOG。
+                or (presented_code != "" and presented_code != str(row["user_code"]).upper())
                 or (row["merchant_id"] and row["merchant_id"] != account["merchant_id"])):
             from kiwi_catalog.core.errors import ConflictError
             raise ConflictError("enrollment is not available for authorization")
+        _refuse_binding_takeover(conn, account, row)
         agent = ensure_my_catalog_agent(conn, account, base_url=allowed)
         result = service.authorize(conn, row, account, str(payload.get("user_code", "")),
                                    str(agent["catalog_agent_id"]))

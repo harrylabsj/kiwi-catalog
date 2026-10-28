@@ -158,7 +158,11 @@ def authorize(conn: sqlite3.Connection, row: sqlite3.Row, account: dict[str, Any
               agent_id: str) -> dict[str, Any]:
     # review 3-61：grant 形参已删——service 内部始终以 _stable_grant 重算，
     # 传入的随机 grant 从未落库（死参数）；user_code 校验收敛到本函数唯一一处。
-    if str(row["user_code"]).upper() != user_code.strip().upper():
+    # 配对码是可选校验：带了就必须对（错码一律拒），不带则交给调用方（登录会话
+    # + 显式确认）决定是否放行。门户页面不展示配对码——无会话预览不得泄漏它，
+    # 而有会话的预览同样不返回（见 inventory 不变量）。
+    presented = user_code.strip().upper()
+    if presented != "" and str(row["user_code"]).upper() != presented:
         raise ValidationError("user_code mismatch")
     if (row["status"] == "authorized" and row["grant_expires_at"] > now_iso()
             and row["merchant_id"] == account["merchant_id"]):
