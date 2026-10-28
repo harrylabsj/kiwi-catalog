@@ -240,6 +240,11 @@ def _send_fail_closed(to: str, subject: str, body: str) -> None:
     唯一例外是**收件人被邮件服务端拒收**（`SMTPRecipientsRefused`，典型如格式
     合法但不存在的地址）：那是调用方的输入问题，不是服务故障。此前它会一路
     冒泡成 500——既不准确，也把用户可修复的错误报成了服务端错误。
+
+    取舍：smtplib 对**临时性拒收**（灰名单、4xx 退信重试）抛的也是同一个异常，
+    因此这类情况同样报 400 `email address is not deliverable`。把它当 5xx 会
+    让用户以为平台挂了，而当 4xx 至少提示"换个地址或稍后重试"是可行动的；
+    如果将来要区分，需要解析 `SMTPRecipientsRefused.recipients` 里的状态码。
     """
     import smtplib
 
