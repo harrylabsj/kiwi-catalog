@@ -33,6 +33,7 @@ import hmac
 import json
 import os
 import sqlite3
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -1175,6 +1176,94 @@ class AdminApplicationNotificationTest(unittest.TestCase):
             cookie=cookie,
         )
         return status, applied
+
+
+class UndeliverableRecipientTest(unittest.TestCase):
+    """收件人被邮件服务端拒收 → 400（不是 500），且不留半条记录。
+
+    此前 `SMTPRecipientsRefused` 会冒泡成 500：用户打错邮箱看到的是服务端错误。
+    发码仍是 fail-closed（事务回滚、不发信、不建号），只是对外口径改为调用方
+    可修复的 4xx。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.db_path = os.path.join(self.tmp, "catalog.sqlite")
+        env_patch = mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "smtp",
+                "KIWI_CATALOG_SMTP_HOST": "smtp.example",
+                "KIWI_CATALOG_SMTP_USER": "ops@example",
+                "KIWI_CATALOG_SMTP_PASSWORD": "pw",
+            },
+            clear=False,
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        self.app = create_catalog_app(self.db_path)
+
+    def test_register_code_with_rejected_recipient_is_400_not_500(self) -> None:
+        import smtplib
+
+        with mock.patch("smtplib.SMTP") as smtp_cls:
+            smtp_cls.return_value.__enter__.return_value.send_message.side_effect = (
+                smtplib.SMTPRecipientsRefused({"not-an-email": (553, b"invalid address")})
+            )
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/register/code",
+                json.dumps({"email": "not-an-email"}).encode(),
+            )
+        self.assertEqual(status, 400, payload)
+        self.assertIn("not deliverable", str(payload.get("error", "")))
+        # fail-closed 不变：没有留下待验证的行。
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            rows = conn.execute(
+                "select count(*) from registration_verifications"
+            ).fetchone()[0]
+        self.assertEqual(rows, 0)
+
+    def test_both_fail_closed_senders_map_recipient_refusal(self) -> None:
+        """验证码与重置密码两条 fail-closed 发信路径口径一致。"""
+        import smtplib
+        from kiwi_catalog.core.errors import ValidationError
+        from kiwi_catalog.services import accounts as accounts_service
+
+        for send, args in (
+            (accounts_service.send_verification_email, ("x", "123456")),
+            (accounts_service.send_password_reset_email, ("x", "123456")),
+        ):
+            with self.subTest(sender=send.__name__):
+                with mock.patch("smtplib.SMTP") as smtp_cls:
+                    smtp_cls.return_value.__enter__.return_value.send_message.side_effect = (
+                        smtplib.SMTPRecipientsRefused({"x": (553, b"invalid address")})
+                    )
+                    with self.assertRaises(ValidationError):
+                        send(*args)
+
+    def test_other_smtp_failures_are_not_masked(self) -> None:
+        """连接/认证类失败仍是服务端问题：不得伪装成 400。"""
+        from kiwi_catalog.core.errors import ValidationError
+        from kiwi_catalog.services import accounts as accounts_service
+
+        with mock.patch("smtplib.SMTP") as smtp_cls:
+            smtp_cls.return_value.__enter__.return_value.send_message.side_effect = (
+                RuntimeError("smtp down")
+            )
+            with self.assertRaises(RuntimeError):
+                accounts_service.send_verification_email("buyer@example.com", "123456")
+        # 未配置 SMTP 同样保持 fail-closed。
+        with mock.patch.dict(os.environ, {"KIWI_CATALOG_SMTP_HOST": ""}, clear=False):
+            with self.assertRaises(RuntimeError):
+                accounts_service.send_verification_email("buyer@example.com", "123456")
+        self.assertFalse(issubclass(RuntimeError, ValidationError))
 
 
 class RegistrationEmailTest(unittest.TestCase):

@@ -234,9 +234,25 @@ def _send_email(to: str, subject: str, body: str) -> None:
         smtp.send_message(message)
 
 
+def _send_fail_closed(to: str, subject: str, body: str) -> None:
+    """fail-closed 发送：配置缺失 / 连接失败 / 认证失败照旧抛异常（服务端问题）。
+
+    唯一例外是**收件人被邮件服务端拒收**（`SMTPRecipientsRefused`，典型如格式
+    合法但不存在的地址）：那是调用方的输入问题，不是服务故障。此前它会一路
+    冒泡成 500——既不准确，也把用户可修复的错误报成了服务端错误。
+    """
+    import smtplib
+
+    try:
+        _send_email(to, subject, body)
+    except smtplib.SMTPRecipientsRefused:
+        raise ValidationError("email address is not deliverable") from None
+
+
 def send_verification_email(email: str, code: str) -> None:
-    """发送验证邮件。发送失败抛异常（注册事务回滚，fail-closed，语义不变）。"""
-    _send_email(
+    """发送验证邮件。发送失败抛异常（注册事务回滚，fail-closed，语义不变）；
+    收件人被拒收 → ValidationError（400），不是 500。"""
+    _send_fail_closed(
         email,
         "Kiwi 商家账号邮箱验证码",
         f"你的 Kiwi 商家账号验证码是：{code}\n\n15 分钟内有效。如果不是你注册的，请忽略此邮件。",
@@ -415,12 +431,13 @@ def verify_email_code(
 
 
 def send_password_reset_email(email: str, code: str) -> None:
-    """发送密码重置邮件。发送失败抛异常（fail-closed，语义不变）。
+    """发送密码重置邮件。发送失败抛异常（fail-closed，语义不变）；
+    收件人被拒收 → ValidationError（400），与验证码邮件同口径。
 
     env 与 send_verification_email 相同：KIWI_CATALOG_SMTP_HOST / _PORT /
     _USER / _PASSWORD / _FROM。
     """
-    _send_email(
+    _send_fail_closed(
         email,
         "Kiwi 商家账号密码重置验证码",
         f"你的 Kiwi 商家账号密码重置验证码是：{code}\n\n"
