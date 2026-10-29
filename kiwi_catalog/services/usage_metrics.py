@@ -39,12 +39,14 @@ METRIC_BUYER_AGENT_SEARCH = "buyer_agent_search"
 METRIC_BUYER_LISTING_SEARCH = "buyer_listing_search"
 METRIC_MERCHANT_SELF_CHECK = "merchant_self_check"
 METRIC_LISTING_PUBLISH = "listing_publish"
+METRIC_MERCHANT_ACCESS_NEAR_CAP = "merchant_access_near_cap"
 
 ALL_METRICS = (
     METRIC_BUYER_AGENT_SEARCH,
     METRIC_BUYER_LISTING_SEARCH,
     METRIC_MERCHANT_SELF_CHECK,
     METRIC_LISTING_PUBLISH,
+    METRIC_MERCHANT_ACCESS_NEAR_CAP,
 )
 
 # 时区：UTC 日期（与全库 now_iso UTC 一致；跨时区运营看的是 UTC 日）
