@@ -154,6 +154,22 @@ class EnforceRateLimitTest(unittest.TestCase):
             "2026-08-06T10:01:00",
         )
 
+    def test_daily_window_resets_at_utc_midnight(self) -> None:
+        before = fixed_window_start(
+            datetime.fromisoformat("2026-10-29T23:59:59+00:00"), 86_400
+        )
+        after = fixed_window_start(
+            datetime.fromisoformat("2026-10-30T00:00:00+00:00"), 86_400
+        )
+        self.assertEqual(before, "2026-10-29T00:00:00")
+        self.assertEqual(after, "2026-10-30T00:00:00")
+        self.assertNotEqual(before, after)
+        # +08:00 的同一时刻归一为同一个 UTC 日窗口。
+        self.assertEqual(
+            fixed_window_start(datetime.fromisoformat("2026-10-30T07:59:59+08:00"), 86_400),
+            before,
+        )
+
     def test_production_delegates_share_the_same_core(self) -> None:
         conn = _conn()
         with self.assertRaises(RateLimitError):

@@ -979,8 +979,8 @@ class RuntimeAccessApiTest(unittest.TestCase):
             keys,
         )
 
-    def test_daily_quota_counts_rejected_lookups_too(self) -> None:
-        """探测不存在/已处置的 agent 也计入该商家配额（防试探绕过）。"""
+    def test_daily_quota_counts_repeated_merchant_lookups(self) -> None:
+        """同一商家的重复查询计入配额；第二次被 429 拒绝也保留前一次的计数。"""
         session = self._register_and_follow()
         with unittest.mock.patch.dict(
             os.environ,
@@ -999,6 +999,53 @@ class RuntimeAccessApiTest(unittest.TestCase):
                 cookie=f"kiwi_session={session}",
             )
         self.assertEqual(second_status, 429, second)
+
+    def test_daily_quota_rejection_keeps_buyer_limit_count(self) -> None:
+        """日限额 429 不得回滚同请求的每买家 15 分钟计数。"""
+        session = self._register_and_follow()
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN": "10",
+                "KIWI_CATALOG_MERCHANT_ACCESS_DAILY_LIMIT_PER_MERCHANT": "1",
+            },
+            clear=False,
+        ):
+            first_status, _first = _call(
+                self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+                cookie=f"kiwi_session={session}",
+            )
+            second_status, _second = _call(
+                self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+                cookie=f"kiwi_session={session}",
+            )
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 429)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            counts = [
+                int(row["request_count"])
+                for row in conn.execute(
+                    "select request_count from merchant_application_limits"
+                    " where actor_key like 'merchant-access:%'"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        # 第一次 + 第二次各自计入；若被 429 回滚，这里只会看到 1。
+        self.assertEqual(max(counts, default=0), 2, counts)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            near_cap = conn.execute(
+                "select count from usage_metrics where metric = 'merchant_access_near_cap'"
+            ).fetchone()
+        finally:
+            conn.close()
+        # 日限额 1 → 阈值 1；第一次放行即达到阈值，记一次近上限指标。
+        self.assertIsNotNone(near_cap)
+        self.assertEqual(int(near_cap["count"]), 1)
 
     def test_rate_limit_consumes_rejected_probes(self) -> None:
         """被拒请求同样计入限流（计数在独立事务提交，不被 404 回滚）。"""

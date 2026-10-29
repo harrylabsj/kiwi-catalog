@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,15 @@ from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services import buyer_follows as follows_service
 from kiwi_catalog.services import runtime_access as runtime_access_service
-from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
+from kiwi_catalog.services.rate_limit import (
+    SQLiteRateLimitBackend,
+    enforce_rate_limit,
+    fixed_window_start,
+)
+from kiwi_catalog.services.usage_metrics import (
+    METRIC_MERCHANT_ACCESS_NEAR_CAP,
+    record_usage,
+)
 
 _FOLLOW_RATE_LIMIT_PER_15MIN_ENV = "KIWI_CATALOG_FOLLOW_RATE_LIMIT_PER_15MIN"
 
@@ -250,13 +259,27 @@ def _enforce_merchant_access_daily_quota(conn: Any, merchant_id: str) -> None:
     backend = SQLiteRateLimitBackend(
         conn, table="merchant_application_limits", key_column="actor_key"
     )
+    key = f"merchant-access-merchant:{merchant_id}"
+    current = datetime.now(UTC).replace(microsecond=0)
     enforce_rate_limit(
         backend,
-        key=f"merchant-access-merchant:{merchant_id}",
+        key=key,
         limit=limit,
         window_seconds=86_400,
         description=f"merchant access distribution ({limit}/day per merchant)",
+        current=current,
     )
+    # C-4 观测：配额达到 80% 后仍放行的请求单独计数，供运营告警；
+    # 不改变“拒绝也计数”的反探测取舍。
+    window_start = fixed_window_start(current, 86_400)
+    row = conn.execute(
+        "select request_count from merchant_application_limits"
+        " where actor_key = ? and window_start = ?",
+        (key, window_start),
+    ).fetchone()
+    threshold = max(1, (limit * 4 + 4) // 5)
+    if row is not None and int(row["request_count"] or 0) >= threshold:
+        record_usage(conn, METRIC_MERCHANT_ACCESS_NEAR_CAP)
 
 
 def report_merchant_access_fault(
@@ -318,13 +341,19 @@ def get_merchant_access(
     with db_session(db_path) as conn:
         account, buyer_subject = _require_buyer(conn, payload)
         _enforce_merchant_access_rate_limit(conn, buyer_subject)
-        # 商家级日上限：用已解析的商家 id 计数（先查一次，避免把 agent→merchant
-        # 解析留在计数事务之外导致配额按错 key 记）。
+        # 只解析商家 id；日限额在**独立事务**里消费——否则日限额 429 会把
+        # 同请求刚记下的每买家 15 分钟计数一起回滚，拒绝反而免计。
         merchant_row = conn.execute(
             "select merchant_id from catalog_agents where catalog_agent_id = ?", (agent_id,)
         ).fetchone()
-        if merchant_row is not None and str(merchant_row["merchant_id"] or "") != "":
-            _enforce_merchant_access_daily_quota(conn, str(merchant_row["merchant_id"]))
+        merchant_id_for_quota = (
+            str(merchant_row["merchant_id"])
+            if merchant_row is not None and str(merchant_row["merchant_id"] or "") != ""
+            else None
+        )
+    if merchant_id_for_quota is not None:
+        with db_session(db_path) as conn:
+            _enforce_merchant_access_daily_quota(conn, merchant_id_for_quota)
     with db_session(db_path) as conn:
         agent = conn.execute(
             "select catalog_agent_id, merchant_id, administrative_state"
