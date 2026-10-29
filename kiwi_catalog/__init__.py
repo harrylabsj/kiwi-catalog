@@ -14,4 +14,4 @@
 
 """kiwi-catalog — standalone Agent Catalog service."""
 
-VERSION = "0.5.9"
+VERSION = "0.5.10"

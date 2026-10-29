@@ -194,6 +194,19 @@ def follow_updates(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
 _MERCHANT_ACCESS_RATE_LIMIT_ENV = "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN"
 
 
+_MERCHANT_ACCESS_DAILY_LIMIT_ENV = "KIWI_CATALOG_MERCHANT_ACCESS_DAILY_LIMIT_PER_MERCHANT"
+_DEFAULT_MERCHANT_ACCESS_DAILY_LIMIT = 500
+
+
+def _merchant_access_daily_limit() -> int:
+    """每商家每日发放上限（默认 500，0 = 关闭）。"""
+    raw = os.environ.get(_MERCHANT_ACCESS_DAILY_LIMIT_ENV) or ""
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_MERCHANT_ACCESS_DAILY_LIMIT
+
+
 def _merchant_access_rate_limit_per_15min() -> int:
     raw = os.environ.get(_MERCHANT_ACCESS_RATE_LIMIT_ENV) or ""
     try:
@@ -220,6 +233,29 @@ def _enforce_merchant_access_rate_limit(conn: Any, buyer_subject: str) -> None:
         limit=limit,
         window_seconds=900,
         description=f"merchant access distribution ({limit}/15min per buyer)",
+    )
+
+
+def _enforce_merchant_access_daily_quota(conn: Any, merchant_id: str) -> None:
+    """每商家**每日**发放上限（按商家计数，不按买家）。
+
+    平台口径（2026-10-28 工单）：sharecode 是访问凭据、官方定位人工分享、
+    "不适合大规模机器自动分发"。目录代管是按需分发，所以除了每买家 15 分钟
+    限流，还要有一条**商家级日上限**做刹车：既能限制单店被大量陌生买家刷取，
+    也让"今天发了多少码"在审计里可见。0 = 关闭。
+    """
+    limit = _merchant_access_daily_limit()
+    if limit <= 0:
+        return
+    backend = SQLiteRateLimitBackend(
+        conn, table="merchant_application_limits", key_column="actor_key"
+    )
+    enforce_rate_limit(
+        backend,
+        key=f"merchant-access-merchant:{merchant_id}",
+        limit=limit,
+        window_seconds=86_400,
+        description=f"merchant access distribution ({limit}/day per merchant)",
     )
 
 
@@ -282,6 +318,13 @@ def get_merchant_access(
     with db_session(db_path) as conn:
         account, buyer_subject = _require_buyer(conn, payload)
         _enforce_merchant_access_rate_limit(conn, buyer_subject)
+        # 商家级日上限：用已解析的商家 id 计数（先查一次，避免把 agent→merchant
+        # 解析留在计数事务之外导致配额按错 key 记）。
+        merchant_row = conn.execute(
+            "select merchant_id from catalog_agents where catalog_agent_id = ?", (agent_id,)
+        ).fetchone()
+        if merchant_row is not None and str(merchant_row["merchant_id"] or "") != "":
+            _enforce_merchant_access_daily_quota(conn, str(merchant_row["merchant_id"]))
     with db_session(db_path) as conn:
         agent = conn.execute(
             "select catalog_agent_id, merchant_id, administrative_state"

@@ -947,6 +947,59 @@ class RuntimeAccessApiTest(unittest.TestCase):
         self.assertEqual(first_status, 200)
         self.assertEqual(second_status, 429, second)
 
+    def test_merchant_daily_quota_blocks_after_the_limit(self) -> None:
+        """每商家每日上限：超过后 429，计数按**商家**而不是按买家记。"""
+        session = self._register_and_follow()
+        path = f"/v1/me/merchant-access/{self.cagt}"
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN": "0",
+                "KIWI_CATALOG_MERCHANT_ACCESS_DAILY_LIMIT_PER_MERCHANT": "2",
+            },
+            clear=False,
+        ):
+            statuses = [_call(self.app, "GET", path, cookie=f"kiwi_session={session}")[0] for _ in range(3)]
+        self.assertEqual(statuses[:2], [200, 200], statuses)
+        self.assertEqual(statuses[2], 429, statuses)
+        # 计数 key 必须是商家维度（不是买家维度），这样"单店被大量买家刷"也能刹车。
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            keys = [
+                str(row["actor_key"])
+                for row in conn.execute(
+                    "select actor_key from merchant_application_limits"
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        self.assertTrue(
+            any(f"merchant-access-merchant:{self.merchant_id}" in key for key in keys),
+            keys,
+        )
+
+    def test_daily_quota_counts_rejected_lookups_too(self) -> None:
+        """探测不存在/已处置的 agent 也计入该商家配额（防试探绕过）。"""
+        session = self._register_and_follow()
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN": "0",
+                "KIWI_CATALOG_MERCHANT_ACCESS_DAILY_LIMIT_PER_MERCHANT": "1",
+            },
+            clear=False,
+        ):
+            _probe_status, _probe = _call(
+                self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+                cookie=f"kiwi_session={session}",
+            )
+            second_status, second = _call(
+                self.app, "GET", f"/v1/me/merchant-access/{self.cagt}",
+                cookie=f"kiwi_session={session}",
+            )
+        self.assertEqual(second_status, 429, second)
+
     def test_rate_limit_consumes_rejected_probes(self) -> None:
         """被拒请求同样计入限流（计数在独立事务提交，不被 404 回滚）。"""
         session = self._register_and_follow()
