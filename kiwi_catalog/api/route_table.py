@@ -32,6 +32,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
+from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
 from kiwi_catalog.api.handlers import cloud_card as cloud_card_handlers
 from kiwi_catalog.api.handlers import connector_identity as connector_identity_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
@@ -189,6 +190,34 @@ RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}/runtime-access",
         lambda db_path, payload, query, catalog_agent_id: _read_runtime_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"PUT"},
+        "/v1/agents/{catalog_agent_id}/public-inquiry-consent",
+        lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.update_public_inquiry_consent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"POST"},
+        "/v1/agents/{catalog_agent_id}/public-inquiry",
+        lambda db_path, payload, query, catalog_agent_id: public_inquiry_handlers.forward(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/public-inquiry",
+        lambda db_path, payload, query, catalog_agent_id: public_inquiry_handlers.availability(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/public-inquiry-consent",
+        lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.read_public_inquiry_consent(
             db_path, catalog_agent_id, payload
         ),
     ),

@@ -62,6 +62,78 @@ _LOG = logging.getLogger(__name__)
 
 SIGNATURE_HEADER = "x-kiwi-binding-jws"
 
+
+def update_public_inquiry_consent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Change open-inquiry consent only with the active runtime's signed request."""
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+    from kiwi_catalog.services import public_inquiry_consent as policy
+
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    body = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    binding_ref = body.get("binding")
+    consent = body.get("consent")
+    if not jws or set(body) != {"binding", "consent"} or not isinstance(binding_ref, dict) \
+            or set(binding_ref) != {"binding_id"} or not isinstance(binding_ref.get("binding_id"), str) \
+            or not isinstance(consent, dict) or set(consent) != {"granted", "terms_version"} \
+            or type(consent.get("granted")) is not bool or consent.get("terms_version") != policy.TERMS_VERSION:
+        raise ValidationError("valid binding signature and explicit public-inquiry consent are required")
+    with db_session(db_path) as conn:
+        binding = _current_active_binding(conn, agent_id)
+        if binding is None or str(binding["binding_id"]) != binding_ref["binding_id"]:
+            raise NotFoundError("active runtime binding not found")
+        signed = verify_runtime_request(conn, catalog_agent_id=agent_id, jws=jws, expected_fields={
+            "method": "PUT", "path": f"/v1/agents/{agent_id}/public-inquiry-consent",
+            "audience": "kiwi-catalog", "body_digest": canonical_digest(body),
+            "catalog_agent_id": agent_id, "binding_id": str(binding["binding_id"]),
+            "key_id": str(binding["key_id"]), "runtime_origin": str(binding["runtime_origin"]),
+            "service_epoch": int(binding["service_epoch"]),
+        })
+        _check_enrollment_exp(signed)
+        args = {"agent_id": agent_id, "merchant_id": str(binding["merchant_id"]),
+                "binding_id": str(binding["binding_id"])}
+        if consent["granted"]:
+            policy.grant(conn, **args, terms_version=policy.TERMS_VERSION)
+        else:
+            policy.revoke(conn, **args)
+        append_catalog_audit(conn, catalog_agent_id=agent_id, actor="runtime-owner",
+            event="public_inquiry_consent_changed", details={"granted": consent["granted"], "terms_version": policy.TERMS_VERSION})
+        return {"granted": consent["granted"], "terms_version": policy.TERMS_VERSION, "__no_store__": True}
+
+
+def read_public_inquiry_consent(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Read owner consent using a signed active binding; safe for reconciliation."""
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+    from kiwi_catalog.services import public_inquiry_consent as policy
+
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError("binding signature is required")
+    with db_session(db_path) as conn:
+        binding = _current_active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("active runtime binding not found")
+        signed = verify_runtime_request(conn, catalog_agent_id=agent_id, jws=jws, expected_fields={
+            "method": "GET", "path": f"/v1/agents/{agent_id}/public-inquiry-consent",
+            "audience": "kiwi-catalog", "body_digest": canonical_digest({}),
+            "catalog_agent_id": agent_id, "binding_id": str(binding["binding_id"]),
+            "key_id": str(binding["key_id"]), "runtime_origin": str(binding["runtime_origin"]),
+            "service_epoch": int(binding["service_epoch"]),
+        })
+        _check_enrollment_exp(signed)
+        row = conn.execute("select merchant_id,binding_id,terms_version,revoked_at "
+                           "from public_inquiry_consents where catalog_agent_id=?", (agent_id,)).fetchone()
+        granted = bool(row is not None and row["merchant_id"] == binding["merchant_id"] and
+                       row["binding_id"] == binding["binding_id"] and
+                       row["terms_version"] == policy.TERMS_VERSION and not row["revoked_at"])
+        return {"granted": granted, "policy_active": policy.enabled(conn, agent_id),
+                "terms_version": policy.TERMS_VERSION, "__no_store__": True}
+
 # ── A16：绑定拒绝/失败的自有固定诊断码 ─────────────────────────────────────
 # 只进服务端日志（code + stage + agent_id + 安全细节），不进响应体、不含
 # grant/JWS/密钥/远端原文。响应文案保持既有不变，Runtime 与 ZCode 诊断
@@ -569,13 +641,12 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
             return _enrollment_binding_result(conn, agent_id, row)
         challenge = secrets.token_urlsafe(32)
         origin = str(row["runtime_origin"]).rstrip("/")
-        # 随 enrollment 首绑暂存访问配置（pending；CAS 版本）。已 bound 的重入
-        # 路径不走这里——配置更新统一由 PUT runtime-access 处理。
-        staged = None
-        if access_config is not None:
-            staged = runtime_access_service.stage_runtime_access(
-                conn, catalog_agent_id=agent_id, access_config=access_config
-            )
+        # 随绑访问配置**不在这里**落库：先完成持钥证明与端点挑战，再在提交绑定的
+        # 同一事务里暂存/激活（见下方 challenge_commit）。挑战阶段失败时磁盘上不留
+        # 任何版本行，head 不会被一次失败的尝试永久占用——Runtime 在拿到绑定之前
+        # 读不到 head（首绑只能声明 0），否则重试会一直撞 CAS 冲突。也就没有任何
+        # "事后补偿删除"（不会误删已生效或他人请求的记录）。
+        # 已 bound 的重入路径不走这里——配置更新统一由 PUT runtime-access 处理。
         challenge_request = {"enrollment_id": enrollment_id, "challenge": challenge, "origin": origin,
             "key_thumbprint": thumb, "audience": "kiwi-catalog", "issued_at": now_iso(),
             "expires_at": (datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=60)).isoformat()}
@@ -648,6 +719,33 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
             version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
             if version != int(row["expected_binding_version"]):
                 raise ConflictError("binding version changed since enrollment authorization")
+            # 挑战已通过（持钥证明 + 授权校验 + nonce 消费都在上面），此刻才把随绑
+            # 凭据写进目录。版本冲突不升级成绑定失败：head 单调递增（含历史
+            # invalid/revoked 行），而 Runtime 在拿到绑定之前读不到它（首绑只能
+            # 声明 0）。目录保留既有配置、绝不覆盖任何已生效/待验证版本，并把明确
+            # 结果回给 Runtime；更换/启用凭据只能走商家签名 + 权威版本的 PUT。
+            staged = None
+            access_skipped = None
+            if access_config is not None:
+                expected_version = int(access_config["expected_version"])
+                head, head_status = runtime_access_service.current_version_state(conn, agent_id)
+                if expected_version != head:
+                    access_skipped = {"applied": False, "reason": "runtime_access_version_conflict",
+                                      "head_version": head, "head_status": head_status}
+                else:
+                    try:
+                        staged = runtime_access_service.stage_runtime_access(
+                            conn, catalog_agent_id=agent_id, access_config=access_config
+                        )
+                    except ConflictError:
+                        # 读到 head 之后又被并发推进：同样降级为"跳过 + 明确回报"，
+                        # 绝不覆盖对方的更新。其余 ConflictError（如代管总开关关闭）
+                        # 保持原语义，让绑定失败（整事务回滚，不留任何副作用）。
+                        concurrent, concurrent_status = runtime_access_service.current_version_state(conn, agent_id)
+                        if concurrent == expected_version:
+                            raise
+                        access_skipped = {"applied": False, "reason": "runtime_access_version_conflict",
+                                          "head_version": concurrent, "head_status": concurrent_status}
             outcome = _insert_active_binding(conn, agent=agent, binding=binding, key_jwk=dict(binding["key_jwk"]),
                 thumbprint=thumb, management=_management_declaration(binding), existing=_current_active_binding(conn, agent_id), actor=f"enrollment:{enrollment_id}")
             changed = conn.execute("update enrollments set status='bound',binding_id=?,consumed_at=? where enrollment_id=? and status='authorized'",
@@ -673,11 +771,27 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
                     )
                 except ConflictError:
                     pass
-            return _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
+            # 独立变量名：本函数的 `result` 已在上方绑定为 FetchResult（挑战投递
+            # 结果），复用同名会让 mypy 按首次赋值推断类型，运行语义不变但类型错误。
+            binding_result: dict[str, Any] = _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
+            if staged is not None:
+                config_version = int(staged["config_version"])
+                stored = conn.execute(
+                    "select status from runtime_access_configs where catalog_agent_id = ? and config_version = ?",
+                    (agent_id, config_version),
+                ).fetchone()
+                binding_result["access_config_outcome"] = {
+                    "applied": True,
+                    "config_version": config_version,
+                    "status": str(stored["status"]) if stored is not None else "pending",
+                }
+            elif access_skipped is not None:
+                binding_result["access_config_outcome"] = dict(access_skipped)
+            return binding_result
     except BaseException:
-        # 挑战或提交失败：随绑暂存的访问配置不得残留 pending（旧 active 不受影响）。
-        if staged is not None:
-            _invalidate_staged_best_effort(db_path, agent_id, int(staged["config_version"]))
+        # 不做任何补偿删除：随绑访问配置只在上面那个提交事务里暂存/激活，异常会
+        # 连同暂存行一起回滚，磁盘上不会残留 pending，也就不会触及任何已生效或
+        # 其他请求的记录（挑战阶段失败时一行都还没写）。
         raise
 
 

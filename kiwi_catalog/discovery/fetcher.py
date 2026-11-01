@@ -762,6 +762,28 @@ class ProfileFetcher:
                                   timeout=min(float(timeout), self._timeout), redirect_limit=0,
                                   deadline=fetch_deadline)
 
+    def post_signed_a2a(self, url: str, body: bytes, headers: dict[str, str], *, timeout: float = 15.0) -> FetchResult:
+        """Forward exact signed bytes through pinned DNS/TLS, without redirects or cookies."""
+        allowed = {"content-type", "content-digest", "signature", "signature-input", "a2a-version", "a2a-extensions"}
+        if not body or len(body) > min(self._policy.max_profile_bytes, 65536):
+            raise FetchLimitError("A2A request body outside allowed size")
+        if any(k.lower() not in allowed or "\r" in v or "\n" in v or len(v) > 4096 for k, v in headers.items()):
+            raise FetchError("invalid A2A forwarding headers")
+        if not {"content-type", "content-digest", "signature", "signature-input"}.issubset({k.lower() for k in headers}):
+            raise FetchError("missing signed A2A forwarding headers")
+        parsed = self._validate_url(url)
+        scheme, hostname = parsed.scheme, parsed.hostname
+        assert hostname is not None
+        port = _port_of(parsed, scheme)
+        if scheme != "https":
+            raise SSRFBlockError("HTTPS is required")
+        _validate_port(port, self._policy.allowed_ports)
+        deadline = _time.monotonic() + _MAX_FETCH_DURATION_SECONDS
+        verified_ip = _resolve_and_validate(hostname, port, deadline=deadline)
+        return self._make_request(url, str(verified_ip), hostname, port, None, None, _time.time(),
+                                  method="POST", data=body, timeout=min(float(timeout), self._timeout),
+                                  redirect_limit=0, deadline=deadline, signed_headers=headers)
+
     def _fetch(
         self,
         url: str,
@@ -870,6 +892,7 @@ class ProfileFetcher:
         *, method: str = "GET", data: bytes | None = None, timeout: float | None = None,
         redirect_limit: int | None = None,
         deadline: float | None = None,
+        signed_headers: dict[str, str] | None = None,
     ) -> FetchResult:
         """Execute the HTTP request with all SSRF protections in place."""
         # Build request with conditional headers
@@ -886,6 +909,8 @@ class ProfileFetcher:
         }
         if data is not None:
             req_headers["Content-Type"] = "application/json"
+        if signed_headers is not None:
+            req_headers.update(signed_headers)
         if etag:
             req_headers["If-None-Match"] = etag
         if last_modified:

@@ -1,8 +1,8 @@
 # kiwi-catalog 功能文档
 
-> 状态：对应 `main` 分支当前实现（2026-09-17，718 passed；
+> 状态：对应 `main` 分支当前实现（2026-09-17 基线，718 passed；
 > v0.4 Product-first Commerce Discovery + 商家接入/账号体系 +
-> M0 商家公开资料已落地）。
+> M0 商家公开资料已落地；2026-11-01 补充 0.5.13 开放询价中继端点）。
 > 本文描述**已实现**的功能面，不含设计文档中规划但未落地的部分
 > （如 PG/Redis 多实例限流、验证阶梯的第三方互操作证据、FTS/vector 搜索）。
 
@@ -67,6 +67,10 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | GET | `/v1/merchant-publications/search` | 公开检索（仅 published 且未过期；按商品名/类目；cursor 分页；`inquiry_available=false`） |
 | GET | `/v1/merchant-publications/{id}` | 公开详情（匿名仅 published 未过期；商家本人可见自己的 draft/withdrawn） |
 | POST | `/v1/merchant-publications/{id}/withdraw` | 撤回（账号会话 + 归属校验，终态） |
+| PUT | `/v1/agents/{id}/public-inquiry-consent` | 开放询价独立授权（当前活动绑定私钥签名；`granted` + `terms_version`） |
+| GET | `/v1/agents/{id}/public-inquiry-consent` | 开放询价授权状态（签名读；`granted` / `policy_active`，无凭据） |
+| GET | `/v1/agents/{id}/public-inquiry` | 开放询价可用性（未授权 404；仅 `{available, catalog_agent_id}`） |
+| POST | `/v1/agents/{id}/public-inquiry` | 开放询价签名中继（6 个 JSON-RPC 方法、原始 body ≤64KiB、30/min/IP） |
 
 ### 2.3 v1 面（`/v1/agents/*`）与 legacy 面（`/v1/agent-catalog/*`）
 
@@ -96,6 +100,32 @@ public-only 的商家/商品声明快照，买家按商品词公开检索：
   Agent/Listing 链路实时询价）；
 - 按商家限流（env `KIWI_CATALOG_PUBLICATION_RATE_LIMIT_PER_15MIN`，默认
   30/15min）；发布/更新/撤回均落 `audit_events` 审计。
+
+### 2.5 开放询价中继（`/v1/agents/{id}/public-inquiry*`，0.5.13）
+
+开放询价是**独立于分享码代管授权**的商家 opt-in；仅有既有 custody consent
+不放行。成功响应与中继 502 均为 `Cache-Control: no-store`；未授权/参数错误
+走统一错误信封。
+
+- **授权**：`PUT .../public-inquiry-consent` 请求体固定为
+  `{"binding":{"binding_id":...},"consent":{"granted":bool,"terms_version":"open-inquiry-v1"}}`，
+  须由当前活动 binding 私钥签名（JWS claims 覆盖 method/path/audience/body_digest/
+  catalog_agent_id/binding_id/key_id/runtime_origin/service_epoch）。`GET` 为同签名读，
+  返回 `{"granted","policy_active","terms_version"}`。`granted:false` 幂等：从未授权
+  或重复撤销均返回成功，授权门禁仍由绑定/代管/发布复核 fail-closed。
+- **可用性**：`GET .../public-inquiry` 只在授权 + 当前绑定 + 代管 + 发布全部有效时
+  返回 `{"available":true,"catalog_agent_id":id}`；否则 404。
+- **中继**：`POST .../public-inquiry` 仅接受带 `content-type` / `content-digest` /
+  `signature` / `signature-input` 的 JSON-RPC 2.0（方法白名单 `SendMessage` /
+  `GetTask` / `ListTasks` / `CancelTask` / `message/send` / `tasks/get`）；原始 body
+  ≤64KiB（FastAPI 与 fallback 双栈一致），重复签名头 400。目录把原始字节与签名头
+  经 pinned DNS/TLS 转发到当前绑定的 `/a2a`（附分享码），不转发 cookie/authorization。
+- **失败**：上游非 200、响应形状不符或回显分享码统一 502 固定信封
+  `{"jsonrpc":"2.0","id":...,"error":{"code":-32000,...}}`；不泄露 URL/门禁凭据，
+  服务端只记录自有固定码与净化后的 agent 标识。
+- **限流**：中继按 IP 30/min（独立事务，拒绝也计数）；可用性面走公开读预算。
+- **撤销**：`granted:false` 立即写 `revoked_at`；换绑、暂停发布、撤销代管任一发生
+  即 `enabled()` fail-closed。
 
 ## 3. 验证阶梯（§6）
 

@@ -1113,5 +1113,112 @@ class RuntimeAccessApiTest(unittest.TestCase):
         self.assertEqual(status, 404, payload)
 
 
+    def test_public_inquiry_proxy_requires_new_consent_and_does_not_expose_gate_secret(self) -> None:
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import public_inquiry_consent as policy
+
+        path = f"/v1/agents/{self.cagt}/public-inquiry"
+        body = {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {"message": "hello"}}
+        headers = [(b"content-digest", b"sha-256=:test:"), (b"signature", b"sig1=:test:"),
+                   (b"signature-input", b'sig1=("@method");keyid="test"'),
+                   (b"cookie", b"private-cookie"), (b"authorization", b"private-token")]
+        for stack in ("fastapi", "fallback"):
+            app = self._app_on_stack(stack)
+            with unittest.mock.patch.object(ProfileFetcher, "post_signed_a2a") as send:
+                self.assertEqual(_call_full(app, "GET", path)[0], 404)
+                status, result, _ = _call_full(app, "POST", path, body, extra_headers=headers)
+                self.assertEqual(status, 404, result)
+                send.assert_not_called()
+        with db_session(self.db_path) as conn:
+            policy.grant(conn, agent_id=self.cagt, merchant_id=self.merchant_id,
+                         binding_id=self.binding_id, terms_version=policy.TERMS_VERSION)
+            conn.execute("insert into card_publications(catalog_agent_id,active_revision,publication_state,etag,updated_at) "
+                         "values(?,1,'ACTIVE','tag','t') on conflict(catalog_agent_id) do update set publication_state='ACTIVE'",
+                         (self.cagt,))
+        response = FetchResult(url="https://example.invalid", status_code=200,
+                               body=json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}))
+        for stack in ("fastapi", "fallback"):
+            app = self._app_on_stack(stack)
+            with self.subTest(stack=stack), unittest.mock.patch.object(ProfileFetcher, "post_signed_a2a", return_value=response) as send:
+                get_status, capability, get_headers = _call_full(app, "GET", path)
+                self.assertEqual(get_status, 200, capability)
+                self.assertEqual(capability, {"available": True, "catalog_agent_id": self.cagt})
+                self.assertEqual(get_headers.get("cache-control"), "no-store")
+                status, result, response_headers = _call_full(app, "POST", path, body, extra_headers=headers)
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result["result"], {"ok": True})
+                self.assertEqual(response_headers.get("cache-control"), "no-store")
+                self.assertNotIn(SHARE_SECRET_V1, json.dumps(result))
+                target, forwarded_body, forwarded_headers = send.call_args.args
+                self.assertIn("sharecode=", target)
+                self.assertEqual(forwarded_body, json.dumps(body).encode())
+                self.assertNotIn("cookie", forwarded_headers)
+                self.assertNotIn("authorization", forwarded_headers)
+                bad = {**body, "method": "GetExtendedAgentCard"}
+                self.assertGreaterEqual(_call_full(app, "POST", path, bad, extra_headers=headers)[0], 400)
+                duplicate = headers + [(b"signature", b"another")]
+                self.assertEqual(_call_full(app, "POST", path, body, extra_headers=duplicate)[0], 400)
+            with unittest.mock.patch.object(ProfileFetcher, "post_signed_a2a", side_effect=RuntimeError("sharecode=SECRET-LEAK")):
+                status, result, _ = _call_full(app, "POST", path, body, extra_headers=headers)
+                self.assertEqual(status, 502)
+                self.assertNotIn("SECRET-LEAK", json.dumps(result))
+            echoed = FetchResult(url="https://example.invalid", status_code=200,
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"message": SHARE_SECRET_V1}}))
+            with unittest.mock.patch.object(ProfileFetcher, "post_signed_a2a", return_value=echoed):
+                status, result, _ = _call_full(app, "POST", path, body, extra_headers=headers)
+                self.assertEqual(status, 502)
+                self.assertNotIn(SHARE_SECRET_V1, json.dumps(result))
+
+    def test_fallback_public_inquiry_does_not_trust_request_body_as_client_ip(self) -> None:
+        path = f"/v1/agents/{self.cagt}/public-inquiry"
+        body = {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {},
+                "_client_ip": "spoofed-client"}
+        headers = [(b"content-digest", b"sha-256=:test:"), (b"signature", b"sig1=:test:"),
+                   (b"signature-input", b'sig1=("@method");keyid="test"')]
+        with unittest.mock.patch("kiwi_catalog.api.handlers.public_inquiry.enforce_public_read_limit") as limit:
+            _call_full(self._app_on_stack("fallback"), "POST", path, body, extra_headers=headers)
+        self.assertEqual(limit.call_args.args[1]["_client_ip"], "")
+
+    def test_public_inquiry_consent_requires_binding_signature_and_new_terms_on_both_stacks(self) -> None:
+        path = f"/v1/agents/{self.cagt}/public-inquiry-consent"
+
+        def signed(body: dict, pem: str | None = None) -> str:
+            return _jws(pem or self.runtime_pem, RUNTIME_ORIGIN, {
+                "method": "PUT", "path": path, "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body), "catalog_agent_id": self.cagt,
+                "binding_id": self.binding_id, "key_id": RUNTIME_ORIGIN,
+                "runtime_origin": RUNTIME_ORIGIN, "service_epoch": 7,
+            }, with_exp=True)
+
+        body = {"binding": {"binding_id": self.binding_id},
+                "consent": {"granted": True, "terms_version": "open-inquiry-v1"}}
+        for stack in ("fastapi", "fallback"):
+            with self.subTest(stack=stack):
+                app = self._app_on_stack(stack)
+                self.assertGreaterEqual(_call(app, "PUT", path, body)[0], 400)
+                wrong_pem, _ = _runtime_key()
+                self.assertGreaterEqual(_call(app, "PUT", path, body, signature=signed(body, wrong_pem))[0], 400)
+                signature = signed(body)
+                status, result, headers = _call_full(app, "PUT", path, body, signature=signature)
+                self.assertEqual(status, 200, result)
+                self.assertTrue(result["granted"])
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertGreaterEqual(_call(app, "PUT", path, body, signature=signature)[0], 400)
+                read_signature = _jws(self.runtime_pem, RUNTIME_ORIGIN, {
+                    "method": "GET", "path": path, "audience": "kiwi-catalog",
+                    "body_digest": canonical_digest({}), "catalog_agent_id": self.cagt,
+                    "binding_id": self.binding_id, "key_id": RUNTIME_ORIGIN,
+                    "runtime_origin": RUNTIME_ORIGIN, "service_epoch": 7,
+                }, with_exp=True)
+                status, projection, read_headers = _call_full(app, "GET", path, signature=read_signature)
+                self.assertEqual(status, 200, projection)
+                self.assertTrue(projection["granted"])
+                self.assertFalse(projection["policy_active"])
+                self.assertEqual(read_headers.get("cache-control"), "no-store")
+                revoke = {"binding": {"binding_id": self.binding_id},
+                          "consent": {"granted": False, "terms_version": "open-inquiry-v1"}}
+                self.assertEqual(_call(app, "PUT", path, revoke, signature=signed(revoke))[0], 200)
+
+
 if __name__ == "__main__":
     unittest.main()

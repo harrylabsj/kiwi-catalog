@@ -467,6 +467,25 @@ def invalidate_runtime_access(
     return merchant_projection(_config_row(conn, catalog_agent_id, config_version))
 
 
+def current_version_state(
+    conn: sqlite3.Connection, catalog_agent_id: str
+) -> tuple[int, str]:
+    """最新版本的 (config_version, status)；从未配置过返回 (0, "none")。
+
+    `_head_version` 只回答版本号；随绑凭据的降级路径还要说明"目录那边到底是
+    生效、待验证还是历史版本"，否则给商家的下一步不明确。只返回状态，不含任何
+    凭据材料。
+    """
+    row = conn.execute(
+        "select config_version, status from runtime_access_configs"
+        " where catalog_agent_id = ? order by config_version desc limit 1",
+        (catalog_agent_id,),
+    ).fetchone()
+    if row is None:
+        return (0, "none")
+    return (int(row["config_version"]), str(row["status"]))
+
+
 def revoke_runtime_access(
     conn: sqlite3.Connection, *, catalog_agent_id: str, access_config: Any
 ) -> dict[str, Any]:

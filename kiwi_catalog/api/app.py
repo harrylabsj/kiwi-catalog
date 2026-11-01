@@ -40,7 +40,7 @@ from kiwi_catalog import VERSION
 from kiwi_catalog.api.error_envelope import error_result
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.fastapi_routes import FastAPI, register_fastapi_routes
-from kiwi_catalog.api.limits import validate_payload
+from kiwi_catalog.api.limits import INQUIRY_TRANSPORT_KEYS, validate_payload
 from kiwi_catalog.api.request_dispatch import dispatch_request
 from kiwi_catalog.api.route_matching import match_path as _match_path
 from kiwi_catalog.api.route_table import _ROUTE_TABLE, RouteEntry, all_routes, resolve_route
@@ -71,6 +71,10 @@ __all__ = [
     "resolve_route",
 ]
 
+# 保留原私有名供既有导入方使用；集合本体在 limits（fallback 也要用，避免
+# fallback_asgi 反向导入 app）。
+_INQUIRY_TRANSPORT_KEYS = INQUIRY_TRANSPORT_KEYS
+
 
 def handle_request(
     db_path: str | Path,
@@ -78,11 +82,18 @@ def handle_request(
     path: str,
     payload: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
+    *,
+    trusted_transport_keys: frozenset[str] = frozenset(),
 ) -> tuple[int, dict[str, Any]]:
     payload = payload or {}
     query = query or {}
     try:
-        validate_payload(payload)
+        # 默认按客户端 JSON 全量校验。fallback ASGI 会在原始 body 已按同一套
+        # 限制校验后，注入 open-inquiry 的传输元数据（原始字节 base64、头派生
+        # 字段）；只有该可信注入路径才能把对应键名传进 trusted_transport_keys，
+        # 避免 base64 膨胀被重复计数。绝不能按路径或 payload 里的键推断信任：
+        # 客户端完全可以自己发送同名字段。
+        validate_payload(payload, skip_keys=trusted_transport_keys)
         # 纯路由分发循环已提取到 request_dispatch.dispatch_request：
         # 顺序匹配路径模板、命中即调 handler，路径已知但方法不符抛 405，
         # 未知路径抛 404（与内联实现逐字一致）。

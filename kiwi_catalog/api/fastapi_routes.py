@@ -34,8 +34,9 @@ from typing import Any
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
+from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
-from kiwi_catalog.api.limits import max_request_body_bytes, validate_payload
+from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.extensions import run_fastapi_hooks
 from kiwi_catalog.api.route_table import (
@@ -226,6 +227,13 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
                 body = b"".join(chunks) or b"{}"
                 try:
                     parsed = json.loads(body.decode("utf-8"))
+                except RecursionError:
+                    # 超深嵌套在解析阶段触发 RecursionError：返回 400，不能
+                    # 逃逸成 500（fallback 同口径、同文案）。
+                    final_status = 400
+                    return JSONResponse(
+                        {"ok": False, "error": JSON_DEPTH_ERROR}, status_code=400
+                    )
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     final_status = 400
                     return JSONResponse(
@@ -592,6 +600,51 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return cloud_binding_handlers.read_runtime_access(
             db_path, catalog_agent_id, _cloud_payload({}, request)
         )
+
+    @app.put("/v1/agents/{catalog_agent_id}/public-inquiry-consent")
+    def update_public_inquiry_consent_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = cloud_binding_handlers.update_public_inquiry_consent(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
+    @app.get("/v1/agents/{catalog_agent_id}/public-inquiry-consent")
+    def read_public_inquiry_consent_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = cloud_binding_handlers.read_public_inquiry_consent(
+            db_path, catalog_agent_id, _cloud_payload({}, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
+    @app.post("/v1/agents/{catalog_agent_id}/public-inquiry")
+    async def forward_public_inquiry_route(catalog_agent_id: str, request: _FastAPIRequest) -> _JSONResponse:
+        allowed = {"content-type", "content-digest", "signature", "signature-input", "a2a-version", "a2a-extensions"}
+        forwarded: dict[str, str] = {}
+        for raw_name, raw_value in request.scope.get("headers", []):
+            name = raw_name.decode("latin-1").lower()
+            if name in allowed:
+                if name in forwarded:
+                    return _JSONResponse({"ok": False, "error": "duplicate inquiry header"}, status_code=400)
+                forwarded[name] = raw_value.decode("latin-1")
+        payload = _client_payload(request)
+        import base64
+        payload["_raw_inquiry_body_b64"] = base64.b64encode(await request.body()).decode("ascii")
+        payload["_inquiry_headers"] = forwarded
+        result = await asyncio.to_thread(public_inquiry_handlers.forward, db_path, catalog_agent_id, payload)
+        status = int(result.pop("__status__", 200))
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, status_code=status, headers={"cache-control": "no-store"})
+
+    @app.get("/v1/agents/{catalog_agent_id}/public-inquiry")
+    def public_inquiry_availability_route(catalog_agent_id: str, request: _FastAPIRequest) -> _JSONResponse:
+        result = public_inquiry_handlers.availability(db_path, catalog_agent_id, _client_payload(request))
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
 
     @app.post("/v1/agents/{catalog_agent_id}/runtime-bindings/{binding_id}/revoke")
     def revoke_runtime_binding_route(

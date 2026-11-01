@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.13 — 2026-11-01
+
+- **首绑访问配置改为"挑战通过后同事务落库"**：随 enrollment 首绑提交的 WorkBuddy 分享码不再在挑战前暂存；持钥挑战、授权校验与 nonce 消费全部通过后，才在提交绑定的同一事务里暂存/激活。挑战阶段失败即随事务回滚，不再占用版本号，也不再需要任何失败补偿（不产生、不删除任何版本行）。
+- **版本冲突降级为跳过，不覆盖既有配置**：目录已有生效/待验证配置时，随绑凭据按 CAS 冲突跳过、绑定本身照常完成，回执以 `access_config_outcome`（`applied` / `reason` / `head_version` / `head_status`）说明；更换或启用仍只能走商家签名 + 权威版本的 `PUT /runtime-access`。
+- **新增只读版本状态投影**：`runtime_access.current_version_state()` 只返回最新配置版本与状态，不含任何凭据材料。
+- **开放询价授权**：新增商家侧独立授权（`PUT/GET /v1/agents/{id}/public-inquiry-consent`，当前绑定私钥签名并校验现行条款版本）、公开可用性探测（`GET /v1/agents/{id}/public-inquiry`，仅 `{available, catalog_agent_id}` 两键）、`POST /v1/agents/{id}/public-inquiry` 代理与 fallback 栈实现、migration 47 的 `public_inquiry_consents` 表，以及经 pinned DNS/TLS 的 `post_signed_a2a` 签名转发（无重定向、无 cookie）。
+- 回归测试覆盖首绑事务重排、代理不泄露门禁凭据、fallback 不信任请求正文自报的客户端地址、两套栈都要求签名与现行条款。
+- **部署约束（breaking）**：schema v47 在旧包中无法打开（`user_version > CURRENT_SCHEMA_VERSION` 直接拒绝），升级后**不能回滚到旧包**；发版说明必须写明。
+
 ## 0.5.12 — 2026-11-01
 
 - **连接器身份确认页显示当前登录商家**：待确认请求在批准前没有商家，`request_view` 现返回当前会话账号自己的 `session_merchant_name` / `session_email` 与请求来源 `return_origin`，让确认页显示“你将授权给谁”；请求侧 `merchant_name` 仍只在已绑定到当前账号时返回，跨账号不泄露他人信息。
