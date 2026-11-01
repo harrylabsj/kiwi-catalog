@@ -184,8 +184,9 @@ def request_view(
     """门户页面视图：只暴露确认所需的最小字段。
 
     ``account`` 为当前会话账号（可选）：仅用于判断「该请求是否属于当前登录
-    商家」，不返回任何其他账号信息。approved 状态下不回显 code——code 只经
-    回跳 URL 交给入口，页面不落痕迹。
+    商家」并回显**该账号自己**的商家名/邮箱（确认页显示“你将授权给谁”），
+    不返回任何其他账号信息。approved 状态下不回显 code——code 只经回跳 URL
+    交给入口，页面不落痕迹。
     """
     record = load_request(conn, request_id)
     account_id = account.get("account_id") if account else None
@@ -194,6 +195,13 @@ def request_view(
         and record["account_id"] is not None
         and int(record["account_id"]) == int(account_id)
     )
+    # 待确认请求在批准前没有商家（绑定发生在 approve_request）。确认页必须能
+    # 显示“你现在以谁的身份授权”，否则登录着 A 商家去批准 B 的请求会错绑；
+    # 这里只回**当前会话账号自己**的商家名/邮箱，绝不回其他账号的信息。
+    session_merchant_name = (
+        str(account.get("merchant_name") or "").strip() if account is not None else ""
+    )
+    session_email = str(account.get("email") or "").strip() if account is not None else ""
     return {
         "request_id": record["request_id"],
         "client_label": record["client_label"],
@@ -201,6 +209,9 @@ def request_view(
         "created_at": record["created_at"],
         "expires_at": record["expires_at"],
         "merchant_name": record["merchant_name"] if approved_for_account else "",
+        "session_merchant_name": session_merchant_name,
+        "session_email": session_email,
+        "return_origin": _origin_of(record["return_url"]),
         "approved_for_current_account": approved_for_account,
     }
 

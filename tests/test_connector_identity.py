@@ -318,6 +318,20 @@ class ConnectorIdentityApiTest(unittest.TestCase):
         status, _ = self._exchange(request_id, code)
         self.assertEqual(status, 404)
 
+    def test_pending_view_identifies_the_logged_in_account(self) -> None:
+        """待确认请求没有商家：确认页必须显示当前会话账号，避免登录 A 批准 B。"""
+        _, payload = self._create()
+        request_id = payload["request"]["request_id"]
+        status, view = self._view(request_id, cookie=self.cookie_a)
+        self.assertEqual(status, 200, view)
+        self.assertEqual(view["request"]["merchant_name"], "")
+        self.assertEqual(view["request"]["session_merchant_name"], "Acme 商贸")
+        self.assertEqual(view["request"]["session_email"], "a@acme.example")
+        self.assertEqual(
+            view["request"]["return_origin"], "https://connector.kiwi.example"
+        )
+        self.assertFalse(view["request"]["approved_for_current_account"])
+
     def test_view_does_not_expose_other_account_approval(self) -> None:
         _, payload = self._create()
         request_id = payload["request"]["request_id"]
@@ -326,6 +340,11 @@ class ConnectorIdentityApiTest(unittest.TestCase):
         self.assertEqual(status, 200, view)
         self.assertFalse(view["request"]["approved_for_current_account"])
         self.assertEqual(view["request"]["merchant_name"], "")
+        # 只回 B 自己的身份；绝不把 A 的商家名/邮箱带回给 B。
+        self.assertEqual(view["request"]["session_merchant_name"], "Rival 商行")
+        self.assertEqual(view["request"]["session_email"], "b@rival.example")
+        self.assertNotIn("Acme 商贸", json.dumps(view))
+        self.assertNotIn("a@acme.example", json.dumps(view))
 
     def test_invalid_decision_value_rejected(self) -> None:
         _, payload = self._create()
