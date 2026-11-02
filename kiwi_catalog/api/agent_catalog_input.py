@@ -54,6 +54,19 @@ _REGISTER_AUTH_FIELDS = {
     "_idempotency_key",
 }
 
+# 传输层元数据：由 fallback ASGI 与 FastAPI 的 payload helper 在派发前注入
+# （cookie / Origin / Referer / 买家标识 / 可信客户端 IP），不是客户端字段。
+# 客户端自带的同名键已在 api_auth.payload_with_auth 与 fallback 注入前剥除，
+# 因此这里剔除的是**服务端注入值**——schema 仍是 additionalProperties:false，
+# 客户端伪造未知字段照旧 422/400；双栈也就不会因为可信注入而误判注册载荷。
+_REGISTER_TRANSPORT_FIELDS = {
+    "_cookie",
+    "_origin",
+    "_referer",
+    "_buyer_id",
+    "_client_ip",
+}
+
 _REGISTER_INPUT_SCHEMA: jsonschema.Draft7Validator | None = None
 
 
@@ -74,10 +87,15 @@ def _validate_register_input(payload: dict[str, Any]) -> None:
 
     完成定义 #8：注册输入只能是 schema 声明的公开字段——私有经营数据
     （成本/底价/私密库存/凭据）在 schema 层拒绝，未知字段一律 422。
-    认证/幂等字段剥离后再校验；domain 的 hostname 形态由
-    normalize_canonical_domain 负责（schema 只查存在性）。
+    认证/幂等字段与**传输层注入元数据**剥离后再校验（后者由服务端在派发前
+    注入、客户端副本已被剥除，见 _REGISTER_TRANSPORT_FIELDS）；domain 的
+    hostname 形态由 normalize_canonical_domain 负责（schema 只查存在性）。
     """
-    candidate = {k: v for k, v in (payload or {}).items() if k not in _REGISTER_AUTH_FIELDS}
+    candidate = {
+        k: v
+        for k, v in (payload or {}).items()
+        if k not in _REGISTER_AUTH_FIELDS and k not in _REGISTER_TRANSPORT_FIELDS
+    }
     try:
         _register_input_schema().validate(candidate)
     except SchemaValidationError as exc:

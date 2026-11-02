@@ -219,7 +219,13 @@ class MarketplaceASGIApp:
                 # 键时不会跳过任何客户端 JSON。
                 for key in INQUIRY_TRANSPORT_KEYS:
                     payload.pop(key, None)
-            payload.pop("_cookie", None)
+            # 传输层元数据永远不是客户端字段：先剥除客户端 JSON 里的同名键
+            # （_auth_token/_binding_jws/_origin/_referer 由 payload_with_auth 统一
+            # 剥除，这里补齐 cookie / 买家标识 / 客户端 IP），之后只注入由 HTTP 头
+            # 与真实对端派生的可信值。否则客户端可用 body 冒充 IP 选限流桶、
+            # 冒充买家标识或会话 cookie。
+            for key in ("_cookie", "_buyer_id", "_client_ip"):
+                payload.pop(key, None)
             payload = api_auth.payload_with_auth(
                 payload,
                 authorization=headers.get("authorization", ""),
