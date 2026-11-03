@@ -1,6 +1,6 @@
 # kiwi-catalog
 
-当前源码候选：`0.5.3`；正式发布由 Kiwi Portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
+当前源码候选：`0.5.14`；正式发布由 Kiwi Portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
 
 独立部署的 Agent Catalog 服务——从 shopping-cli 抽离（
 `shopping-cli/docs/shopping-cli-agent-catalog-extraction-plan-v1.0.md`，
@@ -22,6 +22,12 @@
   （Fernet 加密存储）+ `/v1/accounts/*` 商家账号 API；商家后台 HTML 由私有
   `kiwi-catalog-admin` 扩展提供；**注册即商家**——注册即分配 merchant_id 与免费方案，
   邮箱验证和 Runtime 连接后可在额度内发布。
+- **公开商家主页**：`GET /m/{merchant_id}`（别名 `/merchants/{merchant_id}`、
+  `/merchant/{merchant_id}`）由目录托管，匿名展示商家已发布的公开资料与
+  ACTIVE 商品；按客户端 IP 接入公开读限流，`?page=N` 分页（单页 50 件）。
+  没有外部
+  `shop_url` 的商家也有稳定主页。页面只读公开投影，不含账号/联系人/凭据/
+  分享码；无可公开内容时 404。
 - 商家门户和运营/审核后台（`/portal/*` HTML）均由私有扩展提供；核心仅保留
   `/v1/accounts/*`、`/v1/merchant-publications/*` 等业务 API。
 - 治理（suspend/reinstate——owned Listings 联动置 SUSPENDED、双维度限流、
@@ -52,8 +58,8 @@ kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 
 ## 架构要点
 
-- 独立 SQLite schema；当前迁移版本为 `41`（`db/migrations.py`）。
-  Listings 方案、商家权益和额度审计由 schema 40 增加；schema 41 将免费默认额度调整为 20，与 shopping-cli 分别演化。
+- 独立 SQLite schema；源码当前 `CURRENT_SCHEMA_VERSION = 47`（`db/migrations.py`）。
+  **部署/发布前必须读取线上实际 `PRAGMA user_version` 并核对 migration 链，不能假定线上 schema 与源码一致**；schema 40/41 的历史额度调整见迁移记录，与 shopping-cli 分别演化。
 - 账号与 Token：`merchant_accounts` / `account_sessions` / `merchant_tokens`
   （Fernet 加密 `token_encrypted`）/ `merchant_applications`（申请+审批），
   详见 `docs/accounts.md`；

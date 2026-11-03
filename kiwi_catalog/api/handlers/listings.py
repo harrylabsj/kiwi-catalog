@@ -319,16 +319,29 @@ def v1_search_listings(
 
 
 def v1_get_listing(db_path: str | Path, listing_id: str) -> dict[str, Any]:
-    """GET /v1/listings/{listing_id} —— 单条公开投影。"""
+    """GET /v1/listings/{listing_id} —— 单条公开投影。
+
+    仅返回仍公开可发现的 ACTIVE/无治理 hold 行；历史分享码污染行在本次响应
+    中隐藏为 404。**只读**：不改 publication_state/governance_hold/digest；
+    ``listing_digest`` 仍是发布方原始摘要。商家自查面负责提示重新发布。
+    """
     listing_id = str(listing_id).strip()
     if not listing_id:
         raise ValidationError("listing_id is required")
     with db_session(db_path) as conn:
         repo.expire_stale_listings(conn, now_iso())
         row = repo.get_listing(conn, listing_id)
-        if row is None:
-            from kiwi_catalog.core.errors import NotFoundError
+        from kiwi_catalog.core.errors import NotFoundError
+        from kiwi_catalog.listings.domain import ACTIVE
+        from kiwi_catalog.listings.quarantine import listing_has_share_code
 
+        if row is None:
+            raise NotFoundError(f"Unknown listing: {listing_id}")
+        if str(row.get("publication_state") or "") != ACTIVE:
+            raise NotFoundError(f"Unknown listing: {listing_id}")
+        if int(row.get("governance_hold") or 0) != 0:
+            raise NotFoundError(f"Unknown listing: {listing_id}")
+        if listing_has_share_code(row):
             raise NotFoundError(f"Unknown listing: {listing_id}")
         return {"ok": True, "listing": listing_record(row)}
 
@@ -402,6 +415,8 @@ def v1_list_agent_listings(
                     f"agent {owner_agent_id} has no merchant binding; only admin may read its listings"
                 ) from exc
         repo.expire_stale_listings(conn, now_iso())
+        from kiwi_catalog.listings.quarantine import is_hidden_from_public
+
         try:
             rows, next_cursor = repo.list_listings_by_owner(
                 conn,
@@ -415,7 +430,18 @@ def v1_list_agent_listings(
         return {
             "ok": True,
             "agent_id": owner_agent_id,
-            "results": [listing_record(row) for row in rows],
+            "results": [
+                {
+                    **listing_record(row),
+                    # 自查面（仅 owner/admin）只**派生**提示，不写库：内容含
+                    # 分享码链接或旧的 hold=2 行都提示商家用新内容重新发布；
+                    # publication_state/digest/内容保持原值。
+                    "governance_hold": int(row.get("governance_hold") or 0),
+                    "quarantined": is_hidden_from_public(row),
+                    "republish_required": is_hidden_from_public(row),
+                }
+                for row in rows
+            ],
             "next_cursor": next_cursor,
         }
 

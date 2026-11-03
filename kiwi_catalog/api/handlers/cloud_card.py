@@ -74,12 +74,14 @@ def published_agent_card(
     """GET /v1/agents/{id}/agent-card.json —— 返回**原始 Card JSON**（不套 ok 信封）。
 
     公开读，按客户端 IP 限流（计划 B3）。资源本身可缓存（`Cache-Control` + ETag），
-    限流只是匿名滥用的兜底。
+    限流只是匿名滥用的兜底。历史名片若带分享码链接，**不做原地清洗**（那会让
+    响应体与已签名 card_digest/card_etag 不一致）：由 ``read_active_card`` 统一
+    隔离为 410，并提示商家重新发布。
     """
     with db_session(db_path) as conn:
         enforce_public_read_limit(conn, payload, surface="agent-card read")
         card, _etag, _state = read_active_card(conn, str(catalog_agent_id or "").strip())
-        return card
+    return card
 
 
 def _signed_fields(payload: dict[str, Any], catalog_agent_id: str) -> dict[str, Any]:

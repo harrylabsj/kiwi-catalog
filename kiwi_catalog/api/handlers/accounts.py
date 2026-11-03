@@ -817,7 +817,12 @@ def _refuse_binding_takeover(conn, account: dict[str, Any], row: Any) -> None:
     )
 
 
-def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+def authorize_enrollment(
+    db_path: str | Path,
+    enrollment_id: str,
+    payload: dict[str, Any],
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from kiwi_catalog.services import enrollments as service
     from kiwi_catalog.api.handlers.hosted_publication import hosted_base_url
     from kiwi_catalog.services.account_agents import ensure_my_catalog_agent
@@ -836,32 +841,41 @@ def authorize_enrollment(db_path: str | Path, enrollment_id: str, payload: dict[
         raise PermissionDenied("same-origin request required")
     if origin and (source.path or source.query or source.fragment):
         raise PermissionDenied("Origin header must contain an origin only")
+    # 配对码只允许走 JSON 请求体：带在查询串里会被代理访问日志、浏览器历史
+    # 捕获，且与「不进入 URL」的产品约束冲突。这里显式拒绝而不是静默忽略。
+    for name in (query or {}):
+        if str(name).lower() in {"user_code", "pairing_code", "pairingcode", "pairing-code"}:
+            raise ValidationError("pairing code must be sent in the JSON request body")
     ctx, conn, account = _require_session(db_path, payload)
     try:
         backend = SQLiteRateLimitBackend(conn, table="merchant_application_limits", key_column="actor_key")
         enforce_rate_limit(backend, key=f"enrollment-authorize:{account.get('account_id')}", limit=10,
                            window_seconds=900, description="enrollment authorization")
+        # 配对码是 8 位十六进制短码：账号级预算之外再按 enrollment 计一份，
+        # 防止用多个账号轮换猜测同一个待授权请求。成功/失败都计数（与账号桶一致）。
+        enforce_rate_limit(backend, key=f"enrollment-pairing:{enrollment_id}", limit=10,
+                           window_seconds=900, description="enrollment pairing code")
+    except BaseException as exc:
+        ctx.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        # tx1 独立提交计数：若把限流放进下面的授权事务，错码/过期等拒绝会把
+        # 计数一起回滚——猜测配对码反而完全不受预算约束（与 buyer 日配额同款教训）。
+        ctx.__exit__(None, None, None)
+    with db_session(db_path) as conn:
         row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
         if row is None:
             raise NotFoundError("enrollment not found")
-        presented_code = str(payload.get("user_code", "") or "").strip().upper()
+        # 配对码只从 JSON 请求体读取（查询串已在上方显式拒绝）。是否存在、
+        # 是否正确统一由 service.authorize 校验：错码与缺码（后端收紧后）都不会
+        # 改变 enrollment 状态，前端禁用按钮只是 UX。
         if (row["status"] not in ("ready_for_authorization", "authorized")
                 or (row["status"] == "ready_for_authorization" and row["expires_at"] <= now_iso())
                 or (row["status"] == "authorized" and row["grant_expires_at"] <= now_iso())
-                # 配对码是可选的附加校验：带了就必须对（错码一律拒），不带则只靠
-                # 登录会话 + 显式确认。门户页面不展示码（无会话预览不得泄漏它），
-                # 所以「页面必须带码」这条在 2026-10-28 起取消——见 CHANGELOG。
-                or (presented_code != "" and presented_code != str(row["user_code"]).upper())
                 or (row["merchant_id"] and row["merchant_id"] != account["merchant_id"])):
             from kiwi_catalog.core.errors import ConflictError
             raise ConflictError("enrollment is not available for authorization")
         _refuse_binding_takeover(conn, account, row)
         agent = ensure_my_catalog_agent(conn, account, base_url=allowed)
-        result = service.authorize(conn, row, account, str(payload.get("user_code", "")),
-                                   str(agent["catalog_agent_id"]))
-    except BaseException as exc:
-        ctx.__exit__(type(exc), exc, exc.__traceback__)
-        raise
-    else:
-        ctx.__exit__(None, None, None)
-        return result
+        return service.authorize(conn, row, account, str(payload.get("user_code") or ""),
+                                 str(agent["catalog_agent_id"]))

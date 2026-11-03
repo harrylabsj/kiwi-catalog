@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.14 — 2026-11-03
+
+- **分享码污染的已签名/摘要记录改为安全隔离，不再原地清洗**：历史云端名片命中分享码 URL 时公开稳定读返回 410（不产生伪造 ETag），商家详情标记 `quarantined`/`republish_required`；历史 Listing 命中时**纯读隐藏**（不改 `publication_state`/`governance_hold`/digest/内容），公开搜索/详情/主页不再返回，商家自查面提示 `quarantined`/`republish_required`，可用同 key 重新发布（新 digest）。正常记录的内容/ETag/digest 契约不变。
+- **分享码判定加固**：path/query/fragment 统一做有界重复百分号解码（最多 5 层），覆盖 `ShareCode`/`SHARE_CODE`/`share-code`、片段、编码后的嵌套 URL；测试只使用合成值。
+- **公开商家主页接入公开读限流**，并支持 `?page=N` 翻页：单页仍 50 件，第 51 件起可通过下一页访问（列表超过 50 件不再是硬截断）；分页按原始行边界扫描，隔离记录不会让下一页条目重复或跳过，整页被隐藏时返回空页并继续前进。
+- **公开主页链接进入商家卡片**：`GET /v1/accounts/agents/{id}/card` 与商家自查列表新增 `public_home_url`（无可公开内容时为空串），商家后台可直接打开目录托管的公开主页。
+- **Listing 搜索接受 `owner_agent_id` 精确过滤**：与 `kiwi-source.ts` 的查询键对齐，避免客户端全局限量搜索后本地过滤造成合法 owner 被截断。
+- **统一暂停/撤回语义与商家文案**：PAUSED 仍公开展示、只停止新询价；WITHDRAWN 才停止公开展示（稳定读 410）。
+- **连接授权页恢复人工配对码，且由服务端强制校验**：商家从自己的商家应用工作台读出 8 位短码，在 `/portal/connect/{enrollment_id}` 手动输入。会话预览仍只返回策略位 `pairing_required`，**永不回显** `user_code`；配对码只从 JSON 请求体读取（查询串出现同名字段直接 400、不落日志），页面不预填、不写地址栏，成功即清空。
+- **分阶段下线的旧客户端兼容**：新增 `KIWI_CATALOG_ENROLLMENT_PAIRING_MODE`（`optional` 默认 / `required`）。`optional` 下旧授权页不带码仍可确认；`required` 下缺码一律 409，绕过前端按钮也拿不到授权。门户扩展可先上线收集配对码，再收紧后端。
+- **配对尝试真实计入限流**：账号级 10 次/15 分钟之外，新增按 enrollment 的 10 次/15 分钟预算；限流计数在独立事务提交——此前错码等拒绝会随授权事务回滚，导致猜测完全不受预算约束。恒定时间比较与既有过期/同源/会话/反接管/幂等语义保留。
+- **商家服务地址不再伪装成主页**：`GET /v1/accounts/agents/{id}/card` 新增已生效访问门禁的**公开投影** `runtime_access`（provider/access_mode/版本，无分享码/密文）与 `public_shop_url`（published 且未过期公开资料里的 `shop_url`）。读侧拒绝 WorkBuddy（`*.workbuddy.host`/`*.workbuddy.cn`）、Kiwi 官网/目录域、目录/托管基址、`/a2a`/well-known Agent 端点、分享码参数/路径段，以及与卡片/绑定服务地址完全相同的 URL；门户只在这些检查通过时提供「打开店铺页」外链。门禁提示明确区分「目录代管」（商家授权后向已关注采购方发放分享码）与「开放询价」（独立 opt-in，买家无需关注或逐个批准，中继在服务端完成门禁）。
+
 ## 0.5.13 — 2026-11-01
 
 - **首绑访问配置改为"挑战通过后同事务落库"**：随 enrollment 首绑提交的 WorkBuddy 分享码不再在挑战前暂存；持钥挑战、授权校验与 nonce 消费全部通过后，才在提交绑定的同一事务里暂存/激活。挑战阶段失败即随事务回滚，不再占用版本号，也不再需要任何失败补偿（不产生、不删除任何版本行）。

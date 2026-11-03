@@ -54,6 +54,22 @@ from kiwi_catalog.discovery.cache import compute_etag as _http_etag
 WIRE_PROFILE = "a2a-1.0"
 PUBLICATION_STATES = ("ACTIVE", "PAUSED", "WITHDRAWN")
 
+
+class CardQuarantineError(GoneError):
+    """历史/手工写入的已签名名片带分享码：隔离，禁止按原 ETag/digest 下发。
+
+    这不是「撤回」——商家重新发布一个新的 revision（Runtime 重新计算 digest）
+    即可恢复；隔离期间公开读返回 410，且不产生任何伪造的 ETag 或摘要。
+    """
+
+
+def card_contains_share_code(card: Any) -> bool:
+    """卡片任意字符串字段里是否含分享码 URL（已签名内容不可原地改写）。"""
+    from kiwi_catalog.services.merchant_publications import contains_share_code_payload
+
+    return contains_share_code_payload(card)
+
+
 #: Sensitive field words/compounds, matched at JSON-key token boundaries.
 _PRIVATE_KEY_PATTERNS = (
     "cost",
@@ -141,7 +157,13 @@ def compute_etag(card: dict[str, Any]) -> str:
 
 
 def scan_publication_leaks(publication: dict[str, Any]) -> list[str]:
-    """扫描发布对象里的私密字段（密钥类 + 经营类）。返回 JSON 路径列表（空 = 干净）。"""
+    """扫描发布对象里的私密字段（密钥类 + 经营类 + 分享码链接）。
+
+    返回 JSON 路径列表（空 = 干净）。WorkBuddy 服务地址本身合法，但任何
+    字符串字段里出现分享码参数/路径段都按门禁凭据拒绝（新写入 fail-closed）。
+    """
+    from kiwi_catalog.services.merchant_publications import contains_share_code_link
+
     hits = list(scan_secrets(publication))
     leaks: list[str] = []
 
@@ -155,6 +177,8 @@ def scan_publication_leaks(publication: dict[str, Any]) -> list[str]:
         elif isinstance(value, list):
             for index, item in enumerate(value):
                 _walk(item, f"{path}.{index}")
+        elif isinstance(value, str) and contains_share_code_link(value):
+            leaks.append(path or "<root>")
 
     _walk(publication, "")
     return sorted(set(hits) | set(leaks))
@@ -410,7 +434,9 @@ def read_active_card(conn: sqlite3.Connection, catalog_agent_id: str) -> tuple[d
 
     - 无发布记录 / 无该版本 → NotFoundError(404)；
     - WITHDRAWN → GoneError(410)，**不重定向**（§11.5）；
-    - PAUSED → 仍返回名片（公开信息保留），治理状态由 runtime-binding 通道表达。
+    - PAUSED → 仍返回名片（公开信息保留），治理状态由 runtime-binding 通道表达；
+    - 分享码污染（已签名内容）→ CardQuarantineError(410)：不原地清洗、不伪造
+      ETag/digest，商家必须用新内容重新发布。
     """
     _require_agent(conn, catalog_agent_id)
     publication = conn.execute(
@@ -427,4 +453,14 @@ def read_active_card(conn: sqlite3.Connection, catalog_agent_id: str) -> tuple[d
     ).fetchone()
     if version is None:
         raise NotFoundError("active card revision is missing")
-    return json.loads(str(version["canonical_bytes"])), str(publication["etag"]), state
+    card = json.loads(str(version["canonical_bytes"]))
+    if not isinstance(card, dict):
+        raise NotFoundError("active card revision is malformed")
+    if card_contains_share_code(card):
+        # 已签名版本（Runtime 的 card_digest 背书）不能读侧改写：改写会让
+        # 响应体与绑定声明里的 card_etag/card_digest 不一致，等于伪造摘要。
+        # 安全隔离：不返回名片（410），商家需用新内容重新发布 revision。
+        raise CardQuarantineError(
+            "agent card is quarantined: share-code link detected; merchant must republish"
+        )
+    return card, str(publication["etag"]), state

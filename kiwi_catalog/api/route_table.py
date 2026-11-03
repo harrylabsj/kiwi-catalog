@@ -39,6 +39,7 @@ from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_h
 from kiwi_catalog.api.handlers import listings as listings_handlers
 from kiwi_catalog.api.handlers import merchant_publications as merchant_publications_handlers
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
+from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
@@ -433,7 +434,9 @@ RouteEntry(
 RouteEntry({"GET"}, "/v1/accounts/enrollments/{enrollment_id}",
           lambda db_path, payload, query, enrollment_id: accounts_handlers.enrollment_detail(db_path, enrollment_id, payload)),
 RouteEntry({"POST"}, "/v1/accounts/enrollments/{enrollment_id}/authorize",
-          lambda db_path, payload, query, enrollment_id: accounts_handlers.authorize_enrollment(db_path, enrollment_id, payload)),
+          lambda db_path, payload, query, enrollment_id: accounts_handlers.authorize_enrollment(
+              db_path, enrollment_id, payload, query or {}
+          )),
 RouteEntry({"POST"}, "/v1/enrollments/device",
           lambda db_path, payload, query, **kw: enrollment_handlers.create_device(db_path, payload)),
 RouteEntry({"POST"}, "/v1/enrollments/device/token",
@@ -517,6 +520,29 @@ RouteEntry(
         "/v1/merchant-publications/{publication_id}/withdraw",
         lambda db_path, payload, query, publication_id: _v1_withdraw_merchant_publication(
             db_path, publication_id, payload
+        ),
+    ),
+    # ── 公开商家主页（匿名 HTML；无外部 shop_url 的商家也有有效主页）──────
+    # 仅公开投影数据；/merchants/{id} 是等价别名，便于外部链接兼容。
+RouteEntry(
+        {"GET"},
+        "/m/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _public_merchant_home(
+            db_path, merchant_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/merchants/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _public_merchant_home(
+            db_path, merchant_id, payload, query
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/merchant/{merchant_id}",
+        lambda db_path, payload, query, merchant_id: _public_merchant_home(
+            db_path, merchant_id, payload, query
         ),
     ),
     # ── /v1/me/follows（M4 买家主动订阅，docs/accounts.md §follows）──────────
@@ -878,6 +904,12 @@ def _v1_merchant_publication_stats(db_path, payload):
 
 def _v1_withdraw_merchant_publication(db_path, publication_id, payload):
     return merchant_publications_handlers.withdraw_publication(db_path, publication_id, payload)
+
+
+def _public_merchant_home(db_path, merchant_id, payload=None, query=None):
+    return public_merchant_handlers.public_merchant_home(
+        db_path, merchant_id, payload, query
+    )
 
 
 # ── /v1/me/follows wrapper（M4 买家主动订阅）──────────────────────────────

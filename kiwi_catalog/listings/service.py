@@ -126,6 +126,12 @@ def publish_listing(
 
     if existing is not None and int(existing.get("governance_hold") or 0) == 1:
         raise PermissionDenied("LISTINGS_GOVERNANCE_HOLD: administrator release is required")
+    from kiwi_catalog.listings.quarantine import QUARANTINE_HOLD
+
+    release_quarantine = (
+        existing is not None
+        and int(existing.get("governance_hold") or 0) == QUARANTINE_HOLD
+    )
     if actor.startswith("runtime:"):
         from kiwi_catalog.services.listing_entitlements import require_publication_capacity
         require_publication_capacity(
@@ -197,6 +203,16 @@ def publish_listing(
         assert updated is not None  # update 后立即重读，事务窗口内必存在
         row = updated
         created = False
+    if release_quarantine:
+        # 内容隔离（hold=2）只要求商家用新内容重新发布；发布成功即解除隔离。
+        # 管理员治理 hold（1）在函数入口已拒绝，不会被这里清掉。
+        conn.execute(
+            "update commerce_listings set governance_hold = 0, publication_state = ?"
+            " where listing_id = ? and governance_hold = ?",
+            (ACTIVE, str(row["listing_id"]), QUARANTINE_HOLD),
+        )
+        row["governance_hold"] = 0
+        row["publication_state"] = ACTIVE
     return row, created
 
 
@@ -238,6 +254,13 @@ def reinstate_listing(
         raise PermissionDenied("listing is owned by a different merchant")
     if row.get("publication_state") != SUSPENDED:
         raise PermissionDenied(f"only SUSPENDED listings can be reinstated (got {row.get('publication_state')})")
+    from kiwi_catalog.listings.quarantine import QUARANTINE_HOLD
+
+    if int(row.get("governance_hold") or 0) == QUARANTINE_HOLD:
+        # 内容隔离不能靠 reinstate 绕过：必须用新内容重新发布（新 digest）。
+        raise PermissionDenied(
+            "LISTINGS_CONTENT_QUARANTINED: republish with new content is required"
+        )
     if int(row.get("governance_hold") or 0) == 1 and actor != "admin":
         raise PermissionDenied("LISTINGS_GOVERNANCE_HOLD: administrator release is required")
     _require_owner_active(conn, str(row.get("owner_agent_id") or ""), merchant_id)

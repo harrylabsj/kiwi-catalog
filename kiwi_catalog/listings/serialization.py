@@ -39,7 +39,12 @@ def new_listing_id() -> str:
 
 
 def listing_record(row: dict[str, Any]) -> dict[str, Any]:
-    """Row（已解码 json 列）→ listing-record.schema.json 形状（逐字段白名单）。"""
+    """Row（已解码 json 列）→ listing-record.schema.json 形状（逐字段白名单）。
+
+    **不做分享码原地清洗**：``listing_digest`` 是发布方对原始内容的摘要，读侧
+    改写内容会伪造摘要。历史污染行由 ``listings.quarantine`` 在进入公开投影前
+    隔离；正常记录原样透传，内容与 digest 保持原契约。
+    """
     attributes = row.get("attributes_json") or {}
     commercial_hints = row.get("commercial_hints_json") or {}
     handoff = row.get("handoff_destination_types_json") or []

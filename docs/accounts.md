@@ -26,7 +26,7 @@ owner token 双路径（`api/auth.py`）：
 - **HMAC fallback**（legacy）：`owner_token(merchant_id) = HMAC-SHA256(
   KIWI_CATALOG_OWNER_TOKEN_SECRET, "kiwi-catalog-owner:"+merchant_id)`。
 
-## 2. 数据模型（当前 schema 42）
+## 2. 数据模型（源码 schema 以 `CURRENT_SCHEMA_VERSION` 为准）
 
 | 表 | 用途 |
 | --- | --- |
@@ -53,7 +53,7 @@ owner token 双路径（`api/auth.py`）：
   merchant_public_events + buyer_follows + merchant_publications.view_count，
   M4）；v40（商品名额与治理暂停保护）、v41（未自定义的免费默认额度从 10 调整到 20）、
   v42（邮箱先行注册的预验证表 `registration_verifications`）；
-  `CURRENT_SCHEMA_VERSION = 42`。
+  源码当前 `CURRENT_SCHEMA_VERSION = 47`；线上部署前以实际 `PRAGMA user_version` 和迁移链核对为准，不能假定与源码一致。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
   ——token 明文永不落盘。
 
@@ -138,8 +138,10 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 
 商家注册、登录、连接确认和资料管理页面由私有扩展提供，URL 保持 `/portal/*`
 不变。开源核心仅提供页面调用的 `/v1/accounts/*`、
-`/v1/merchant-publications/*` 等业务 API，不包含 HTML、CSS、JS 或页面路由。
-部署时需同时安装并启用该扩展；未安装时页面路由返回 404，业务 API 仍可用。
+`/v1/merchant-publications/*` 等业务 API，不包含后台页面 HTML、CSS、JS 或
+页面路由；唯一的页面路由是匿名只读的公开商家主页 `/m/{merchant_id}`（只
+使用公开投影）。部署时需同时安装并启用该扩展；未安装时后台页面路由返回
+404，业务 API 与公开主页仍可用。
 
 | 路由 | 页面 |
 | --- | --- |
@@ -149,9 +151,59 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
 | `/portal/reset-password` | 忘记密码（邮箱 → 重置码 → 新密码，成功后回登录页） |
 | `/portal/account` | 账号 + 商品名额（已用／总额），不展示 Listings owner-token 配置步骤 |
 | `/portal/account/profile` | 基本信息页显示关注店铺的买家人数（匿名汇总，不展示买家身份） |
-| `/portal/account/card` | 店铺展示状态、商家服务连接状态和买家可见的店铺资料 |
+| `/portal/account/card` | 商家服务地址、访问门禁提示、目录托管的公开主页、外部店铺页链接、连接状态和买家可见的店铺资料（服务地址不是本店主页；公开主页 `/m/{merchant_id}` 由目录托管；外部店铺页来自 `merchant_publications.shop_url`，目录不托管） |
 
 `/portal/publications` 商家页面已移除。`/v1/merchant-publications/*` API 仍保留给现有调用方；日常商品与报价规则由已连接的商家应用维护。
+
+**公开页面边界**：`/portal/*` 仍是登录态商家页或运营页；目录另提供**公开商家
+主页** `GET /m/{merchant_id}`（等价别名 `/merchants/{merchant_id}`、
+`/merchant/{merchant_id}`），匿名只读，
+数据仅来自 `merchant_publications` 的 published + 未过期公开投影和
+`commerce_listings` 的 `publication_state='ACTIVE'` 商品。没有外部
+`merchant_publications.shop_url` 的商家也有有效主页；页面不展示注册账号、
+联系人、凭据、门面密文或分享码。没有可公开内容时返回 404。
+
+`public_home_url` 的基址取 `KIWI_CATALOG_PUBLIC_BASE_URL`（未配置时依次回退
+`SHOPPING_PUBLIC_BASE_URL`/hosted 基址/`http://localhost`）。
+
+外部 `shop_url` 仍是选填的商家自有店铺页：商家后台只在该链接存在时提供
+「打开店铺页」外链；目录托管主页由 `public_home_url` 单独提供。两者都不使用
+服务地址、商家管理后台或分享码 URL 代替。写入侧对 `shop_url` 与公开文本中的
+http(s) 链接做与读侧相同的准入；读侧（搜索/详情/公开事件/商家公开资料）对历史行
+再兜一层：拒绝 WorkBuddy（`*.workbuddy.host` / `*.workbuddy.cn`）、Kiwi 官网/
+目录域、目录/托管基址、`/a2a` 与 well-known Agent 端点，以及路径/查询串/
+片段里的 `sharecode`/`share_code`/`share-code`（含有界重复百分号编码与嵌套
+URL）——即使旧数据、历史事件 payload 或手工写库绕过写入校验。普通商品/店铺
+链接保持兼容。**已签名名片与带 `listing_digest` 的 Listing 不做原地清洗**：
+命中分享码时安全隔离（公开读 410 / Listing 公开读隐藏，不改状态），保留原 ETag 与
+digest，提示商家用新内容重新发布。
+
+#### 3.4.1 连接授权页的配对码（门户先行、后端分阶段收紧）
+
+商家应用发起连接时，`POST /v1/enrollments/device` 的响应把一次性
+`user_code`（8 位短码，10 分钟有效）交给**发起方工作台**，由商家在自己的
+商家应用里读出。`/portal/connect/{enrollment_id}` 页面要求商家手动输入该码：
+
+- **不回显**：`GET /v1/accounts/enrollments/{id}`（会话预览）只返回策略位
+  `pairing_required` 与公开预览，**永不返回** `user_code`；页面不预填、不把
+  服务端数据写进输入框，授权成功后清空输入。
+- **不进 URL/日志**：配对码只从 JSON 请求体读取；查询串里出现
+  `user_code`/`pairing_code` 一律 400 拒绝，不静默当作缺省码。页面不把码
+  拼进地址或写 `console`，访问日志也不记录请求体。
+- **服务端强制校验**：请求里带了配对码就必须匹配（恒定时间比较），错码/
+  超长码拒绝且不改 enrollment 状态；是否允许缺省由
+  `KIWI_CATALOG_ENROLLMENT_PAIRING_MODE` 决定：
+  - `optional`（默认，门户先行阶段）：无码仍走「登录会话 + 同源 + 显式确认」，
+    兼容旧授权页/旧浏览器缓存；
+  - `required`（后端收紧后）：缺码一律 409，绕过前端按钮也拿不到授权。
+- **保留既有边界**：过期（10 分钟）与授权 grant 过期、账号级
+  10 次/15 分钟限流、同源校验、登录会话、反接管（已有 active 绑定时换钥
+  拒绝）、重复授权幂等全部不变；另按 enrollment 增加 10 次/15 分钟配对码
+  预算，且**失败尝试独立提交计数**，不会因拒绝回滚而无限重试。
+- **部署次序**：先发布商家后台扩展（页面开始收集配对码；旧核心对
+  「带了就必须对」的校验已兼容）→ 再升级核心（默认 `optional`）→ 观察
+  页面流量后把 `KIWI_CATALOG_ENROLLMENT_PAIRING_MODE` 设为 `required` 并重启。
+  收紧前旧页面仍可用；收紧后必须使用带配对码输入的页面。
 
 ### 3.5 `/v1/merchant-publications/*`（M0 商家公开资料，账号会话）
 
@@ -228,6 +280,9 @@ cloud_binding 运维兜底、merchants self 的 admin 分支）读同一凭据�
   仍可能包含 active token，应按敏感会话保护；新门户不展示或配置该 token。
   admin 列表/审计仅回显 `token_prefix`；
 - 注册/登录/申请均限流；`require_merchant_token` 恒时比较（sha256 digest）；
+- 连接授权（§3.4.1）：配对码只在设备创建响应交付给发起方，会话预览/页面/
+  授权响应与访问日志都不回显它；服务端恒定时间校验，并在 `required` 模式
+  拒绝缺码请求。配对码失败尝试独立提交限流计数（拒绝不会回滚预算）；
 - 忘记密码：重置码与邮箱验证码同机制（6 位、SHA-256 落库、15 分钟过期）；
   forgot-password 对未知邮箱返回相同 ok 文案防账号枚举；reset-password
   不区分「账号不存在」与「码错误」；改密成功即删除该账号全部

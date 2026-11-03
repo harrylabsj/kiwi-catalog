@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,27 @@ from kiwi_catalog.a2a.request_signature import consume_request_nonce
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
 
 SCOPES = ("runtime:bind", "card:publish", "heartbeat")
+
+PAIRING_MODE_ENV = "KIWI_CATALOG_ENROLLMENT_PAIRING_MODE"
+PAIRING_MODE_OPTIONAL = "optional"
+PAIRING_MODE_REQUIRED = "required"
+_REQUIRED_MODE_VALUES = frozenset({"required", "enforce", "strict", "1", "true", "yes", "on"})
+
+
+def pairing_required() -> bool:
+    """配对码是否**必须**提供（后端分阶段启用开关）。
+
+    默认 ``optional``：请求里带了配对码就必须正确（错码一律拒），没带则沿用
+    「登录会话 + 同源 + 显式确认」——这是门户先行阶段对旧版授权页/旧浏览器
+    缓存的兼容路径。设为 ``required`` 后，缺少配对码的请求在所有栈上一律拒绝，
+    不再依赖前端是否禁用了确认按钮。
+
+    未知取值一律按 ``optional`` 处理：默认值本来就是兼容态，拼错开关不应意外
+    把商家锁在门外；真正收紧必须显式写 ``required``（部署文档与 CHANGELOG
+    都要求按阶段切换）。
+    """
+    raw = str(os.environ.get(PAIRING_MODE_ENV) or "").strip().lower()
+    return raw in _REQUIRED_MODE_VALUES
 
 
 def validate_public_jwk(jwk: dict[str, Any]) -> str:
@@ -149,21 +171,32 @@ def public_enrollment(conn: sqlite3.Connection, enrollment_id: str) -> dict[str,
         status = str(row["status"])
     # The device creation response is the sole user-code delivery. A session
     # preview must not disclose the secret used to claim an unowned enrollment.
+    # ``pairing_required`` is a policy bit, not a credential: the portal may ask
+    # the merchant for the code either way, and the backend still enforces it.
     return {"ok": True, "enrollment_id": enrollment_id,
             "public_preview": json.loads(row["public_preview_json"]), "runtime_origin": row["runtime_origin"],
-            "a2a_endpoint": row["a2a_endpoint"], "status": status, "requested_at": row["created_at"]}
+            "a2a_endpoint": row["a2a_endpoint"], "status": status, "requested_at": row["created_at"],
+            "pairing_required": pairing_required()}
 
 
 def authorize(conn: sqlite3.Connection, row: sqlite3.Row, account: dict[str, Any], user_code: str,
               agent_id: str) -> dict[str, Any]:
     # review 3-61：grant 形参已删——service 内部始终以 _stable_grant 重算，
-    # 传入的随机 grant 从未落库（死参数）；user_code 校验收敛到本函数唯一一处。
-    # 配对码是可选校验：带了就必须对（错码一律拒），不带则交给调用方（登录会话
-    # + 显式确认）决定是否放行。门户页面不展示配对码——无会话预览不得泄漏它，
-    # 而有会话的预览同样不返回（见 inventory 不变量）。
+    # 传入的随机 grant 从未落库（死参数）；配对码校验收敛到本函数唯一一处。
+    #
+    # 配对码由商家从自己的商家应用工作台读出后手工输入，**只随 JSON 请求体**
+    # 提交（页面不把码放进 URL/查询串，也不回显）。校验分两段：
+    # - 提供之后必须匹配（恒定时间比较；错码一律拒，失败不改任何状态）；
+    # - 是否允许缺省由 ``pairing_required()`` 决定：门户先行阶段默认兼容旧授权
+    #   页，后端收紧后缺码即拒。两段都在服务端执行，前端按钮只是 UX。
     presented = user_code.strip().upper()
-    if presented != "" and str(row["user_code"]).upper() != presented:
-        raise ValidationError("user_code mismatch")
+    if len(presented) > 64:
+        raise ValidationError("user_code is malformed")
+    expected = str(row["user_code"] or "").upper()
+    if presented == "" and pairing_required():
+        raise ConflictError("pairing code is required")
+    if presented != "" and not hmac.compare_digest(presented, expected):
+        raise ConflictError("user_code mismatch")
     if (row["status"] == "authorized" and row["grant_expires_at"] > now_iso()
             and row["merchant_id"] == account["merchant_id"]):
         return {"ok": True, "status": "authorized", "enrollment_id": row["enrollment_id"], "catalog_agent_id": agent_id}

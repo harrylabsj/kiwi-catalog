@@ -177,6 +177,103 @@ class ListingsApiTest(unittest.TestCase):
             "https://merchant.example/checkout/sku-001",
         )
 
+    def test_publish_rejects_share_code_links(self) -> None:
+        """新写入不得把 WorkBuddy 分享码链接塞进公开商品字段。"""
+        secret = "FAKE-LISTING-SHARE-CODE-3"
+        bad_overrides = (
+            {"handoff_destination_ref": f"https://shop.example.com/checkout?sharecode={secret}"},
+            {"summary": f"详情 https://acme.app.workbuddy.host/?share_code={secret}"},
+            {"attributes": {"manual": f"https://shop.example.com/a?share-code={secret}"}},
+        )
+        for overrides in bad_overrides:
+            status, payload = self._publish(overrides)
+            self.assertEqual(status, 400, (overrides, payload))
+            self.assertNotIn(secret, json.dumps(payload))
+        # 普通外部商品链接保持兼容。
+        status, payload = self._publish(
+            {"handoff_destination_ref": "https://merchant.example/checkout/sku-001"}
+        )
+        self.assertEqual(status, 200, payload)
+
+    def test_historical_listing_hidden_read_only(self) -> None:
+        """历史污染行：公开读只隐藏、不写 SUSPENDED/hold；自查提示重发布。"""
+        status, payload = self._publish(
+            {"handoff_destination_ref": "https://merchant.example/checkout/sku-001"}
+        )
+        self.assertEqual(status, 200, payload)
+        listing_id = payload["listing"]["listing_id"]
+        original_digest = payload["listing"]["listing_digest"]
+        secret = "FAKE-LISTING-SHARE-CODE-4"
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update commerce_listings set handoff_destination_ref = ?,"
+                " summary = ?, attributes_json = ? where listing_id = ?",
+                (
+                    f"https://acme.app.workbuddy.host/?sharecode={secret}",
+                    f"历史简介 https://shop.example.com/a?share_code={secret}",
+                    json.dumps({"manual": f"https://shop.example.com/a?share-code={secret}"}),
+                    listing_id,
+                ),
+            )
+        status, payload = _call_http(self.app, "GET", f"/v1/listings/{listing_id}")
+        self.assertEqual(status, 404, payload)
+        self.assertNotIn(secret, json.dumps(payload))
+
+        # 公开 GET 是纯读：状态、hold、digest 与内容都不被改写。
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select publication_state, governance_hold, listing_digest,"
+                " handoff_destination_ref from commerce_listings where listing_id = ?",
+                (listing_id,),
+            ).fetchone()
+        self.assertEqual(row["publication_state"], "ACTIVE")
+        self.assertEqual(int(row["governance_hold"]), 0)
+        self.assertEqual(row["listing_digest"], original_digest)
+        self.assertIn(secret, str(row["handoff_destination_ref"]))
+
+        # 公开搜索纯读隐藏该行，也不泄漏秘密值；库状态保持不变。
+        status, payload = _call_http(
+            self.app, "GET", "/v1/listings/search?q=21.5"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertNotIn(secret, json.dumps(payload))
+        self.assertNotIn(
+            listing_id, [item["listing"]["listing_id"] for item in payload["results"]]
+        )
+        with db_session(self.db_path) as conn:
+            still = conn.execute(
+                "select publication_state, governance_hold from commerce_listings"
+                " where listing_id = ?",
+                (listing_id,),
+            ).fetchone()
+        self.assertEqual(still["publication_state"], "ACTIVE")
+        self.assertEqual(int(still["governance_hold"]), 0)
+
+        # 发布方自查：状态仍为 ACTIVE、hold=0，但派生提示要求重新发布。
+        status, payload = _call_http(
+            self.app,
+            "GET",
+            f"/v1/agents/{self.agent_id}/listings?owner_token={self.token}",
+        )
+        self.assertEqual(status, 200, payload)
+        item = next(
+            row for row in payload["results"] if row["listing_id"] == listing_id
+        )
+        self.assertTrue(item["republish_required"])
+        self.assertTrue(item["quarantined"])
+        self.assertEqual(item["governance_hold"], 0)
+        self.assertEqual(item["publication_state"], "ACTIVE")
+
+        # 同 key 用干净内容重新发布 → 重新计算 digest；旧 digest 不被伪造。
+        status, payload = self._publish({"title": "重新发布的商品"})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["listing"]["publication_state"], "ACTIVE")
+        self.assertNotEqual(payload["listing"]["listing_digest"], original_digest)
+        self.assertNotIn(secret, json.dumps(payload))
+        status, payload = _call_http(self.app, "GET", f"/v1/listings/{listing_id}")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["listing"]["title"], "重新发布的商品")
+
     def test_publish_requires_owner_token(self) -> None:
         status, payload = self._publish(token="")
         self.assertEqual(status, 403, payload)

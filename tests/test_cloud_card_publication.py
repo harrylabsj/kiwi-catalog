@@ -306,6 +306,40 @@ class CloudCardPublicationTest(unittest.TestCase):
         start = next(m for m in received if m["type"] == "http.response.start")
         self.assertEqual(start["status"], 304)
 
+    def test_published_card_with_share_code_is_quarantined_not_rewritten(self) -> None:
+        """历史已签名名片带分享码：隔离（410），绝不清洗后配原 ETag 返回。"""
+        from kiwi_catalog.a2a.card_store import compute_etag
+
+        secret = "FAKE-CARD-QUARANTINE-CODE-7"
+        card = _card()
+        card["description"] = f"门禁链接 https://shop.example.com/a?sharecode={secret}"
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into agent_card_versions"
+                " (catalog_agent_id, card_revision, wire_profile, canonical_bytes,"
+                " digest, created_by, created_at) values (?, 1, 'a2a-1.0', ?, ?, 'test', ?)",
+                (
+                    self.catalog_agent_id,
+                    json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    "sha256:" + "b" * 64,
+                    "2026-09-21T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "insert into card_publications (catalog_agent_id, active_revision,"
+                " publication_state, etag, updated_at) values (?, 1, 'ACTIVE', ?, ?)",
+                (
+                    self.catalog_agent_id,
+                    compute_etag(card),
+                    "2026-09-21T00:00:00+00:00",
+                ),
+            )
+        status, payload, headers, raw = self._read()
+        self.assertEqual(status, 410, payload)
+        self.assertNotIn(secret.encode(), raw)
+        self.assertNotIn("etag", headers)
+        self.assertNotIn("cache-control", headers)
+
     # ── T040：Card 必须过正式 A2A 验证器（§13.1） ─────────────────
     def test_card_must_pass_the_formal_a2a_validator(self) -> None:
         """外层发布 Schema 不是完整 A2A Schema——正式解析器会拦下它管的那部分。

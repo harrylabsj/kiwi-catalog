@@ -259,4 +259,11 @@ def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if secrets:
         raise ValidationError(f"publish payload contains secret-like content at: {secrets[:3]}")
 
+    # 分享码链接（WorkBuddy 门禁参数/路径段）不是商品内容：新写入 fail-closed。
+    # 普通商品/服务链接（含 WorkBuddy 服务地址本身）保持不变。
+    from kiwi_catalog.services.merchant_publications import sanitize_share_code_urls
+
+    if sanitize_share_code_urls(canonical) != canonical:
+        raise ValidationError("publish payload contains a share-code link")
+
     return canonical

@@ -400,11 +400,197 @@ class MerchantPublicationsApiTest(unittest.TestCase):
                 self.cookie_a, _publish_body("链接校验商品", shop_url=bad_url)
             )
             self.assertEqual(status, 400, f"{bad_url}: {payload}")
+        # WorkBuddy 服务/门禁链接、Agent 端点与分享码参数不是公开店铺页：
+        # 新写入 fail-closed（普通外部商品链接仍兼容）。
+        for bad_url in (
+            "https://acme.app.workbuddy.host/shop",
+            "https://workbuddy.host/shop",
+            "https://open.workbuddy.cn/shop?sharecode=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme?sharecode=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme?share_code=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme?share-code=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme#sharecode=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/sharecode/FAKE-SHARE-CODE-1",
+            "https://shop.example.com/%73harecode/FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme?share%5Fcode=FAKE-SHARE-CODE-1",
+            "https://shop.example.com/acme?sharecode=FAKE-SHARE-CODE-1/a2a",
+            "https://shop.example.com/a2a",
+            "https://shop.example.com/.well-known/agent-card.json",
+        ):
+            status, payload = self._create(
+                self.cookie_a, _publish_body("链接校验商品", shop_url=bad_url)
+            )
+            self.assertEqual(status, 400, f"{bad_url}: {payload}")
+            self.assertNotIn("FAKE-SHARE-CODE-1", json.dumps(payload))
+        # 普通商品链接保持兼容。
         status, payload = self._create(
             self.cookie_a,
             _publish_body("链接校验商品", shop_url="https://shop.example.com/item/1"),
         )
         self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["publication"]["shop_url"], "https://shop.example.com/item/1")
+
+    def test_public_text_links_reject_workbuddy_share_codes(self) -> None:
+        for summary in (
+            "看这里 https://acme.app.workbuddy.host/?sharecode=FAKE-SHARE-CODE-2",
+            "门禁链接 https://shop.example.com/acme?share_code=FAKE-SHARE-CODE-2",
+        ):
+            status, payload = self._create(
+                self.cookie_a, _publish_body("文本链接商品", summary=summary)
+            )
+            self.assertEqual(status, 400, payload)
+            self.assertNotIn("FAKE-SHARE-CODE-2", json.dumps(payload))
+        # 普通商品链接仍可作为公开文本内容。
+        status, payload = self._create(
+            self.cookie_a,
+            _publish_body("文本链接商品", summary="详情见 https://shop.example.com/item/2"),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertIn("https://shop.example.com/item/2", payload["publication"]["summary"])
+
+    def test_historical_public_projection_redacts_share_code_links(self) -> None:
+        """旧数据/手工写库绕过写入校验时，搜索/详情/事件仍不投影危险链接。"""
+        status, payload = self._create(self.cookie_a, _publish_body("历史链接商品"))
+        self.assertEqual(status, 200, payload)
+        publication_id = payload["publication"]["publication_id"]
+        secret = "FAKE-HISTORY-SHARE-CODE-9"
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "update merchant_publications set shop_url = ?, summary = ?"
+                " where publication_id = ?",
+                (
+                    f"https://acme.app.workbuddy.host/?sharecode={secret}",
+                    f"历史简介 https://shop.example.com/acme?sharecode={secret}",
+                    publication_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, payload = self._search("q=历史链接商品")
+        self.assertEqual(status, 200, payload)
+        hit = payload["results"][0]
+        self.assertEqual(hit["shop_url"], "")
+        self.assertNotIn(secret, json.dumps(payload))
+        self.assertIn("[链接已移除]", hit["summary"])
+
+        status, payload = self._get(publication_id)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["publication"]["shop_url"], "")
+        self.assertNotIn(secret, json.dumps(payload))
+
+    def test_public_merchant_home_without_external_shop_url(self) -> None:
+        """没有外部 shop_url 也有有效公开主页；只展示已公开资料。"""
+        status, payload = self._create(
+            self.cookie_a,
+            _publish_body("主页商品一", summary="公开主页简介"),
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["publication"]["shop_url"], "")
+
+        status, page, headers = _call_http(
+            self.app, "GET", f"/m/{self.merchant_a}"
+        )
+        self.assertEqual(status, 200, page)
+        rendered = str(page.get("_raw") or "")
+        self.assertIn("Acme 商贸", rendered)
+        self.assertIn("主页商品一", rendered)
+        self.assertIn("公开主页简介", rendered)
+        self.assertIn(self.merchant_a, rendered)
+        self.assertNotIn("a@acme.example", rendered)
+        self.assertNotIn("138 0000 0000", rendered)
+        self.assertNotIn("sharecode", rendered)
+        self.assertIn("text/html", headers.get("content-type", ""))
+
+        # 等价别名与未知商家 404
+        status, page, _ = _call_http(
+            self.app, "GET", f"/merchants/{self.merchant_a}"
+        )
+        self.assertEqual(status, 200, page)
+        status, _page, _ = _call_http(self.app, "GET", "/m/mkt_missing")
+        self.assertEqual(status, 404)
+
+    def test_public_merchant_home_shows_active_listings(self) -> None:
+        """只有已发布 Listing 的商家也能打开主页；私有字段不进入页面。"""
+        status, _ = self._create(self.cookie_a, _publish_body("占位商品"))
+        self.assertEqual(status, 200)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            now = "2026-10-01T00:00:00+00:00"
+            conn.execute(
+                "insert into commerce_listings (listing_id, listing_type, owner_agent_id,"
+                " merchant_id, source_product_ref, title, summary, category, brand,"
+                " attributes_json, regions_json, tags_json, commercial_hints_json,"
+                " handoff_destination_types_json, listing_digest, publication_state,"
+                " listing_freshness_state, published_at, updated_at, fresh_until, created_at)"
+                " values ('lst_home_1', 'product', 'cagt_home', ?, 'SKU-HOME-1',"
+                " '主页 Listing 商品', 'Listing 公开简介', '个护', 'Acme', '{}', '[]', '[]',"
+                " '{}', '[]', 'digest-home-1', 'ACTIVE', 'FRESH', ?, ?, ?, ?)",
+                (self.merchant_a, now, now, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, page, _ = _call_http(self.app, "GET", f"/m/{self.merchant_a}")
+        self.assertEqual(status, 200, page)
+        rendered = str(page.get("_raw") or "")
+        self.assertIn("主页 Listing 商品", rendered)
+        self.assertIn("Listing 公开简介", rendered)
+
+    def test_public_merchant_home_is_rate_limited(self) -> None:
+        """主页是匿名公开读：按客户端 IP 接入与名片读相同的公开读预算。"""
+        status, _ = self._create(self.cookie_a, _publish_body("限流主页商品"))
+        self.assertEqual(status, 200)
+        with mock.patch.dict(
+            os.environ,
+            {"KIWI_CATALOG_PUBLIC_READ_RATE_LIMIT_PER_MINUTE": "1"},
+            clear=False,
+        ):
+            status, _page, _ = _call_http(self.app, "GET", f"/m/{self.merchant_a}")
+            self.assertEqual(status, 200)
+            status, payload, _ = _call_http(self.app, "GET", f"/m/{self.merchant_a}")
+            self.assertEqual(status, 429, payload)
+
+    def test_public_merchant_home_paginates_beyond_fifty(self) -> None:
+        """单页 50 件不是硬截断：第 51 件可通过 ?page=2 访问。"""
+        now = "2026-10-01T00:00:00+00:00"
+        conn = sqlite3.connect(self.db_path)
+        try:
+            for index in range(51):
+                conn.execute(
+                    "insert into merchant_publications (publication_id, merchant_id,"
+                    " status, source_kind, merchant_display_name, title, category, summary,"
+                    " faq_json, published_at, expires_at, version, created_at, updated_at)"
+                    " values (?, ?, 'published', 'merchant_declared', 'Acme 商贸', ?,"
+                    " '茶叶', '公开简介', '[]', ?, '', 1, ?, ?)",
+                    (
+                        f"mpub_page_{index:02d}",
+                        self.merchant_a,
+                        f"分页商品{index:02d}",
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        status, page, _ = _call_http(self.app, "GET", f"/m/{self.merchant_a}")
+        self.assertEqual(status, 200, page)
+        rendered = str(page.get("_raw") or "")
+        self.assertIn("分页商品50", rendered)
+        self.assertIn('href="?page=2"', rendered)
+        self.assertNotIn("分页商品00", rendered)
+
+        status, page, _ = _call_http(
+            self.app, "GET", f"/m/{self.merchant_a}", query_string=b"page=2"
+        )
+        self.assertEqual(status, 200, page)
+        rendered = str(page.get("_raw") or "")
+        self.assertIn("分页商品00", rendered)
+        self.assertNotIn("分页商品50", rendered)
 
     # ── 字段校验与限流 ────────────────────────────────────────────────────
 
@@ -505,8 +691,12 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
         for expected in (
             "/v1/merchant-publications",
             "/v1/merchant-publications/search",
+            "/v1/merchant-publications/stats",
             "/v1/merchant-publications/{publication_id}",
             "/v1/merchant-publications/{publication_id}/withdraw",
+            "/m/{merchant_id}",
+            "/merchants/{merchant_id}",
+            "/merchant/{merchant_id}",
         ):
             self.assertIn(expected, fastapi_paths)
 
@@ -544,9 +734,15 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
             )
             self.assertEqual(resp.status_code, 200, resp.text)
             publication_id = resp.json()["publication"]["publication_id"]
+            merchant_id = resp.json()["publication"]["merchant_id"]
             resp = client.get("/v1/merchant-publications/search", params={"q": "双栈商品"})
             self.assertEqual(resp.status_code, 200, resp.text)
             self.assertEqual(len(resp.json()["results"]), 1)
+            # 公开商家主页（FastAPI 栈 HTML 响应）
+            resp = client.get(f"/m/{merchant_id}")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertIn("text/html", resp.headers.get("content-type", ""))
+            self.assertIn("fastapi 双栈商品", resp.text)
             resp = client.post(
                 f"/v1/merchant-publications/{publication_id}/withdraw", json={}, headers=auth
             )

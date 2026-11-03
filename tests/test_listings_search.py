@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import urllib.parse
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -347,6 +348,126 @@ class ListingsSearchTest(unittest.TestCase):
         _, payload = _call_http(self.app, "GET", "/v1/listings/search")
         self.assertEqual(payload["results"][0]["listing"]["listing_freshness_state"], "FRESH")
         self.assertEqual(payload["results"][0]["listing"]["listing_id"], published["listing"]["listing_id"])
+
+    def test_owner_agent_id_filter_matches_kiwi_source_contract(self) -> None:
+        """kiwi-source.ts 的 owner_agent_id 查询必须被 catalog 精确接受。"""
+        self._publish()
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "insert into commerce_listings (listing_id, listing_type, owner_agent_id,"
+                " merchant_id, source_product_ref, title, summary, category,"
+                " listing_digest, publication_state, governance_hold,"
+                " listing_freshness_state, published_at, updated_at, fresh_until, created_at)"
+                " values ('lst_other_owner', 'product', 'cagt_other_owner', ?, 'SKU-OTHER',"
+                " 'Other Owner Item', '', 'industrial-display', ?, 'ACTIVE', 0, 'FRESH',"
+                " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00',"
+                " '2099-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (MERCHANT_ID, "sha256:" + "d" * 64),
+            )
+        status, payload = _call_http(
+            self.app,
+            "GET",
+            f"/v1/listings/search?owner_agent_id={self.agent_id}",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["results"])
+        self.assertTrue(
+            all(
+                item["listing"]["owner_agent_id"] == self.agent_id
+                for item in payload["results"]
+            )
+        )
+        status, payload = _call_http(
+            self.app, "GET", "/v1/listings/search?owner_agent_id=cagt_other_owner"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            [item["listing"]["listing_id"] for item in payload["results"]],
+            ["lst_other_owner"],
+        )
+
+    def test_scan_budget_keeps_cursor_advancing_past_dangerous_rows(self) -> None:
+        """连续危险行超过扫描预算时，后续正常商品仍可通过 cursor 翻到。"""
+        secret = "FAKE-PAGINATION-SHARE-CODE"
+        dangerous_ts = "2026-11-02T00:00:00+00:00"
+        normal_ts = "2026-01-01T00:00:00+00:00"
+        with db_session(self.db_path) as conn:
+            for i in range(520):
+                conn.execute(
+                    "insert into commerce_listings (listing_id, listing_type, owner_agent_id,"
+                    " merchant_id, source_product_ref, title, summary, category,"
+                    " listing_digest, publication_state, governance_hold,"
+                    " listing_freshness_state, published_at, updated_at, fresh_until, created_at)"
+                    " values (?, 'product', ?, ?, ?, ?, ?, 'pagination', ?, 'ACTIVE', 0,"
+                    " 'FRESH', ?, ?, '2099-01-01T00:00:00+00:00', ?)",
+                    (
+                        f"lst_scan_d_{i:04d}",
+                        self.agent_id,
+                        MERCHANT_ID,
+                        f"SKU-D-{i:04d}",
+                        f"pagination danger {i}",
+                        f"pagination danger https://shop.example.com/a?sharecode={secret}-{i}",
+                        f"sha256:{i:064d}",
+                        dangerous_ts,
+                        dangerous_ts,
+                        dangerous_ts,
+                    ),
+                )
+            for i in range(5):
+                conn.execute(
+                    "insert into commerce_listings (listing_id, listing_type, owner_agent_id,"
+                    " merchant_id, source_product_ref, title, summary, category,"
+                    " listing_digest, publication_state, governance_hold,"
+                    " listing_freshness_state, published_at, updated_at, fresh_until, created_at)"
+                    " values (?, 'product', ?, ?, ?, ?, ?, 'pagination', ?, 'ACTIVE', 0,"
+                    " 'FRESH', ?, ?, '2099-01-01T00:00:00+00:00', ?)",
+                    (
+                        f"lst_scan_normal_{i:04d}",
+                        self.agent_id,
+                        MERCHANT_ID,
+                        f"SKU-N-{i:04d}",
+                        f"pagination normal {i}",
+                        "pagination normal",
+                        f"sha256:{i + 10000:064d}",
+                        normal_ts,
+                        normal_ts,
+                        normal_ts,
+                    ),
+                )
+        status, first = _call_http(
+            self.app, "GET", "/v1/listings/search?q=pagination&limit=10"
+        )
+        self.assertEqual(status, 200, first)
+        self.assertEqual(first["results"], [])
+        cursor = first.get("next_cursor") or ""
+        self.assertTrue(cursor, first)
+        self.assertNotIn(secret, json.dumps(first))
+
+        quoted = urllib.parse.quote(str(cursor), safe="")
+        status, second = _call_http(
+            self.app,
+            "GET",
+            f"/v1/listings/search?q=pagination&limit=10&cursor={quoted}",
+        )
+        self.assertEqual(status, 200, second)
+        self.assertEqual(len(second["results"]), 5, second)
+        self.assertTrue(
+            all(
+                item["listing"]["listing_id"].startswith("lst_scan_normal_")
+                for item in second["results"]
+            )
+        )
+        self.assertNotIn(secret, json.dumps(second))
+
+        # 纯读：危险行状态/hold/内容未被公开 GET 改写。
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select publication_state, governance_hold, summary from commerce_listings"
+                " where listing_id = 'lst_scan_d_0000'"
+            ).fetchone()
+        self.assertEqual(row["publication_state"], "ACTIVE")
+        self.assertEqual(int(row["governance_hold"]), 0)
+        self.assertIn(secret, str(row["summary"]))
 
     # ── search result contract (v0.4 §9 / CD #24) ───────────────────────────
 

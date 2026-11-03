@@ -35,6 +35,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
 from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
+from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
@@ -906,7 +907,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.post("/v1/accounts/enrollments/{enrollment_id}/authorize")
     def v1_account_authorize_enrollment(request: _FastAPIRequest, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return accounts_handlers.authorize_enrollment(db_path, enrollment_id, _account_payload(request, payload))
+        return accounts_handlers.authorize_enrollment(
+            db_path, enrollment_id, _account_payload(request, payload),
+            _query_params_from_request(request),
+        )
 
     @app.post("/v1/enrollments/device")
     def v1_create_device_enrollment(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1025,6 +1029,36 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _v1_withdraw_merchant_publication(
             db_path, publication_id, _merchant_payload(request, payload)
         )
+
+    # ── 公开商家主页（匿名 HTML；与 fallback 路由表同一 handler）──────────
+    def _public_merchant_home_response(merchant_id: str, request: _FastAPIRequest) -> Any:
+        from fastapi.responses import HTMLResponse
+
+        result = public_merchant_handlers.public_merchant_home(
+            db_path,
+            merchant_id,
+            _client_payload(request),
+            _query_params_from_request(request),
+        )
+        return HTMLResponse(
+            str(result["__html__"]),
+            status_code=int(result.get("__status__") or 200),
+            headers={"cache-control": "no-store"},
+        )
+
+    @app.get("/m/{merchant_id}")
+    def v1_public_merchant_home(merchant_id: str, request: _FastAPIRequest) -> Any:
+        return _public_merchant_home_response(merchant_id, request)
+
+    @app.get("/merchants/{merchant_id}")
+    def v1_public_merchant_home_alias(merchant_id: str, request: _FastAPIRequest) -> Any:
+        return _public_merchant_home_response(merchant_id, request)
+
+    @app.get("/merchant/{merchant_id}")
+    def v1_public_merchant_home_singular_alias(
+        merchant_id: str, request: _FastAPIRequest
+    ) -> Any:
+        return _public_merchant_home_response(merchant_id, request)
 
     # ── /v1/connector-identity（商家连接器一次性身份授权；connector token 或
     #    商家会话，见 handlers/connector_identity.py）。静态段 /requests 与

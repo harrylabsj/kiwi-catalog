@@ -66,35 +66,94 @@ def _latest_binding(conn: sqlite3.Connection, catalog_agent_id: str) -> dict[str
 
 
 def _publication_summary(conn: sqlite3.Connection, catalog_agent_id: str) -> dict[str, Any]:
-    """名片发布摘要：无发布记录 → state='none' + 空字段（诚实空态）。"""
+    """名片发布摘要：无发布记录 → state='none' + 空字段（诚实空态）。
+
+    已签名版本若被检测到分享码链接，摘要带 ``quarantined`` /
+    ``republish_required``：**不改写 digest/etag**，只提示商家用新内容重新发布。
+    """
     publication = conn.execute(
         "select active_revision, publication_state, etag, updated_at"
         " from card_publications where catalog_agent_id = ?",
         (catalog_agent_id,),
     ).fetchone()
     if publication is None:
-        return {"state": "none", "active_revision": 0, "digest": "", "etag": "", "updated_at": ""}
+        return {
+            "state": "none",
+            "active_revision": 0,
+            "digest": "",
+            "etag": "",
+            "updated_at": "",
+            "quarantined": False,
+            "republish_required": False,
+        }
     version = conn.execute(
-        "select digest from agent_card_versions where catalog_agent_id = ? and card_revision = ?",
+        "select digest, canonical_bytes from agent_card_versions"
+        " where catalog_agent_id = ? and card_revision = ?",
         (catalog_agent_id, int(publication["active_revision"])),
     ).fetchone()
+    quarantined = False
+    if version is not None:
+        from kiwi_catalog.a2a.card_store import card_contains_share_code
+
+        try:
+            card = json.loads(str(version["canonical_bytes"] or "{}"))
+        except (TypeError, ValueError):
+            card = None
+        quarantined = card_contains_share_code(card) if isinstance(card, dict) else True
     return {
         "state": str(publication["publication_state"]),
         "active_revision": int(publication["active_revision"]),
         "digest": str(version["digest"]) if version is not None else "",
         "etag": str(publication["etag"]),
         "updated_at": str(publication["updated_at"]),
+        "quarantined": quarantined,
+        "republish_required": quarantined,
     }
 
 
 def _card_public_fields(card: dict[str, Any]) -> dict[str, Any]:
-    """卡片公开字段投影（与公开读地址一致，任何人都能看到）。"""
+    """商家自查的卡片公开字段投影（不是公开稳定读地址）。
+
+    ``url``/``supportedInterfaces[].url`` 是服务地址，允许 WorkBuddy 主机，
+    但不允许携带分享码参数/路径段；历史名片里的分享码 URL 在这里清空，
+    仅用于商户自查展示。已签名内容被污染时不会走本函数（公开读隔离）。
+    文本字段同时移除明显的联系方式与危险公开链接。
+    """
+    from kiwi_catalog.services.merchant_publications import (
+        contains_share_code_url,
+        redact_public_text,
+    )
+
+    def _text(value: Any) -> Any:
+        return redact_public_text(str(value)) if isinstance(value, str) else value
+
+    def _service_url(value: Any) -> Any:
+        text = str(value or "")
+        return "" if contains_share_code_url(text) else text
+
+    interfaces: list[Any] = []
+    for item in card.get("supportedInterfaces") or []:
+        if isinstance(item, dict):
+            cleaned = dict(item)
+            if "url" in cleaned:
+                cleaned["url"] = _service_url(cleaned["url"])
+            interfaces.append(cleaned)
+        else:
+            interfaces.append(item)
+    skills: list[Any] = []
+    for item in card.get("skills") or []:
+        if isinstance(item, dict):
+            skills.append({key: _text(value) for key, value in item.items()})
+        elif isinstance(item, str):
+            skills.append(_text(item))
+        else:
+            skills.append(item)
     return {
-        "name": card.get("name") or "",
-        "description": card.get("description") or "",
-        "url": card.get("url") or "",
-        "supportedInterfaces": card.get("supportedInterfaces") or [],
-        "skills": card.get("skills") or [],
+        "name": _text(card.get("name") or ""),
+        "description": _text(card.get("description") or ""),
+        "url": _service_url(card.get("url") or ""),
+        "supportedInterfaces": interfaces,
+        "skills": skills,
     }
 
 
@@ -134,10 +193,15 @@ def _require_owned_agent(
 def _agent_list_item(
     conn: sqlite3.Connection, row: dict[str, Any], base_url: str
 ) -> dict[str, Any]:
+    from kiwi_catalog.services import merchant_publications as publications_service
+
     catalog_agent_id = str(row["catalog_agent_id"])
     publication = _publication_summary(conn, catalog_agent_id)
     return {
         "catalog_agent_id": catalog_agent_id,
+        "public_home_url": publications_service.public_merchant_home_url_for(
+            conn, str(row.get("merchant_id") or "")
+        ),
         "display_name": str(row.get("display_name") or ""),
         "hosting_mode": str(row.get("hosting_mode") or ""),
         "source_type": str(row.get("source_type") or ""),
@@ -146,6 +210,8 @@ def _agent_list_item(
         "card_state": publication["state"],
         "card_revision": publication["active_revision"],
         "card_digest": publication["digest"],
+        "card_quarantined": bool(publication.get("quarantined")),
+        "card_republish_required": bool(publication.get("republish_required")),
         "binding": _latest_binding(conn, catalog_agent_id),
         "card_url": stable_card_url(base_url, catalog_agent_id),
     }
@@ -241,10 +307,37 @@ def get_my_agent_card(
     *,
     base_url: str,
 ) -> dict[str, Any]:
-    """名片详情（归属检查后）：发布状态 + 版本 + etag + 绑定摘要 + 卡片公开字段。"""
+    """名片详情（归属检查后）：发布状态 + 版本 + etag + 绑定摘要 + 卡片公开字段。
+
+    ``runtime_access`` 是**已生效**的访问门禁公开投影（provider/access_mode/
+    parameter_name/版本），与 ``/v1/agents`` 公开面同源同字段：不含分享码、密文
+    或加密密钥。商家后台用它区分「服务地址只是入口」与「入口还带 WorkBuddy
+    分享码门禁」，页面不得据此拼接或回显任何凭据。
+
+    ``public_shop_url`` 是商家在**公开资料**里填写的店铺链接（published 且未过期
+    的最新一条），是目录现有数据里唯一可指向商家自己公开店铺页的字段；目录
+    不托管该页面。它是外部链接，不是商家管理后台，也不是分享码 URL。
+    """
     row = _require_owned_agent(conn, account, catalog_agent_id)
     agent_id = str(row["catalog_agent_id"])
     card = _active_card(conn, agent_id)
+    publication = _publication_summary(conn, agent_id)
+    from kiwi_catalog.services import merchant_publications as publications_service
+    from kiwi_catalog.services import runtime_access as runtime_access_service
+
+    active_access = runtime_access_service.active_runtime_access(conn, agent_id)
+    binding = _latest_binding(conn, agent_id)
+    # 服务地址/卡片地址/目录基址都不是「公开店铺页」：读侧精确比较并拒绝。
+    blocked_shop_urls = tuple(
+        value
+        for value in (
+            str((card or {}).get("url") or ""),
+            str((binding or {}).get("runtime_origin") or ""),
+            str((binding or {}).get("a2a_endpoint") or ""),
+            str(base_url or ""),
+        )
+        if value
+    )
     return {
         "ok": True,
         "catalog_agent_id": agent_id,
@@ -254,9 +347,28 @@ def get_my_agent_card(
         "canonical_domain": str(row.get("canonical_domain") or ""),
         "administrative_state": str(row.get("administrative_state") or ""),
         "card_url": stable_card_url(base_url, agent_id),
-        "publication": _publication_summary(conn, agent_id),
-        "binding": _latest_binding(conn, agent_id),
-        "card": _card_public_fields(card) if card is not None else None,
+        "publication": publication,
+        "binding": binding,
+        # 隔离的已签名内容不返回任何字段投影（清洗后配原 digest = 伪造摘要）；
+        # 商家只看到 publication.republish_required 提示。
+        "card": (
+            None
+            if publication["quarantined"]
+            else (_card_public_fields(card) if card is not None else None)
+        ),
+        # 公开店铺页（外部、商家填写；无 published 资料/链接时为空串）。
+        "public_shop_url": publications_service.latest_public_shop_url(
+            conn,
+            str(row.get("merchant_id") or ""),
+            blocked_urls=blocked_shop_urls,
+        ),
+        # 目录托管的公开商家主页：无外部 shop_url 也能打开的稳定页面；
+        # 没有可公开内容时为空串（页面本身会 404，不给假链接）。
+        "public_home_url": publications_service.public_merchant_home_url_for(
+            conn, str(row.get("merchant_id") or "")
+        ),
+        # 访问门禁（None = 未启用）。已是公开投影，绝不包含分享码/密文。
+        "runtime_access": runtime_access_service.public_projection(active_access),
         # 待确认接入请求（D1：运行时首绑 → 商家在门户确认/拒绝）
         "pending_bindings": _pending_binding_items(conn, agent_id),
     }

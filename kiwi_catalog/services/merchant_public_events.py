@@ -49,9 +49,20 @@ def new_event_id() -> str:
     return "mev_" + secrets.token_urlsafe(12)
 
 
+def _sanitize_payload(payload: Any) -> Any:
+    """历史事件读侧兜底：旧 payload 里的 WorkBuddy/分享码链接不再投影。
+
+    ``merchant_publications`` 顶层依赖本模块（发布时写事件），因此在函数内
+    延迟导入，避免模块级循环导入。
+    """
+    from kiwi_catalog.services.merchant_publications import sanitize_public_payload
+
+    return sanitize_public_payload(payload)
+
+
 def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     event = dict(row)
-    event["payload"] = decode_json(event.pop("payload_json", ""), {})
+    event["payload"] = _sanitize_payload(decode_json(event.pop("payload_json", ""), {}))
     return event
 
 
@@ -83,6 +94,7 @@ def emit_public_event(
     """写入一条公开事件（同库事务内随资料写一起提交/回滚）。"""
     if event_type not in EVENT_TYPES:
         raise ValueError(f"unknown event_type: {event_type}")
+    payload = _sanitize_payload(payload)
     version, created_at = _next_version_and_timestamp(conn, merchant_id)
     event_id = new_event_id()
     conn.execute(

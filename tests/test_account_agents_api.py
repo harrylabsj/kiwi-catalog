@@ -258,6 +258,7 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.assertEqual(payload["publication"]["active_revision"], 0)
         self.assertIsNone(payload["binding"])
         self.assertIsNone(payload["card"])
+        self.assertIsNone(payload["runtime_access"])
         self.assertEqual(payload["pending_bindings"], [])
         self.assertEqual(
             payload["card_url"],
@@ -305,6 +306,34 @@ class AccountAgentsApiTest(unittest.TestCase):
                 " 'active', ?, ?)",
                 (cagt, merchant_id, now, now),
             )
+            # 已生效的 WorkBuddy 分享码门禁：门户靠这份**公开投影**提示门禁存在，
+            # 绝不能把密文/分享码带进响应。
+            conn.execute(
+                "insert into runtime_access_configs (catalog_agent_id, config_version, provider,"
+                " access_mode, parameter_name, secret_ciphertext, key_id, adapter_version,"
+                " auth_mode, status, validated_at, created_at, updated_at)"
+                " values (?, 1, 'workbuddy', 'share_parameter', 'sharecode', 'cipher-secret',"
+                " 'access-key-1', 'workbuddy-share-v1', 'signature', 'active', ?, ?, ?)",
+                (cagt, now, now, now),
+            )
+            # 公开店铺页：只取 published 且未过期的公开资料里的 shop_url。
+            # 这里同时放一条更新的 draft 和一条更新的过期 published，验证都不选。
+            for publication_id, status, shop_url, expires_at, updated_at in (
+                ("mpub_visible", "published", "https://shop.example.com/acme", "", now),
+                ("mpub_draft", "draft", "https://draft.example.com/acme", "",
+                 "2026-09-27T00:00:00+00:00"),
+                ("mpub_expired", "published", "https://expired.example.com/acme",
+                 "2026-01-01T00:00:00+00:00", "2026-09-28T00:00:00+00:00"),
+            ):
+                conn.execute(
+                    "insert into merchant_publications (publication_id, merchant_id, status,"
+                    " source_kind, merchant_display_name, shop_platform, shop_url, title, category,"
+                    " summary, faq_json, published_at, expires_at, version, created_at, updated_at)"
+                    " values (?, ?, ?, 'merchant_declared', 'Acme 商贸', '', ?, ?, '', '',"
+                    " '[]', ?, ?, 1, ?, ?)",
+                    (publication_id, merchant_id, status, shop_url, publication_id,
+                     now, expires_at, now, updated_at),
+                )
             conn.commit()
         finally:
             conn.close()
@@ -328,6 +357,27 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.assertEqual(payload["card"]["name"], "Acme Agent")
         self.assertEqual(payload["card"]["url"], "https://acme.app.workbuddy.host")
         self.assertEqual(len(payload["card"]["supportedInterfaces"]), 1)
+        # 已生效的访问门禁只以公开投影出现（provider/模式/版本），不含分享码、
+        # 密文、密钥 ID 或解密入口。
+        access = payload["runtime_access"]
+        self.assertEqual(access["provider"], "workbuddy")
+        self.assertEqual(access["access_mode"], "share_parameter")
+        self.assertEqual(access["parameter_name"], "sharecode")
+        self.assertEqual(access["config_version"], 1)
+        self.assertEqual(access["adapter_version"], "workbuddy-share-v1")
+        self.assertEqual(access["auth_mode"], "signature")
+        rendered = json.dumps(payload)
+        self.assertNotIn("cipher-secret", rendered)
+        self.assertNotIn("secret_ciphertext", rendered)
+        self.assertNotIn("access-key-1", rendered)
+        self.assertNotIn("secret_value", rendered)
+        # 公开店铺页只取 published + 未过期的最新一条；draft/过期行不参与。
+        self.assertEqual(payload["public_shop_url"], "https://shop.example.com/acme")
+        self.assertEqual(
+            payload["public_home_url"], f"https://catalog.example/m/{merchant_id}"
+        )
+        self.assertNotIn("draft.example", rendered)
+        self.assertNotIn("expired.example", rendered)
         # 列表同步反映名片状态与 digest
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/agents", cookie=f"kiwi_session={session}"
@@ -337,6 +387,184 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.assertEqual(item["card_revision"], 1)
         self.assertEqual(item["card_digest"], "sha256:9f3cabc")
         self.assertEqual(item["binding"]["binding_version"], 2)
+
+    def test_card_detail_marks_quarantine_without_rewriting_digest(self) -> None:
+        """已签名卡片污染：详情提示重新发布，digest/etag 保持原值。"""
+        from kiwi_catalog.a2a.card_store import compute_etag
+
+        session = self._register()
+        cagt = self._create_agent(session)["catalog_agent_id"]
+        secret = "FAKE-DETAIL-QUARANTINE-CODE-5"
+        card = {
+            "name": "Acme Agent",
+            "description": f"门禁链接 https://shop.example.com/a?sharecode={secret}",
+            "url": "https://acme.app.workbuddy.host",
+            "supportedInterfaces": [
+                {"url": "https://acme.app.workbuddy.host/a2a", "protocol": "a2a"}
+            ],
+        }
+        now = "2026-09-26T00:00:00+00:00"
+        etag = compute_etag(card)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "insert into agent_card_versions"
+                " (catalog_agent_id, card_revision, wire_profile, canonical_bytes,"
+                " digest, created_by, created_at) values (?, 1, 'a2a-1.0', ?,"
+                " 'sha256:" + "d" * 64 + "', 'runtime:bind-1', ?)",
+                (cagt, json.dumps(card, ensure_ascii=False), now),
+            )
+            conn.execute(
+                "insert into card_publications (catalog_agent_id, active_revision,"
+                " publication_state, etag, updated_at) values (?, 1, 'ACTIVE', ?, ?)",
+                (cagt, etag, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, payload, _ = _call_http(
+            self.app,
+            "GET",
+            f"/v1/accounts/agents/{cagt}/card",
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, payload)
+        pub = payload["publication"]
+        self.assertTrue(pub["quarantined"])
+        self.assertTrue(pub["republish_required"])
+        self.assertEqual(pub["digest"], "sha256:" + "d" * 64)
+        self.assertEqual(pub["etag"], etag)
+        self.assertNotIn(secret, json.dumps(payload))
+
+        # 公开稳定读地址拒绝返回被隔离的已签名内容，且不带 ETag/缓存头。
+        status, _body, headers = _call_http(
+            self.app, "GET", f"/v1/agents/{cagt}/agent-card.json"
+        )
+        self.assertEqual(status, 410)
+        self.assertNotIn("etag", headers)
+
+    def test_card_detail_only_projects_active_runtime_access(self) -> None:
+        """待验证/已撤销的访问配置不属于门禁状态：门户只看到 None。"""
+        session = self._register()
+        cagt = self._create_agent(session)["catalog_agent_id"]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "insert into runtime_access_configs (catalog_agent_id, config_version, provider,"
+                " access_mode, parameter_name, secret_ciphertext, key_id, adapter_version,"
+                " auth_mode, status, validated_at, created_at, updated_at)"
+                " values (?, 1, 'workbuddy', 'share_parameter', 'sharecode', 'cipher-secret',"
+                " 'access-key-1', 'workbuddy-share-v1', 'signature', 'pending', '', ?, ?)",
+                (cagt, "2026-09-26T00:00:00+00:00", "2026-09-26T00:00:00+00:00"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, payload, _ = _call_http(
+            self.app,
+            "GET",
+            f"/v1/accounts/agents/{cagt}/card",
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertIsNone(payload["runtime_access"])
+        self.assertNotIn("cipher-secret", json.dumps(payload))
+
+    def test_card_detail_read_side_rejects_unsafe_public_shop_url(self) -> None:
+        """旧数据/手工写库绕过写入校验时，读侧仍不把危险链接交给门户。"""
+        session = self._register()
+        cagt = self._create_agent(session)["catalog_agent_id"]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            merchant_id = conn.execute(
+                "select merchant_id from catalog_agents where catalog_agent_id = ?", (cagt,)
+            ).fetchone()[0]
+            now = "2026-09-26T00:00:00+00:00"
+            conn.execute(
+                "insert into merchant_publications (publication_id, merchant_id, status,"
+                " source_kind, merchant_display_name, shop_platform, shop_url, title, category,"
+                " summary, faq_json, published_at, expires_at, version, created_at, updated_at)"
+                " values ('mpub_unsafe', ?, 'published', 'merchant_declared', 'Acme 商贸', '',"
+                " 'http://192.168.1.5/shop', '商品', '', '', '[]', ?, '', 1, ?, ?)",
+                (merchant_id, now, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        def read_card() -> dict:
+            status, payload, _ = _call_http(
+                self.app,
+                "GET",
+                f"/v1/accounts/agents/{cagt}/card",
+                cookie=f"kiwi_session={session}",
+            )
+            self.assertEqual(status, 200, payload)
+            return payload
+
+        unsafe_rows = (
+            "http://192.168.1.5/shop",
+            "https://user:pass@shop.example.com/acme",
+            "javascript:alert(1)",
+            # WorkBuddy 服务/门禁主机与目录自身基址都不是公开店铺页。
+            "https://acme.app.workbuddy.host/shop",
+            "https://workbuddy.host/shop",
+            "https://open.workbuddy.cn/shop",
+            "https://kiwi.harrylabsj.com/shop",
+            "https://catalog.example/portal/account",
+            "https://catalog.example/v1/agents/x",
+            # Agent 服务端点与分享码参数/路径段不得当公开链接。
+            "https://shop.example.com/a2a",
+            "https://shop.example.com/.well-known/agent-card.json",
+            "https://shop.example.com/acme?sharecode=abc",
+            "https://shop.example.com/acme#sharecode=abc",
+            "https://shop.example.com/sharecode/abc",
+        )
+        for raw in unsafe_rows:
+            with self.subTest(url=raw):
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    conn.execute(
+                        "update merchant_publications set shop_url = ?"
+                        " where publication_id = 'mpub_unsafe'",
+                        (raw,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                payload = read_card()
+                self.assertEqual(payload["public_shop_url"], "")
+                # 外部链接被拒不妨碍目录托管的公开主页（只展示公开资料）。
+                self.assertTrue(payload["public_home_url"])
+                self.assertNotIn(raw, json.dumps(payload))
+
+        # 精确等于服务地址/卡片地址的 URL 由 blocked_urls 拒绝；同主机的普通
+        # 子路径仍可作为外部店铺页。
+        from kiwi_catalog.services import merchant_publications as publications_service
+
+        self.assertEqual(
+            publications_service.safe_public_shop_url(
+                "https://runtime.example/shop",
+                blocked_urls=("https://runtime.example/shop",),
+            ),
+            "",
+        )
+        self.assertEqual(
+            publications_service.safe_public_shop_url("https://runtime.example/shop"),
+            "https://runtime.example/shop",
+        )
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "update merchant_publications set shop_url = 'https://shop.example.com/acme'"
+                " where publication_id = 'mpub_unsafe'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(read_card()["public_shop_url"], "https://shop.example.com/acme")
 
 
 class AccountCardGovernanceTest(unittest.TestCase):
@@ -524,6 +752,55 @@ class AccountCardGovernanceTest(unittest.TestCase):
         cagt = self._create_agent(session)
         status, payload = self._govern(session, cagt, "pause", 0)
         self.assertEqual(status, 404, payload)
+
+
+class CardPublicFieldSafetyTest(unittest.TestCase):
+    def test_card_service_urls_strip_share_codes(self) -> None:
+        from kiwi_catalog.services import account_agents
+
+        card = {
+            "name": "Acme",
+            "description": "服务介绍",
+            "url": "https://acme.app.workbuddy.host/?sharecode=FAKE-CARD-CODE-1",
+            "supportedInterfaces": [
+                {
+                    "url": "https://acme.app.workbuddy.host/a2a?share_code=FAKE-CARD-CODE-1",
+                    "protocol": "a2a",
+                },
+                {"url": "https://acme.app.workbuddy.host/a2a", "protocol": "a2a"},
+            ],
+            "skills": [{"id": "catalog", "description": "普通描述"}],
+        }
+        cleaned = account_agents._card_public_fields(card)
+        rendered = json.dumps(cleaned)
+        self.assertNotIn("FAKE-CARD-CODE-1", rendered)
+        self.assertEqual(cleaned["url"], "")
+        self.assertEqual(cleaned["supportedInterfaces"][0]["url"], "")
+        # 普通 WorkBuddy 服务地址（无分享码）保持不变。
+        self.assertEqual(
+            cleaned["supportedInterfaces"][1]["url"],
+            "https://acme.app.workbuddy.host/a2a",
+        )
+
+    def test_public_card_payload_sanitizes_share_code_urls(self) -> None:
+        from kiwi_catalog.services.merchant_publications import (
+            sanitize_public_card_urls,
+        )
+
+        card = {
+            "name": "Acme",
+            "url": "https://acme.app.workbuddy.host/?sharecode=FAKE-CARD-CODE-2",
+            "supportedInterfaces": [
+                {"url": "https://acme.app.workbuddy.host/a2a?share_code=FAKE-CARD-CODE-2"}
+            ],
+            "skills": [{"id": "catalog"}],
+        }
+        cleaned = sanitize_public_card_urls(card)
+        rendered = json.dumps(cleaned)
+        self.assertNotIn("FAKE-CARD-CODE-2", rendered)
+        self.assertEqual(cleaned["url"], "")
+        self.assertEqual(cleaned["supportedInterfaces"][0]["url"], "")
+        self.assertEqual(cleaned["skills"][0]["id"], "catalog")
 
 
 if __name__ == "__main__":

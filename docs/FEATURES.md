@@ -25,6 +25,7 @@ shopping-cli 抽离的独立部署目录（切割分水岭：**不含托管协�
 | Listing（v0.4） | `POST /v1/listings/publish` + `/v1/listings/search` | ProductListing/CapabilityListing 发布、搜索、下架、恢复（public-only discovery projection） |
 | Listing 治理联动 | agent `suspend` | owned Listings 同事务置 SUSPENDED + 搜索 join 排除（DoD #12） |
 | 商家公开资料（M0） | `POST /v1/merchant-publications` + `/v1/merchant-publications/search` | 账号会话发布的 public-only 声明快照（draft/published/withdrawn）；买家按商品词检索，`inquiry_available=false` |
+| 公开商家主页 | `GET /m/{merchant_id}` | 匿名只读 HTML（公开读限流；`?page=N` 分页，单页 50 件）：已发布公开资料 + ACTIVE 商品；无外部 `shop_url` 也可用，不含私有数据/分享码 |
 | 观测 | `GET /health` + CLI `stats` / `doctor` | §24 runtime metrics |
 
 ## 2. API 面
@@ -67,6 +68,7 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | GET | `/v1/merchant-publications/search` | 公开检索（仅 published 且未过期；按商品名/类目；cursor 分页；`inquiry_available=false`） |
 | GET | `/v1/merchant-publications/{id}` | 公开详情（匿名仅 published 未过期；商家本人可见自己的 draft/withdrawn） |
 | POST | `/v1/merchant-publications/{id}/withdraw` | 撤回（账号会话 + 归属校验，终态） |
+| GET | `/m/{merchant_id}` | 公开商家主页（匿名 HTML；别名 `/merchants/{merchant_id}`、`/merchant/{merchant_id}`；公开资料/商品，无私有数据） |
 | PUT | `/v1/agents/{id}/public-inquiry-consent` | 开放询价独立授权（当前活动绑定私钥签名；`granted` + `terms_version`） |
 | GET | `/v1/agents/{id}/public-inquiry-consent` | 开放询价授权状态（签名读；`granted` / `policy_active`，无凭据） |
 | GET | `/v1/agents/{id}/public-inquiry` | 开放询价可用性（未授权 404；仅 `{available, catalog_agent_id}`） |

@@ -159,6 +159,20 @@ def create_publication(db_path: str | Path, payload: dict[str, Any]) -> dict[str
                 "public fields must not contain private contact info "
                 f"(email or phone patterns rejected in: {', '.join(hits)})"
             )
+        unsafe_links = publications_service.scan_unsafe_public_links(canonical)
+        if unsafe_links:
+            append_catalog_audit(
+                conn,
+                "",
+                actor,
+                "merchant_publication_unsafe_link_rejected",
+                {"merchant_id": merchant_id, "fields": unsafe_links},
+            )
+            conn.commit()
+            raise ValidationError(
+                "public fields must not contain WorkBuddy, Agent-endpoint or "
+                f"share-code links (rejected in: {', '.join(unsafe_links)})"
+            )
         _enforce_write_rate_limit(conn, merchant_id)
         row, created, idempotent = publications_service.upsert_publication(
             conn, merchant_id=merchant_id, canonical=canonical, action=action
@@ -269,7 +283,7 @@ def publication_stats(db_path: str | Path, payload: dict[str, Any]) -> dict[str,
         publications = [
             {
                 "publication_id": str(row["publication_id"]),
-                "title": str(row["title"]),
+                "title": publications_service.redact_public_text(str(row["title"])),
                 "status": str(row["status"]),
                 "view_count": int(row["view_count"] or 0),
                 "published_at": str(row["published_at"] or ""),

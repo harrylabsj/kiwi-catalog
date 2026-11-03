@@ -109,6 +109,36 @@ class FastApiDualStackTest(unittest.TestCase):
         # FastAPI 追加 /openapi.json 等内置路由——只断言 catalog 路由被覆盖。
         self.assertTrue(fallback_paths <= fastapi_paths)
 
+    def test_public_merchant_home_in_fastapi_stack(self) -> None:
+        """公开主页 FastAPI 分支必须真实返回 HTML，而不是 500。"""
+        from fastapi.testclient import TestClient
+
+        from kiwi_catalog.db.session import db_session
+
+        merchant_id = "mkt_fastapi_home_1"
+        with db_session(self.db_file) as conn:
+            conn.execute(
+                "insert into merchant_publications (publication_id, merchant_id, status,"
+                " source_kind, merchant_display_name, shop_platform, shop_url, title,"
+                " category, summary, faq_json, published_at, expires_at, version,"
+                " created_at, updated_at)"
+                " values ('mpub_fastapi_home', ?, 'published', 'merchant_declared',"
+                " 'FastAPI 主页商家', '', '', 'FastAPI 主页商品', '', '公开主页简介',"
+                " '[]', '2026-01-01T00:00:00+00:00', '', 1,"
+                " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (merchant_id,),
+            )
+        with TestClient(self.app) as client:
+            resp = client.get(f"/m/{merchant_id}")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertIn("text/html", resp.headers.get("content-type", ""))
+            self.assertIn("FastAPI 主页商品", resp.text)
+            self.assertEqual(resp.headers.get("cache-control"), "no-store")
+            # 兼容别名也必须走同一 FastAPI handler。
+            alias = client.get(f"/merchants/{merchant_id}")
+            self.assertEqual(alias.status_code, 200, alias.text)
+            self.assertIn("FastAPI 主页商品", alias.text)
+
     def test_listings_routes_in_both_stacks(self) -> None:
         """6 条 listing 路由双栈覆盖（v0.4）；/v1/listings/search 不被 {listing_id} 吞掉。"""
         from fastapi.testclient import TestClient

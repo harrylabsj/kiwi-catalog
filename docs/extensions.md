@@ -30,7 +30,8 @@ def register_kiwi_extension(reg) -> None:
 
 商家后台 HTML（`/portal/*`）与运营后台同属私有运营界面，由
 `kiwi-catalog-admin` 扩展注册。核心仓只保留其调用的账号、商家资料和 Listings
-API；未安装扩展时页面路由不存在。
+API；未安装扩展时这些后台页面路由不存在。匿名只读的公开商家主页
+`/m/{merchant_id}` 不属于后台，由核心直接提供（只展示公开投影）。
 
 ### 核心 API 返回的 `/portal/*` 链接
 

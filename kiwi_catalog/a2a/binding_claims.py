@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from kiwi_catalog.a2a.card_store import read_active_card
+from kiwi_catalog.a2a.card_store import CardQuarantineError, read_active_card
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_targets
 from kiwi_catalog.core.errors import GoneError, NotFoundError, PermissionDenied, ValidationError
 
@@ -197,6 +197,8 @@ def read_runtime_binding(
 
     # 治理状态（§11.6 SIG-02 的撤回拒签语义不变，仅把「从未发布」拆出来）：
     # - WITHDRAWN（撤回，read_active_card 抛 GoneError）→ 拒签（403）；
+    # - 分享码隔离（CardQuarantineError，仍是 GoneError 子类）→ 拒签（403），
+    #   不签发引用被隔离名片 ETag 的声明；
     # - PAUSED → 公开信息保留，照常签发（现状不变）；
     # - **从未发布**（NotFoundError：连 card_publications 行都没有或活动版本
     #   缺失）→ 照常签发：绑定已由商家在门户确认背书（D1），首绑确认后、首次
@@ -206,6 +208,10 @@ def read_runtime_binding(
     #   agent_card 端点行（§4.5），买家根本发现不了这个 agent。
     try:
         _card, _etag, publication_state = read_active_card(conn, catalog_agent_id)
+    except CardQuarantineError as exc:
+        raise PermissionDenied(
+            "publication quarantined (share-code link); refusing to issue claims"
+        ) from exc
     except GoneError as exc:
         raise PermissionDenied("publication withdrawn; refusing to issue claims") from exc
     except NotFoundError:

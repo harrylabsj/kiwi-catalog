@@ -291,6 +291,46 @@ class BuyerFollowsApiTest(unittest.TestCase):
         b_events = self._events(self.merchant_b)
         self.assertEqual([e["version"] for e in b_events], [1])
 
+    def test_historical_event_payload_redacts_share_code_links(self) -> None:
+        """历史 payload（旧版本/手工写库）里的分享码链接不得随更新下发。"""
+        status, _ = self._follow(self.cookie_c, self.merchant_a)
+        self.assertEqual(status, 200)
+        status, payload = self._publish(self.cookie_a, "历史事件商品")
+        self.assertEqual(status, 200, payload)
+        secret = "FAKE-EVENT-SHARE-CODE-7"
+        conn = sqlite3.connect(self.db_path)
+        try:
+            event_payload = {
+                "publication_id": payload["publication"]["publication_id"],
+                "merchant_id": self.merchant_a,
+                "merchant_display_name": "Acme 商贸",
+                "title": "历史事件商品",
+                "category": "茶叶",
+                "summary": f"历史简介 https://shop.example.com/acme?sharecode={secret}",
+                "shop_url": f"https://acme.app.workbuddy.host/?sharecode={secret}",
+                "faq": [
+                    {
+                        "question": "怎么购买",
+                        "answer": f"打开 https://shop.example.com/a?share_code={secret}",
+                    }
+                ],
+                "inquiry_available": False,
+            }
+            conn.execute(
+                "update merchant_public_events set payload_json = ? where merchant_id = ?",
+                (json.dumps(event_payload, ensure_ascii=False), self.merchant_a),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, payload = self._updates(self.cookie_c)
+        self.assertEqual(status, 200, payload)
+        event = payload["updates"][0]["events"][0]
+        self.assertEqual(event["payload"]["shop_url"], "")
+        self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
+        self.assertIn("[链接已移除]", event["payload"]["summary"])
+        self.assertIn("[链接已移除]", event["payload"]["faq"][0]["answer"])
+
     def test_faq_only_change_generates_faq_updated(self) -> None:
         status, _ = self._publish(self.cookie_a, "FAQ 商品")
         self.assertEqual(status, 200)

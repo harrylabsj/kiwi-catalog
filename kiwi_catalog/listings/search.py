@@ -73,12 +73,44 @@ def _decode_search_cursor(cursor: str) -> tuple[str | None, str, str]:
     raise ValueError("malformed cursor")
 
 
+def _search_cursor_predicate(cursor: str) -> tuple[str, list[Any]]:
+    """把（可能是旧格式的）游标变成严格的键集谓词。"""
+    rank, updated_at, listing_id = _decode_search_cursor(cursor)
+    if rank is None:
+        # 旧格式游标（在途分页会话）：保持旧谓词（审查 P1-6 前的行为）
+        return (
+            "((updated_at, id) < (?, (select id from commerce_listings where listing_id = ?)))",
+            [updated_at, listing_id],
+        )
+    # 键集谓词与排序键（freshness rank asc, updated_at desc, id desc）
+    # 严格同键（审查 P1-6）：rank 更大整组在界后；同 rank 按
+    # updated_at/id 递减比较。两条 rank 分支是互斥 OR——必须包在
+    # 单个 where 项里，否则被 ' and ' 连接后恒为空集。
+    return (
+        "(("
+        "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) > ?"
+        " or ("
+        "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) = ?"
+        " and (updated_at < ?"
+        " or (updated_at = ? and id <"
+        " (select id from commerce_listings where listing_id = ?)))"
+        ")"
+        "))"
+    ), [int(rank), int(rank), updated_at, updated_at, listing_id]
+
+
+#: 单次搜索最多扫描的原始行数。危险行（分享码污染）可能连续出现；扫描上限
+#: 保证资源有界，达到上限时返回指向最后扫描行的 cursor，下一页继续前进。
+MAX_LISTING_SCAN_ROWS = 500
+
+
 class SearchQueryError(ValueError):
     """搜索 query 非法（fail-closed：未知键/非法值拒绝，不静默忽略）。"""
 
 
 _SEARCH_QUERY_KEYS = frozenset({
     "q",
+    "owner_agent_id",
     "listing_type",
     "category",
     "brand",
@@ -160,8 +192,15 @@ def search_listings(
     # on-read 惰性翻转（v0.4 §15.1）：先过期再查，fresh_until 索引路径生效
     expire_stale_listings(conn, now_iso())
 
-    where: list[str] = ["publication_state = ?"]
+    where: list[str] = ["publication_state = ?", "coalesce(governance_hold, 0) = 0"]
     values: list[Any] = [ACTIVE]
+
+    owner_agent_id = str(query.get("owner_agent_id") or "").strip()
+    if owner_agent_id:
+        # 与 kiwi-source.ts 的 listing 查询键对齐：精确限定 owner，避免客户端
+        # 先做全局限量搜索再在本地过滤（会让合法 owner 被截断掉）。
+        where.append("owner_agent_id = ?")
+        values.append(owner_agent_id)
 
     q = str(query.get("q") or "").strip()
     if q:
@@ -250,54 +289,84 @@ def search_listings(
         " and ca.administrative_state in ('suspended','rejected'))"
     )
 
-    if cursor:
-        try:
-            rank, updated_at, listing_id = _decode_search_cursor(cursor)
-        except ValueError as exc:
-            raise SearchQueryError(f"malformed cursor: {exc}") from exc
-        if rank is None:
-            # 旧格式游标（在途分页会话）：保持旧谓词（审查 P1-6 前的行为）
-            where.append(
-                "(updated_at, id) < (?, (select id from commerce_listings where listing_id = ?))"
-            )
-            values.extend([updated_at, listing_id])
-        else:
-            # 键集谓词与排序键（freshness rank asc, updated_at desc, id desc）
-            # 严格同键（审查 P1-6）：rank 更大整组在界后；同 rank 按
-            # updated_at/id 递减比较。两条 rank 分支是互斥 OR——必须包在
-            # 单个 where 项里，否则被 ' and ' 连接后恒为空集。
-            where.append(
-                "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) > ?"
-                " or ("
-                "(case when listing_freshness_state = 'FRESH' then 0 else 1 end) = ?"
-                " and (updated_at < ?"
-                " or (updated_at = ? and id <"
-                " (select id from commerce_listings where listing_id = ?)))"
-                ")"
-            )
-            values.extend([int(rank), int(rank), updated_at, updated_at, listing_id])
+    base_where = list(where)
+    base_values = list(values)
 
-    # deterministic ranking（v0.4 §12）：无声誉混入；id DESC 稳定 tie-breaker
-    rows = conn.execute(
-        f"""
-        select * from commerce_listings
-        where {' and '.join(where)}
-        order by
-          (case when listing_freshness_state = 'FRESH' then 0 else 1 end) asc,
-          updated_at desc,
-          id desc
-        limit ?
-        """,
-        (*values, limit + 1),
-    ).fetchall()
+    # 公开投影前**纯读**隐藏分享码污染行：不改 publication_state/hold/digest。
+    # 危险行可能连续出现并超过一页容量，所以按固定行预算扫描；达到预算时
+    # 返回指向“最后扫描行”的 cursor（即使本页没有可见结果），下一页继续前进。
+    from kiwi_catalog.listings.quarantine import public_visible_rows
 
-    results = [_row_to_listing(row) for row in rows[:limit]]
+    batch_size = min(max(limit + 1, 20), 200)
+    scan_budget = MAX_LISTING_SCAN_ROWS
+    scanned = 0
+    visible: list[dict[str, Any]] = []
+    scan_cursor = cursor
+    last_scanned: Any = None
+    exhausted = False
+
+    while True:
+        clause = list(base_where)
+        clause_values = list(base_values)
+        if scan_cursor:
+            try:
+                predicate, predicate_values = _search_cursor_predicate(scan_cursor)
+            except ValueError as exc:
+                raise SearchQueryError(f"malformed cursor: {exc}") from exc
+            clause.append(predicate)
+            clause_values.extend(predicate_values)
+        fetch_count = min(batch_size, scan_budget - scanned)
+        if fetch_count <= 0:
+            exhausted = True
+            break
+        rows = conn.execute(
+            f"""
+            select * from commerce_listings
+            where {' and '.join(clause)}
+            order by
+              (case when listing_freshness_state = 'FRESH' then 0 else 1 end) asc,
+              updated_at desc,
+              id desc
+            limit ?
+            """,
+            (*clause_values, fetch_count),
+        ).fetchall()
+        if not rows:
+            break
+        last_scanned = rows[-1]
+        decoded = [_row_to_listing(row) for row in rows]
+        visible.extend(public_visible_rows(decoded))
+        scanned += len(rows)
+        if len(visible) > limit:
+            break
+        if len(rows) < fetch_count:
+            break
+        if scanned >= scan_budget:
+            exhausted = True
+            break
+        last = decoded[-1]
+        scan_cursor = _encode_search_cursor(
+            str(last["listing_freshness_state"] or ""),
+            str(last["updated_at"]),
+            str(last["listing_id"]),
+        )
+
+    results = visible[:limit]
     next_cursor = ""
-    if len(rows) > limit and results:
+    if len(visible) > limit and results:
+        # 本页有剩余可见行，从最后一条**返回**的行继续（标准分页）。
         last = results[-1]
         next_cursor = _encode_search_cursor(
             str(last["listing_freshness_state"] or ""),
             str(last["updated_at"]),
             str(last["listing_id"]),
+        )
+    elif exhausted and last_scanned is not None:
+        # 预算耗尽（可能本页完全被危险行占满，results 为空）：游标仍指向最后
+        # 扫描行，保证下一次请求能越过这批危险行；不静默丢掉后续正常商品。
+        next_cursor = _encode_search_cursor(
+            str(last_scanned["listing_freshness_state"] or ""),
+            str(last_scanned["updated_at"]),
+            str(last_scanned["listing_id"]),
         )
     return results, next_cursor
