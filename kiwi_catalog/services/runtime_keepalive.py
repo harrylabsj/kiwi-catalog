@@ -275,14 +275,21 @@ class KeepaliveScheduler:
         ttl = int(ttl_seconds) if ttl_seconds is not None else agent_fresh_ttl_seconds()
         if ttl <= 0:
             raise ValidationError("keepalive TTL must be positive")
-        # Probe well before the read-time TTL expires. With the default 900s
-        # TTL this is 600s after last_seen; interval (300s) <= lead (300s)
-        # guarantees a tick before expiry even with phase drift. A retry
-        # cooldown of half the lead leaves at least one retry before expiry.
-        lead = min(ttl, max(MIN_INTERVAL_SECONDS, ttl // 3))
-        interval = lead if interval_seconds is None else int(interval_seconds)
+        # Probe at half-TTL and tick much faster than the lead window. With
+        # the default 900s TTL: lead=450s, interval=75s, cooldown=75s. Even
+        # with a full 75s tick phase plus a 30s poll delay, the first attempt
+        # is at 555s and there are still repeated attempts before 900s. This
+        # leaves explicit headroom for network and cold-start latency; a
+        # cooldown equal to the tick interval means the next actual tick can
+        # retry, rather than pretending a shorter cooldown schedules itself.
+        lead = min(ttl, max(MIN_INTERVAL_SECONDS, ttl // 2))
+        interval = (
+            max(MIN_INTERVAL_SECONDS, ttl // 12)
+            if interval_seconds is None
+            else int(interval_seconds)
+        )
         cooldown = (
-            max(MIN_COOLDOWN_SECONDS, lead // 2)
+            max(MIN_COOLDOWN_SECONDS, min(interval, lead))
             if per_agent_cooldown_seconds is None
             else int(per_agent_cooldown_seconds)
         )

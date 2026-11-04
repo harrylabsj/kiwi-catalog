@@ -87,22 +87,27 @@ KIWI_CATALOG_KEEPALIVE_ENABLED=0
 KIWI_CATALOG_KEEPALIVE_TRUSTED_HOSTS=linkluck-reception.app.workbuddy.host
 
 # 默认值由 TTL 派生；可显式覆盖，但必须满足 interval/cooldown <= lead
-KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS=300
-KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS=150
+KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS=75
+KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS=75
 KIWI_CATALOG_KEEPALIVE_CONCURRENCY=1
 KIWI_CATALOG_KEEPALIVE_MAX_AGENTS=10
-KIWI_CATALOG_KEEPALIVE_POLL_SECONDS=30
+KIWI_CATALOG_KEEPALIVE_POLL_SECONDS=15
 KIWI_CATALOG_AGENT_FRESH_TTL_SECONDS=900
 ```
 
 关系（默认 TTL 900s）：
 
 ```text
-lead     = 300s
-due      = last_seen + 600s
-interval = 300s
-cooldown = 150s
+lead     = 450s
+due      = last_seen + 450s
+interval = 75s
+cooldown = 75s
+poll     = 15s
 ```
+
+最坏 tick 相位（75s）+ poll 延迟（30s）下，首次请求约在 555s；失败后
+按实际 tick 在 630s、705s、780s 重试，给网络/冷启动留出余量。cooldown
+与 tick interval 相等，不把“冷却时间”误当成“下次调度时间”。
 
 interval/cooldown 超过 lead 会被拒绝创建 scheduler。只有商家显式
 `directory_keepalive` 授权、active custody/config/binding 且 `/merchant/`
@@ -147,7 +152,7 @@ systemctl restart kiwi-catalog
    不在 cooldown 内重复请求。
 5. **多进程**：若启动多个 worker，共享同一 SQLite；请求次数不超过单次
    tick claim，不出现同一 agent 并发重复。
-6. **保活时机**：在线商家在 last_seen+600s 进入探测窗口；探测不改变
+6. **保活时机**：在线商家在 last_seen+450s 进入探测窗口；探测不改变
    `freshness_state`；只有商家真实签名心跳恢复 fresh。
 7. **撤销**：撤销后下一次 tick 不再发送；已发出的单次请求不可取消，需确认
    该竞态窗口可接受。

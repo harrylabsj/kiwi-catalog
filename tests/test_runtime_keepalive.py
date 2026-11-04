@@ -51,6 +51,16 @@ class MockGateway:
         return self.status
 
 
+class SequenceGateway:
+    def __init__(self, statuses: list[str]) -> None:
+        self.statuses = list(statuses)
+        self.calls: list[str] = []
+
+    def wake(self, *, agent_id: str, runtime_origin: str, secret: str) -> str:
+        self.calls.append(agent_id)
+        return self.statuses.pop(0) if self.statuses else "failed"
+
+
 class KeepaliveTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -395,11 +405,11 @@ class KeepaliveTest(unittest.TestCase):
     def test_pre_expiry_timeline_does_not_wait_for_stale(self) -> None:
         self._grant()
         scheduler = self._scheduler(MockGateway())
-        # Default TTL is 900, lead is 300: due at 600s, not at 900s.
+        # Default TTL is 900, lead is 450: due at 450s, not at 900s.
         row = {"freshness_state": "fresh", "last_seen_at": _NOW}
         current = runtime_keepalive._parse(_NOW)
-        self.assertFalse(scheduler._probe_due(row, current + timedelta(seconds=599)))
-        self.assertTrue(scheduler._probe_due(row, current + timedelta(seconds=600)))
+        self.assertFalse(scheduler._probe_due(row, current + timedelta(seconds=449)))
+        self.assertTrue(scheduler._probe_due(row, current + timedelta(seconds=450)))
         self.assertTrue(scheduler._probe_due(row, current + timedelta(seconds=900)))
         self.assertTrue(
             scheduler._probe_due({"freshness_state": "stale", "last_seen_at": _NOW}, current)
@@ -420,6 +430,29 @@ class KeepaliveTest(unittest.TestCase):
             (_AGENT,),
         ).fetchone()
         self.assertEqual(row[0], "")
+
+    def test_worst_tick_phase_retries_before_expiry(self) -> None:
+        self._grant()
+        self.conn.execute("update catalog_agents set last_seen_at=?", (_NOW,))
+        self.conn.commit()
+        # 900 TTL: due at 450s. A 75s tick plus a 30s poll phase puts the
+        # first attempt at 555s; two failures still leave a 705s success.
+        gateway = SequenceGateway(["failed", "failed", "request_sent"])
+        scheduler = self._scheduler(gateway)
+        first = scheduler.run_once(now="2026-11-04T04:09:15+00:00")
+        second = scheduler.run_once(now="2026-11-04T04:10:30+00:00")
+        third = scheduler.run_once(now="2026-11-04T04:11:45+00:00")
+        self.assertEqual(first.failed, 1)
+        self.assertEqual(second.failed, 1)
+        self.assertEqual(third.wake_requested, 1)
+        self.assertEqual(len(gateway.calls), 3)
+        self.assertEqual(
+            self.conn.execute(
+                "select last_seen_at from catalog_agents where catalog_agent_id=?",
+                (_AGENT,),
+            ).fetchone()[0],
+            _NOW,
+        )
 
     def test_fair_pagination_skips_fresh_rows_to_find_due_agent(self) -> None:
         # Fresh rows with no timestamp sort before a stale row. A fixed LIMIT

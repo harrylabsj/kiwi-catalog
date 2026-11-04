@@ -60,15 +60,23 @@ class KeepaliveLifecycle:
         self,
         scheduler: KeepaliveScheduler | None,
         *,
-        poll_seconds: float = 30.0,
+        poll_seconds: float | None = None,
         env: Any = None,
     ) -> None:
         self.scheduler = scheduler
         values = os.environ if env is None else env
+        default_poll = (
+            min(15.0, max(1.0, float(getattr(scheduler, "interval_seconds", 30)) / 2))
+            if scheduler is not None
+            else 30.0
+        )
         try:
-            self.poll_seconds = max(1.0, float(values.get(POLL_ENV) or poll_seconds))
+            raw = values.get(POLL_ENV)
+            self.poll_seconds = max(
+                1.0, float(raw) if raw not in (None, "") else (poll_seconds or default_poll)
+            )
         except (TypeError, ValueError):
-            self.poll_seconds = max(1.0, float(poll_seconds))
+            self.poll_seconds = max(1.0, poll_seconds or default_poll)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = False
