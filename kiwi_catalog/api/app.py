@@ -44,6 +44,10 @@ from kiwi_catalog.api.limits import INQUIRY_TRANSPORT_KEYS, validate_payload
 from kiwi_catalog.api.request_dispatch import dispatch_request
 from kiwi_catalog.api.route_matching import match_path as _match_path
 from kiwi_catalog.api.route_table import _ROUTE_TABLE, RouteEntry, all_routes, resolve_route
+from kiwi_catalog.services.runtime_keepalive_lifecycle import (
+    KeepaliveLifecycle,
+    configured_scheduler,
+)
 from kiwi_catalog.core.errors import (
     GoneError,
     AuthError,
@@ -158,4 +162,10 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     )
     app.state.db_path = str(db_path)
     register_fastapi_routes(app, db_path)
+    lifecycle = KeepaliveLifecycle(configured_scheduler(str(db_path)))
+    app.state.keepalive_lifecycle = lifecycle
+    # FastAPI supports lifecycle events; lightweight test stubs may not.
+    if hasattr(app, "add_event_handler"):
+        app.add_event_handler("startup", lifecycle.start)
+        app.add_event_handler("shutdown", lifecycle.stop)
     return app
