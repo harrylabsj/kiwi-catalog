@@ -20,7 +20,6 @@ import unittest
 from pathlib import Path
 
 from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
-from kiwi_catalog.db.models import SCHEMA
 from kiwi_catalog.db.session import init_db, open_connection
 
 
