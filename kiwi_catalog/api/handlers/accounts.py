@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import append_catalog_audit
@@ -100,6 +101,49 @@ def _login_rate_limit_per_15min() -> int:
         return 10
 
 
+def _enforce_persisted_rate_limit(
+    conn: sqlite3.Connection,
+    db_path: str | Path,
+    *,
+    key: str,
+    limit: int,
+    window_seconds: int,
+    description: str,
+) -> None:
+    """Consume an auth-attempt budget in its own committed transaction.
+
+    Authentication failures (wrong password, bad verification code, duplicate
+    registration) abort the surrounding request and therefore never reach the
+    ``db_session`` commit. Counting the attempt in that same transaction makes
+    the counter vanish exactly when it matters most.
+
+    Use a separate connection/session instead of committing the caller's
+    connection: a caller may already hold an uncommitted business write, and
+    that write must still roll back on failure. Each bucket is committed
+    independently, so a breach in a later bucket cannot roll back earlier
+    counts. The consume itself remains the atomic ``INSERT ... ON CONFLICT``
+    in SQLiteRateLimitBackend.
+    """
+    # The caller must not hold an uncommitted write: a separate connection
+    # cannot safely commit the counter while that write lock is held. All
+    # current call sites consume rate limits before business writes; reject
+    # any future call that violates the ordering instead of accidentally
+    # committing or blocking on the caller's transaction.
+    if conn.in_transaction:
+        raise RuntimeError("auth rate limit must be consumed before business writes")
+    with db_session(db_path) as limit_conn:
+        backend = SQLiteRateLimitBackend(
+            limit_conn, table="merchant_application_limits", key_column="actor_key"
+        )
+        enforce_rate_limit(
+            backend,
+            key=key,
+            limit=limit,
+            window_seconds=window_seconds,
+            description=description,
+        )
+
+
 def _session_token(payload: dict[str, Any]) -> str:
     """从请求取会话 token：cookie 优先（页面），X-Kiwi-Session header 备选。"""
     cookie = accounts_service.session_token_from_cookie(
@@ -152,25 +196,25 @@ def request_register_code(
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register-code:{email}",
                 limit=limit,
                 window_seconds=900,
                 description=f"register code ({limit}/15min per email)",
             )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register-code-ip:{_client_ip_prefix(payload)}",
                 limit=max(limit * 5, 20),
                 window_seconds=900,
                 description=f"register code per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
             )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key="register-code-email:global",
                 limit=max(limit * 50, 200),
                 window_seconds=900,
@@ -203,19 +247,18 @@ def verify_register_code(
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
             # 6 位码只有 1e6 空间：per-email 桶是穷举爆破的第一道闸。
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register-verify:{email}",
                 limit=limit,
                 window_seconds=900,
                 description=f"register code verification ({limit}/15min per email)",
             )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register-verify-ip:{_client_ip_prefix(payload)}",
                 limit=max(limit * 5, 20),
                 window_seconds=900,
@@ -263,18 +306,17 @@ def register(
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register:{email}",
                 limit=limit,
                 window_seconds=900,
                 description=f"account register ({limit}/15min per email)",
             )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"register-ip:{_client_ip_prefix(payload)}",
                 limit=max(limit * 5, 20),
                 window_seconds=900,
@@ -328,11 +370,9 @@ def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"login:{email.lower()}",
                 limit=limit,
                 window_seconds=900,
@@ -363,11 +403,9 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
         # 穷举，进而账号接管。按邮箱限流（复用登录限流 env，默认 10/15min）。
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"verify-email:{email.lower()}",
                 limit=limit,
                 window_seconds=900,
@@ -404,11 +442,9 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         # 审查 H4：重发验证码同样按邮箱限流，防对某邮箱的刷码骚扰。
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"resend-code:{email.lower()}",
                 limit=limit,
                 window_seconds=900,
@@ -416,16 +452,18 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
             )
         # review 2-30：resend 同样补 per-IP 桶（与 register 同口径）。
         if limit > 0:
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"resend-code-ip:{_client_ip_prefix(payload)}",
                 limit=max(limit * 5, 20),
                 window_seconds=900,
                 description=f"verification code resend per-IP ({max(limit * 5, 20)}/15min per IP prefix)",
             )
             # review 2-30：resend 全局发信预算（同 register）。
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key="resend-code-email:global",
                 limit=max(limit * 50, 200),
                 window_seconds=900,
@@ -462,11 +500,9 @@ def forgot_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, A
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"forgot:{email}",
                 limit=limit,
                 window_seconds=900,
@@ -505,11 +541,9 @@ def reset_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
         # 商家 token。按邮箱限流（复用登录限流 env，默认 10/15min）。
         limit = _login_rate_limit_per_15min()
         if limit > 0:
-            backend = SQLiteRateLimitBackend(
-                conn, table="merchant_application_limits", key_column="actor_key"
-            )
-            enforce_rate_limit(
-                backend,
+            _enforce_persisted_rate_limit(
+                conn,
+                db_path,
                 key=f"reset-password:{email.lower()}",
                 limit=limit,
                 window_seconds=900,

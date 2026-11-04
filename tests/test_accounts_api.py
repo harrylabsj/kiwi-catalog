@@ -36,6 +36,7 @@ import sqlite3
 import shutil
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 from cryptography.fernet import Fernet
@@ -409,6 +410,417 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 403, payload)
 
+    def _rate_limit_count(self, key: str) -> int:
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select coalesce(sum(request_count), 0) from merchant_application_limits"
+                " where actor_key = ?",
+                (key,),
+            ).fetchone()
+        return int(row[0] if row is not None else 0)
+
+    def test_login_wrong_password_rate_limit_persists(self) -> None:
+        """Wrong passwords must consume the budget before the 403 aborts the tx."""
+        self._register()
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "3"}, clear=False
+        ):
+            for _ in range(3):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )
+                self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("login:ops@acme.example"), 3)
+
+    def test_twelve_consecutive_wrong_passwords_trigger_429(self) -> None:
+        """The reported probe: 12 wrong passwords must not all return 403."""
+        self._register()
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "10"}, clear=False
+        ):
+            statuses = []
+            for _ in range(12):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )
+                statuses.append(status)
+                if status == 403:
+                    self.assertIn("invalid email or password", payload.get("error", ""))
+            exhausted = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "ops@acme.example", "password": "strong-pw-123"}
+                ).encode(),
+            )
+        self.assertEqual(statuses[:10], [403] * 10)
+        self.assertEqual(statuses[10:], [429, 429])
+        self.assertEqual(exhausted[0], 429, exhausted[1])
+        self.assertEqual(self._rate_limit_count("login:ops@acme.example"), 10)
+
+    def test_rate_limit_helper_refuses_pending_business_transaction(self) -> None:
+        """The helper must not commit a caller's uncommitted business write."""
+        from kiwi_catalog.api.handlers.accounts import _enforce_persisted_rate_limit
+
+        conn = open_connection(self.db_path)
+        try:
+            conn.execute(
+                "insert into merchant_accounts (email, password_hash, merchant_name,"
+                " created_at, updated_at) values (?, ?, ?, ?, ?)",
+                (
+                    "pending@acme.example",
+                    "hash",
+                    "Pending",
+                    "2026-11-03T00:00:00+00:00",
+                    "2026-11-03T00:00:00+00:00",
+                ),
+            )
+            self.assertTrue(conn.in_transaction)
+            with self.assertRaises(RuntimeError):
+                _enforce_persisted_rate_limit(
+                    conn,
+                    self.db_path,
+                    key="unsafe:test",
+                    limit=5,
+                    window_seconds=900,
+                    description="unsafe test",
+                )
+        finally:
+            conn.rollback()
+            conn.close()
+
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as check:
+            self.assertIsNone(
+                check.execute(
+                    "select 1 from merchant_accounts where email = ?",
+                    ("pending@acme.example",),
+                ).fetchone()
+            )
+        self.assertEqual(self._rate_limit_count("unsafe:test"), 0)
+
+    def test_login_rate_limit_fallback_stack(self) -> None:
+        """The same persisted counter is enforced through the fallback ASGI app."""
+        self._register()
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+        from kiwi_catalog.api.route_table import all_routes, resolve_route
+
+        fallback = MarketplaceASGIApp(
+            self.db_path,
+            route_provider=lambda: list(all_routes()),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "3"}, clear=False
+        ):
+            statuses = [
+                _call_http(
+                    fallback,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )[0]
+                for _ in range(4)
+            ]
+        self.assertEqual(statuses, [403, 403, 403, 429])
+
+    def test_auth_storage_failure_never_issues_a_session(self) -> None:
+        """A failed rate-limit or session write must not return a cookie."""
+        self._register()
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+        from kiwi_catalog.api.route_table import all_routes, resolve_route
+        from kiwi_catalog.db.session import db_session
+
+        # Use the fallback ASGI stack here: its error boundary maps the storage
+        # failure to a 500 response (direct FastAPI ASGI would re-raise).
+        fallback = MarketplaceASGIApp(
+            self.db_path,
+            route_provider=lambda: list(all_routes()),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+
+        def session_count() -> int:
+            with db_session(self.db_path) as conn:
+                row = conn.execute("select count(*) from account_sessions").fetchone()
+            return int(row[0] if row is not None else 0)
+
+        before = session_count()
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "create trigger fail_rate_limit before insert on merchant_application_limits"
+                " begin select raise(abort, 'forced rate-limit storage failure'); end"
+            )
+        try:
+            status, payload, headers = _call_http(
+                fallback,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "ops@acme.example", "password": "strong-pw-123"}
+                ).encode(),
+            )
+            self.assertEqual(status, 500, payload)
+            self.assertNotIn("set-cookie", headers)
+            self.assertEqual(session_count(), before)
+        finally:
+            with db_session(self.db_path) as conn:
+                conn.execute("drop trigger if exists fail_rate_limit")
+
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "create trigger fail_session before insert on account_sessions"
+                " begin select raise(abort, 'forced session storage failure'); end"
+            )
+        try:
+            status, payload, headers = _call_http(
+                fallback,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "ops@acme.example", "password": "strong-pw-123"}
+                ).encode(),
+            )
+            self.assertEqual(status, 500, payload)
+            self.assertNotIn("set-cookie", headers)
+            self.assertEqual(session_count(), before)
+        finally:
+            with db_session(self.db_path) as conn:
+                conn.execute("drop trigger if exists fail_session")
+
+    def test_login_rate_limit_isolated_by_email_and_window(self) -> None:
+        """One email's budget and an expired window must not block another scope."""
+        self._register()
+        status, payload, _ = register_via_api(
+            self.app, email="other@acme.example"
+        )
+        self.assertEqual(status, 200, payload)
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "ops@acme.example", "password": "wrong-password"}
+                ).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "other@acme.example", "password": "wrong-password"}
+                ).encode(),
+            )
+            self.assertEqual(status, 403, payload)
+
+        # Move only the exhausted bucket to an old window; the current window
+        # must be admitted again.
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update merchant_application_limits set window_start = ? where actor_key = ?",
+                ("2000-01-01T00:00:00", "login:ops@acme.example"),
+            )
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/login",
+                json.dumps(
+                    {"email": "ops@acme.example", "password": "wrong-password"}
+                ).encode(),
+            )
+        self.assertEqual(status, 403, payload)
+
+    def test_login_rate_limit_concurrent_attempts_are_atomic(self) -> None:
+        """Concurrent wrong attempts may not over-admit or lose the counter."""
+        self._register()
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "3"}, clear=False
+        ):
+            def attempt(_: int) -> int:
+                status, _, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/login",
+                    json.dumps(
+                        {"email": "ops@acme.example", "password": "wrong-password"}
+                    ).encode(),
+                )
+                return status
+
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                statuses = list(pool.map(attempt, range(10)))
+        self.assertEqual(statuses.count(403), 3, statuses)
+        self.assertEqual(statuses.count(429), 7, statuses)
+        self.assertEqual(self._rate_limit_count("login:ops@acme.example"), 3)
+
+    def test_registration_and_verification_failures_persist_rate_limits(self) -> None:
+        """Conflict/AuthError paths must not roll back their attempt counters."""
+        self._register()
+        # Registration itself consumed this bucket; start this sub-check from a
+        # clean one so the first two conflicts are admitted under the limit.
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "delete from merchant_application_limits where actor_key = ?",
+                ("register-code:ops@acme.example",),
+            )
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/register/code",
+                    json.dumps({"email": "ops@acme.example"}).encode(),
+                )
+                self.assertEqual(status, 409, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/register/code",
+                json.dumps({"email": "ops@acme.example"}).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("register-code:ops@acme.example"), 2)
+
+        status, payload, _ = register_via_api(
+            self.app,
+            email="verify@acme.example",
+            legacy_unverified=True,
+            db_path=self.db_path,
+        )
+        self.assertEqual(status, 200, payload)
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/verify-email",
+                    json.dumps(
+                        {"email": "verify@acme.example", "code": "000000"}
+                    ).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/verify-email",
+                json.dumps({"email": "verify@acme.example", "code": "000000"}).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("verify-email:verify@acme.example"), 2)
+
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            "/v1/accounts/register/code",
+            json.dumps({"email": "new@acme.example"}).encode(),
+        )
+        self.assertEqual(status, 200, payload)
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/register/verify",
+                    json.dumps(
+                        {"email": "new@acme.example", "code": "000000"}
+                    ).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/register/verify",
+                json.dumps({"email": "new@acme.example", "code": "000000"}).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("register-verify:new@acme.example"), 2)
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/reset-password",
+                    json.dumps(
+                        {
+                            "email": "ops@acme.example",
+                            "code": "000000",
+                            "new_password": "new-strong-pw-456",
+                        }
+                    ).encode(),
+                )
+                self.assertEqual(status, 403, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/reset-password",
+                json.dumps(
+                    {
+                        "email": "ops@acme.example",
+                        "code": "000000",
+                        "new_password": "new-strong-pw-456",
+                    }
+                ).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("reset-password:ops@acme.example"), 2)
+
     def test_me_requires_login(self) -> None:
         status, payload, _ = _call_http(self.app, "GET", "/v1/accounts/me")
         self.assertEqual(status, 403, payload)
@@ -471,6 +883,68 @@ class AccountsApiTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertIn("set-cookie", headers)
+
+    def test_resend_code_rate_limit_persists(self) -> None:
+        """resend-code failures must not roll back its own attempt counter."""
+        status, payload, _ = register_via_api(
+            self.app, **REGISTER_BODY, db_path=self.db_path, legacy_unverified=True
+        )
+        self.assertEqual(status, 200, payload)
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/resend-code",
+                    json.dumps({"email": "ops@acme.example"}).encode(),
+                )
+                self.assertEqual(status, 200, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/resend-code",
+                json.dumps({"email": "ops@acme.example"}).encode(),
+            )
+        self.assertEqual(status, 429, payload)
+        self.assertEqual(
+            self._rate_limit_count("resend-code:ops@acme.example"), 2
+        )
+
+    def test_resend_code_storage_failure_does_not_issue_code(self) -> None:
+        """A failed resend counter write fails closed, not with a new code."""
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+        from kiwi_catalog.api.route_table import all_routes, resolve_route
+        from kiwi_catalog.db.session import db_session
+
+        status, payload, _ = register_via_api(
+            self.app, **REGISTER_BODY, db_path=self.db_path, legacy_unverified=True
+        )
+        self.assertEqual(status, 200, payload)
+        fallback = MarketplaceASGIApp(
+            self.db_path,
+            route_provider=lambda: list(all_routes()),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "create trigger fail_resend_rate before insert on merchant_application_limits"
+                " begin select raise(abort, 'forced resend rate-limit failure'); end"
+            )
+        try:
+            status, payload, _ = _call_http(
+                fallback,
+                "POST",
+                "/v1/accounts/resend-code",
+                json.dumps({"email": "ops@acme.example"}).encode(),
+            )
+        finally:
+            with db_session(self.db_path) as conn:
+                conn.execute("drop trigger if exists fail_resend_rate")
+        self.assertEqual(status, 500, payload)
+        self.assertNotEqual(payload.get("verification_code"), "123456")
+        self.assertNotIn("verification_code", payload)
 
     # ── token 找回（核心：审批后"我的"可见明文）──────────────────────────
 
@@ -938,6 +1412,100 @@ class PasswordResetApiTest(unittest.TestCase):
             "/v1/accounts/login",
             json.dumps({"email": email, "password": password}).encode(),
         )
+
+    def _rate_limit_count(self, key: str) -> int:
+        from kiwi_catalog.db.session import db_session
+
+        with db_session(self.db_path) as conn:
+            row = conn.execute(
+                "select coalesce(sum(request_count), 0) from merchant_application_limits"
+                " where actor_key = ?",
+                (key,),
+            ).fetchone()
+        return int(row[0] if row is not None else 0)
+
+    def test_forgot_and_reset_rate_limit_counts_persist(self) -> None:
+        """Forgot/reset AuthErrors must not roll back their attempt counters."""
+        self._register()
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload, _ = _call_http(
+                    self.app,
+                    "POST",
+                    "/v1/accounts/forgot-password",
+                    json.dumps({"email": "ops@acme.example"}).encode(),
+                )
+                self.assertEqual(status, 200, payload)
+            status, payload, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/forgot-password",
+                json.dumps({"email": "ops@acme.example"}).encode(),
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(self._rate_limit_count("forgot:ops@acme.example"), 2)
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "2"}, clear=False
+        ):
+            for _ in range(2):
+                status, payload = self._reset(
+                    "ops@acme.example", "000000", "new-strong-pw-456"
+                )
+                self.assertEqual(status, 403, payload)
+            status, payload = self._reset(
+                "ops@acme.example", "000000", "new-strong-pw-456"
+            )
+            self.assertEqual(status, 429, payload)
+        self.assertEqual(
+            self._rate_limit_count("reset-password:ops@acme.example"), 2
+        )
+
+    def test_forgot_and_reset_storage_failure_fails_closed(self) -> None:
+        """A failed limit write must not return a reset code or success."""
+        from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
+        from kiwi_catalog.api.route_table import all_routes, resolve_route
+        from kiwi_catalog.db.session import db_session
+
+        self._register()
+        fallback = MarketplaceASGIApp(
+            self.db_path,
+            route_provider=lambda: list(all_routes()),
+            route_resolver=lambda method, path: resolve_route(method, path),
+        )
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "create trigger fail_reset_rate before insert on merchant_application_limits"
+                " begin select raise(abort, 'forced reset rate-limit failure'); end"
+            )
+        try:
+            status, payload, _ = _call_http(
+                fallback,
+                "POST",
+                "/v1/accounts/forgot-password",
+                json.dumps({"email": "ops@acme.example"}).encode(),
+            )
+            self.assertEqual(status, 500, payload)
+            self.assertNotIn("reset_code", payload)
+            status, payload, _ = _call_http(
+                fallback,
+                "POST",
+                "/v1/accounts/reset-password",
+                json.dumps(
+                    {
+                        "email": "ops@acme.example",
+                        "code": "000000",
+                        "new_password": "new-strong-pw-456",
+                    }
+                ).encode(),
+            )
+            self.assertEqual(status, 500, payload)
+            self.assertNotEqual(payload.get("message"), "password reset")
+        finally:
+            with db_session(self.db_path) as conn:
+                conn.execute("drop trigger if exists fail_reset_rate")
 
     def test_forgot_password_unknown_email_returns_ok(self) -> None:
         """防枚举：未知邮箱同样返回 ok 通用文案，且不带 reset_code。"""

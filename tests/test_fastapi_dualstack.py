@@ -328,6 +328,104 @@ class FastApiDualStackTest(unittest.TestCase):
                 )
                 self.assertEqual(resp.status_code, 403, (action, resp.text))
 
+    def test_login_rate_limit_in_fastapi_stack(self) -> None:
+        """The persisted auth counter also works through the real FastAPI stack."""
+        from fastapi.testclient import TestClient
+
+        email = "fastapi-rate@example.test"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+                "KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "10",
+            },
+            clear=False,
+        ):
+            with TestClient(self.app) as client:
+                code = client.post(
+                    "/v1/accounts/register/code", json={"email": email}
+                ).json()["verification_code"]
+                ticket = client.post(
+                    "/v1/accounts/register/verify",
+                    json={"email": email, "code": code},
+                ).json()["verification_ticket"]
+                registered = client.post(
+                    "/v1/accounts/register",
+                    json={
+                        "merchant_name": "FastAPI Rate",
+                        "email": email,
+                        "password": "strong-pw-123",
+                        "phone": "+86 138 0000 0000",
+                        "verification_ticket": ticket,
+                    },
+                )
+                self.assertEqual(registered.status_code, 200, registered.text)
+
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "3"}, clear=False
+        ):
+            with TestClient(self.app) as client:
+                statuses = [
+                    client.post(
+                        "/v1/accounts/login",
+                        json={"email": email, "password": "wrong-password"},
+                    ).status_code
+                    for _ in range(4)
+                ]
+        self.assertEqual(statuses, [403, 403, 403, 429])
+
+    def test_auth_storage_failure_does_not_issue_session_in_fastapi(self) -> None:
+        """A failed rate-limit write must fail closed without a session cookie."""
+        from fastapi.testclient import TestClient
+
+        from kiwi_catalog.db.session import db_session
+
+        email = "fastapi-storage@example.test"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
+                "KIWI_CATALOG_LOGIN_RATE_LIMIT_PER_15MIN": "10",
+            },
+            clear=False,
+        ):
+            with TestClient(self.app) as client:
+                code = client.post(
+                    "/v1/accounts/register/code", json={"email": email}
+                ).json()["verification_code"]
+                ticket = client.post(
+                    "/v1/accounts/register/verify",
+                    json={"email": email, "code": code},
+                ).json()["verification_ticket"]
+                registered = client.post(
+                    "/v1/accounts/register",
+                    json={
+                        "merchant_name": "FastAPI Storage",
+                        "email": email,
+                        "password": "strong-pw-123",
+                        "phone": "+86 138 0000 0000",
+                        "verification_ticket": ticket,
+                    },
+                )
+                self.assertEqual(registered.status_code, 200, registered.text)
+
+        with db_session(self.db_file) as conn:
+            conn.execute(
+                "create trigger fail_rate_in_fastapi before insert on merchant_application_limits"
+                " begin select raise(abort, 'forced rate-limit storage failure'); end"
+            )
+        try:
+            with TestClient(self.app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/v1/accounts/login",
+                    json={"email": email, "password": "strong-pw-123"},
+                )
+            self.assertEqual(response.status_code, 500, response.text)
+            self.assertNotIn("set-cookie", response.headers)
+        finally:
+            with db_session(self.db_file) as conn:
+                conn.execute("drop trigger if exists fail_rate_in_fastapi")
+
     def test_heartbeat_accepts_binding_signature_in_fastapi(self) -> None:
         """D6：FastAPI 栈的心跳也必须透传 x-kiwi-binding-jws（fallback 在全路由
         统一合并该头，FastAPI 路由要显式取——漏了就是 500/403 的双栈漂移）。
