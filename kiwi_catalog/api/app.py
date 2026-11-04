@@ -164,8 +164,13 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     register_fastapi_routes(app, db_path)
     lifecycle = KeepaliveLifecycle(configured_scheduler(str(db_path)))
     app.state.keepalive_lifecycle = lifecycle
-    # FastAPI supports lifecycle events; lightweight test stubs may not.
-    if hasattr(app, "add_event_handler"):
+    # FastAPI 0.141 removed add_event_handler; Starlette router lifespan lists
+    # are the stable surface. Lightweight test stubs may not have a router.
+    router = getattr(app, "router", None)
+    if router is not None and hasattr(router, "on_startup"):
+        router.on_startup.append(lifecycle.start)
+        router.on_shutdown.append(lifecycle.stop)
+    elif hasattr(app, "add_event_handler"):
         app.add_event_handler("startup", lifecycle.start)
         app.add_event_handler("shutdown", lifecycle.stop)
     return app

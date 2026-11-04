@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.15 — 2026-11-04
+
+- **目录侧 WorkBuddy 保活（默认关闭）**：新增商家独立授权 `directory_keepalive`、商家工作台授权/撤销、受控调度器、真实 `/merchant/` 只读适配器；探测在 TTL 前 300 秒开始，interval/cooldown 由 TTL 派生，避免先离线后探测。
+- **公平分页与持久限流**：schema v49 增加 `runtime_keepalive_state.last_tick_at` 与 `runtime_keepalive_consents.last_attempt_at`；多进程共享 claim、重启恢复；fresh 行不写 claim，避免推迟恢复；分页扫描避免 fresh/无时间戳商家饿死 stale/临期商家。
+- **安全边界**：固定可信 host、固定 `/merchant/`、无重定向、DNS 固定、错误脱敏、探测不改在线状态；scheduler 默认关闭，必须显式配置 `KIWI_CATALOG_KEEPALIVE_ENABLED=1` 与 `KIWI_CATALOG_KEEPALIVE_TRUSTED_HOSTS`。
+- **部署约束（breaking）**：schema v49 在旧包中无法打开；升级后只能通过备份恢复回滚，不能回滚到旧包。
+
 ## 0.5.14 — 2026-11-03
 
 - **分享码污染的已签名/摘要记录改为安全隔离，不再原地清洗**：历史云端名片命中分享码 URL 时公开稳定读返回 410（不产生伪造 ETag），商家详情标记 `quarantined`/`republish_required`；历史 Listing 命中时**纯读隐藏**（不改 `publication_state`/`governance_hold`/digest/内容），公开搜索/详情/主页不再返回，商家自查面提示 `quarantined`/`republish_required`，可用同 key 重新发布（新 digest）。正常记录的内容/ETag/digest 契约不变。

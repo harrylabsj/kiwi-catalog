@@ -1,6 +1,6 @@
 # kiwi-catalog
 
-当前源码候选：`0.5.14`；正式发布由 Kiwi Portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
+当前源码候选：`0.5.15`；正式发布由 Kiwi Portfolio workflow 统一触发，见 [Portfolio 发布管理](https://github.com/harrylabsj/kiwi/blob/main/docs/portfolio-release-management.md)。
 
 独立部署的 Agent Catalog 服务——从 shopping-cli 抽离（
 `shopping-cli/docs/shopping-cli-agent-catalog-extraction-plan-v1.0.md`，
@@ -58,7 +58,7 @@ kiwi-catalog-api --db catalog.sqlite --host 127.0.0.1 --port 8600
 
 ## 架构要点
 
-- 独立 SQLite schema；源码当前 `CURRENT_SCHEMA_VERSION = 47`（`db/migrations.py`）。
+- 独立 SQLite schema；源码当前 `CURRENT_SCHEMA_VERSION = 49`（`db/migrations.py`）。
   **部署/发布前必须读取线上实际 `PRAGMA user_version` 并核对 migration 链，不能假定线上 schema 与源码一致**；schema 40/41 的历史额度调整见迁移记录，与 shopping-cli 分别演化。
 - 账号与 Token：`merchant_accounts` / `account_sessions` / `merchant_tokens`
   （Fernet 加密 `token_encrypted`）/ `merchant_applications`（申请+审批），
