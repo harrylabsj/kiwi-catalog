@@ -204,12 +204,17 @@ def search_listings(
 
     q = str(query.get("q") or "").strip()
     if q:
+        # q is a free-text search over public listing fields. A product's
+        # precise source SKU/platform product id is part of its public
+        # identity, so it must be searchable too; otherwise a buyer that
+        # already has the SKU cannot resolve the listing by that exact id.
         where.append(
             "(title like ? escape '\\' or category like ? escape '\\'"
-            " or brand like ? escape '\\' or summary like ? escape '\\')"
+            " or brand like ? escape '\\' or summary like ? escape '\\'"
+            " or source_product_ref like ? escape '\\')"
         )
         pattern = _like_escaped(q)
-        values.extend([pattern, pattern, pattern, pattern])
+        values.extend([pattern, pattern, pattern, pattern, pattern])
 
     listing_type = str(query.get("listing_type") or "").strip()
     if listing_type:

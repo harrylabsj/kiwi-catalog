@@ -200,6 +200,41 @@ class ListingsSearchTest(unittest.TestCase):
         )
         self.assertEqual(len(payload["results"]), 2)
 
+    def test_search_q_matches_exact_source_product_ref(self) -> None:
+        self._publish(
+            {
+                "source_product_ref": "10225485016481",
+                "title": "Public product title without the SKU",
+            }
+        )
+        _, payload = _call_http(
+            self.app, "GET", "/v1/listings/search?q=10225485016481"
+        )
+        self.assertEqual(len(payload["results"]), 1, payload)
+        self.assertEqual(
+            payload["results"][0]["listing"]["source_product_ref"],
+            "10225485016481",
+        )
+
+    def test_sku_match_does_not_bypass_publication_or_tenant_filters(self) -> None:
+        published = self._publish(
+            {"source_product_ref": "10225485016481", "title": "Public SKU"}
+        )
+        _, payload = _call_http(
+            self.app, "GET", "/v1/listings/search?q=10225485016481"
+        )
+        self.assertEqual(len(payload["results"]), 1, payload)
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update commerce_listings set publication_state='WITHDRAWN'"
+                " where listing_id=?",
+                (published["listing"]["listing_id"],),
+            )
+        _, payload = _call_http(
+            self.app, "GET", "/v1/listings/search?q=10225485016481"
+        )
+        self.assertEqual(payload["results"], [])
+
     def test_search_q_like_wildcards_escaped(self) -> None:
         """审查 P2：q 中的 % _ 是字面量而非 SQL LIKE 通配符——q="%" 不得匹配全表。"""
         self._publish({"source_product_ref": "SKU-pct", "title": "Discount 50% off"})
