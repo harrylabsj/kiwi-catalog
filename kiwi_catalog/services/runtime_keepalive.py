@@ -37,7 +37,7 @@ from typing import Any, Collection, Protocol
 from urllib.parse import urlsplit
 
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_endpoint
-from kiwi_catalog.agent_catalog.freshness import effective_freshness_state
+from kiwi_catalog.agent_catalog.freshness import agent_fresh_ttl_seconds
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import runtime_access
@@ -49,8 +49,8 @@ TERMS_TEXT = (
     "仅对我已绑定的商家运行时发起低频保活探测。保活探测不等于在线；在线只以"
     "我的运行时签名心跳为准。我可随时撤回本授权；撤回后立即停止后续探测。"
 )
-MIN_INTERVAL_SECONDS = 300
-MIN_COOLDOWN_SECONDS = 900
+MIN_INTERVAL_SECONDS = 60
+MIN_COOLDOWN_SECONDS = 60
 MAX_CONCURRENCY = 4
 
 
@@ -265,16 +265,35 @@ class KeepaliveScheduler:
         db_path: str | Path,
         gateway: KeepaliveGateway | None = None,
         enabled: bool = False,
-        interval_seconds: int = 900,
-        per_agent_cooldown_seconds: int = 900,
+        interval_seconds: int | None = None,
+        per_agent_cooldown_seconds: int | None = None,
+        ttl_seconds: int | None = None,
         max_concurrency: int = 1,
         max_agents: int = 10,
         clock=now_iso,
     ) -> None:
-        if interval_seconds < MIN_INTERVAL_SECONDS:
+        ttl = int(ttl_seconds) if ttl_seconds is not None else agent_fresh_ttl_seconds()
+        if ttl <= 0:
+            raise ValidationError("keepalive TTL must be positive")
+        # Probe well before the read-time TTL expires. With the default 900s
+        # TTL this is 600s after last_seen; interval (300s) <= lead (300s)
+        # guarantees a tick before expiry even with phase drift. A retry
+        # cooldown of half the lead leaves at least one retry before expiry.
+        lead = min(ttl, max(MIN_INTERVAL_SECONDS, ttl // 3))
+        interval = lead if interval_seconds is None else int(interval_seconds)
+        cooldown = (
+            max(MIN_COOLDOWN_SECONDS, lead // 2)
+            if per_agent_cooldown_seconds is None
+            else int(per_agent_cooldown_seconds)
+        )
+        if interval < MIN_INTERVAL_SECONDS:
             raise ValidationError("keepalive interval is below the safe minimum")
-        if per_agent_cooldown_seconds < MIN_COOLDOWN_SECONDS:
+        if cooldown < MIN_COOLDOWN_SECONDS:
             raise ValidationError("keepalive per-agent cooldown is below the safe minimum")
+        if interval > lead:
+            raise ValidationError("keepalive interval must not exceed the pre-expiry lead")
+        if cooldown > lead:
+            raise ValidationError("keepalive cooldown must not exceed the pre-expiry lead")
         if not 1 <= max_concurrency <= MAX_CONCURRENCY:
             raise ValidationError("keepalive concurrency is out of range")
         if not 1 <= max_agents <= 100:
@@ -282,8 +301,10 @@ class KeepaliveScheduler:
         self.db_path = db_path
         self.gateway = gateway
         self.enabled = enabled is True
-        self.interval_seconds = interval_seconds
-        self.per_agent_cooldown_seconds = per_agent_cooldown_seconds
+        self.ttl_seconds = ttl
+        self.probe_lead_seconds = lead
+        self.interval_seconds = interval
+        self.per_agent_cooldown_seconds = cooldown
         self.max_concurrency = max_concurrency
         self.max_agents = max_agents
         self.clock = clock
@@ -357,63 +378,111 @@ class KeepaliveScheduler:
         except Exception:
             return False
 
+    def _probe_due(self, row: Any, current: datetime) -> bool:
+        """True when a probe is useful before (or after) effective expiry.
+
+        Stored non-fresh states are due immediately. A stored-fresh row is due
+        once it enters the lead window before the read-time TTL, not only after
+        it has already gone stale. Missing timestamps stay untouched.
+        """
+        if str(row["freshness_state"] or "") != "fresh":
+            return True
+        last_seen = str(row["last_seen_at"] or "")
+        if not last_seen:
+            return False
+        try:
+            seen = _parse(last_seen)
+        except (TypeError, ValueError):
+            return False
+        age = (current - seen).total_seconds()
+        return age >= max(0, self.ttl_seconds - self.probe_lead_seconds)
+
     def _candidates(self, now: str, current: datetime) -> list[Candidate]:
-        cutoff = (current - timedelta(seconds=self.per_agent_cooldown_seconds)).replace(microsecond=0).isoformat()
+        cutoff = (
+            current - timedelta(seconds=self.per_agent_cooldown_seconds)
+        ).replace(microsecond=0).isoformat()
+        page_size = max(8, self.max_agents * 4)
+        last_seen_cursor = ""
+        agent_cursor = ""
+        candidates: list[Candidate] = []
         with db_session(self.db_path) as conn:
-            rows = conn.execute(
-                "select k.catalog_agent_id,k.merchant_id,b.runtime_origin,"
-                " a.last_seen_at,a.freshness_state"
-                " from runtime_keepalive_consents k"
-                " join runtime_access_consents c on c.catalog_agent_id=k.catalog_agent_id"
-                " join runtime_access_configs cfg on cfg.catalog_agent_id=k.catalog_agent_id"
-                " join runtime_bindings b on b.catalog_agent_id=k.catalog_agent_id"
-                " join catalog_agents a on a.catalog_agent_id=k.catalog_agent_id"
-                " where k.revoked_at='' and k.terms_version=?"
-                " and c.revoked_at='' and c.terms_version=?"
-                " and cfg.status='active' and cfg.secret_ciphertext!=''"
-                " and b.status='active' and b.merchant_id=k.merchant_id"
-                " and a.merchant_id=k.merchant_id and a.administrative_state='active'"
-                " and a.lifecycle_status='active'"
-                " order by a.last_seen_at asc limit ?",
-                (TERMS_VERSION, runtime_access.CONSENT_TERMS_VERSION, self.max_agents),
-            ).fetchall()
-            candidates: list[Candidate] = []
-            for row in rows:
-                agent_id = str(row["catalog_agent_id"])
-                try:
-                    assert_safe_binding_endpoint(str(row["runtime_origin"]), field="runtime_origin")
-                except Exception:
-                    continue
-                claim = conn.execute(
-                    "update runtime_keepalive_consents set last_attempt_at=?"
-                    " where catalog_agent_id=? and revoked_at='' and terms_version=?"
-                    " and (last_attempt_at='' or last_attempt_at<=?)",
-                    (now, agent_id, TERMS_VERSION, cutoff),
-                )
-                if claim.rowcount != 1:
-                    continue
-                if not enabled(conn, agent_id):
-                    continue
-                record = {"freshness_state": row["freshness_state"], "last_seen_at": row["last_seen_at"]}
-                if effective_freshness_state(record, now=now) == "fresh":
-                    continue
-                config = runtime_access.active_runtime_access(conn, agent_id)
-                if config is None:
-                    continue
-                try:
-                    secret = runtime_access.row_secret(config, statuses=frozenset({"active"}))
-                except Exception:
-                    continue
-                candidates.append(
-                    Candidate(
-                        agent_id=agent_id,
-                        merchant_id=str(row["merchant_id"]),
-                        runtime_origin=str(row["runtime_origin"]),
-                        secret=secret,
-                        last_seen_at=str(row["last_seen_at"] or ""),
-                        freshness_state=str(row["freshness_state"] or ""),
+            while len(candidates) < self.max_agents:
+                rows = conn.execute(
+                    "select k.catalog_agent_id,k.merchant_id,b.runtime_origin,"
+                    " a.last_seen_at,a.freshness_state"
+                    " from runtime_keepalive_consents k"
+                    " join runtime_access_consents c on c.catalog_agent_id=k.catalog_agent_id"
+                    " join runtime_access_configs cfg on cfg.catalog_agent_id=k.catalog_agent_id"
+                    " join runtime_bindings b on b.catalog_agent_id=k.catalog_agent_id"
+                    " join catalog_agents a on a.catalog_agent_id=k.catalog_agent_id"
+                    " where k.revoked_at='' and k.terms_version=?"
+                    " and c.revoked_at='' and c.terms_version=?"
+                    " and cfg.status='active' and cfg.secret_ciphertext!=''"
+                    " and b.status='active' and b.merchant_id=k.merchant_id"
+                    " and a.merchant_id=k.merchant_id and a.administrative_state='active'"
+                    " and a.lifecycle_status='active'"
+                    " and (a.last_seen_at > ? or (a.last_seen_at = ?"
+                    "      and a.catalog_agent_id > ?))"
+                    " order by a.last_seen_at asc, a.catalog_agent_id asc limit ?",
+                    (
+                        TERMS_VERSION,
+                        runtime_access.CONSENT_TERMS_VERSION,
+                        last_seen_cursor,
+                        last_seen_cursor,
+                        agent_cursor,
+                        page_size,
+                    ),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    last_seen_cursor = str(row["last_seen_at"] or "")
+                    agent_cursor = str(row["catalog_agent_id"])
+                    agent_id = agent_cursor
+                    if not self._probe_due(row, current):
+                        continue
+                    try:
+                        assert_safe_binding_endpoint(
+                            str(row["runtime_origin"]), field="runtime_origin"
+                        )
+                    except Exception:
+                        continue
+                    if not enabled(conn, agent_id):
+                        continue
+                    config = runtime_access.active_runtime_access(conn, agent_id)
+                    if config is None:
+                        continue
+                    try:
+                        secret = runtime_access.row_secret(
+                            config, statuses=frozenset({"active"})
+                        )
+                    except Exception:
+                        continue
+                    # Claim only after the row is actually due and authorized;
+                    # fresh rows must not consume cooldown or starve expiry.
+                    claim = conn.execute(
+                        "update runtime_keepalive_consents set last_attempt_at=?"
+                        " where catalog_agent_id=? and revoked_at=''"
+                        " and terms_version=?"
+                        " and (last_attempt_at='' or last_attempt_at<=?)",
+                        (now, agent_id, TERMS_VERSION, cutoff),
                     )
-                )
+                    if claim.rowcount != 1:
+                        continue
+                    candidates.append(
+                        Candidate(
+                            agent_id=agent_id,
+                            merchant_id=str(row["merchant_id"]),
+                            runtime_origin=str(row["runtime_origin"]),
+                            secret=secret,
+                            last_seen_at=str(row["last_seen_at"] or ""),
+                            freshness_state=str(row["freshness_state"] or ""),
+                        )
+                    )
+                    if len(candidates) >= self.max_agents:
+                        break
+                if len(rows) < page_size:
+                    break
         return candidates
 
 
@@ -432,14 +501,17 @@ def scheduler_from_env(
     enabled = str(values.get("KIWI_CATALOG_KEEPALIVE_ENABLED") or "").strip().lower()
     if enabled not in {"1", "true", "yes", "on"}:
         return None
+
+    def _optional_int(name: str) -> int | None:
+        raw = str(values.get(name) or "").strip()
+        return int(raw) if raw else None
+
     return KeepaliveScheduler(
         db_path=db_path,
         gateway=gateway,
         enabled=True,
-        interval_seconds=int(values.get("KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS") or 900),
-        per_agent_cooldown_seconds=int(
-            values.get("KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS") or 900
-        ),
+        interval_seconds=_optional_int("KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS"),
+        per_agent_cooldown_seconds=_optional_int("KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS"),
         max_concurrency=int(values.get("KIWI_CATALOG_KEEPALIVE_CONCURRENCY") or 1),
         max_agents=int(values.get("KIWI_CATALOG_KEEPALIVE_MAX_AGENTS") or 10),
     )

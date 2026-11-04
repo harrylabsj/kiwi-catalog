@@ -20,6 +20,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -129,6 +130,48 @@ class KeepaliveTest(unittest.TestCase):
             **kwargs,
         )
 
+    def _add_opted_in_agent(self, agent_id: str, *, last_seen: str, freshness: str = "fresh") -> None:
+        merchant_id = f"mkt_{agent_id}"
+        cipher, key_id = runtime_access.encrypt_secret(f"secret-{agent_id}")
+        self.conn.execute(
+            "insert into catalog_agents"
+            " (catalog_agent_id,merchant_id,display_name,source_type,lifecycle_status,"
+            " verification_status,freshness_state,administrative_state,first_seen_at,"
+            " last_seen_at,created_at,updated_at)"
+            " values (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (agent_id, merchant_id, agent_id, "hosted", "active", "commerce_verified",
+             freshness, "active", _OLD, last_seen, _OLD, _OLD),
+        )
+        self.conn.execute(
+            "insert into runtime_bindings"
+            " (binding_id,catalog_agent_id,merchant_id,runtime_origin,a2a_endpoint,key_id,"
+            " key_thumbprint,key_jwk_json,binding_version,service_epoch,status,created_at,updated_at)"
+            " values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"binding-{agent_id}", agent_id, merchant_id,
+             f"https://{agent_id}.app.workbuddy.host",
+             f"https://{agent_id}.app.workbuddy.host/a2a", "key", "thumb", "{}", 1, 1,
+             "active", _NOW, _NOW),
+        )
+        self.conn.execute(
+            "insert into runtime_access_configs"
+            " (catalog_agent_id,config_version,provider,access_mode,parameter_name,"
+            " secret_ciphertext,key_id,adapter_version,auth_mode,status,validated_at,"
+            " created_at,updated_at,revoked_reason)"
+            " values (?,?,?,?,?,?,?,?,?,?,?,?,?,'')",
+            (agent_id, 1, "workbuddy", "share_parameter", "sharecode", cipher, key_id,
+             "workbuddy-share-v1", "signature", "active", _NOW, _NOW, _NOW),
+        )
+        self.conn.execute(
+            "insert into runtime_access_consents values (?,?,?,?,?,'')",
+            (agent_id, merchant_id, "directory_custody", runtime_access.CONSENT_TERMS_VERSION, _NOW),
+        )
+        self.conn.execute(
+            "insert into runtime_keepalive_consents"
+            " (catalog_agent_id,merchant_id,scope,terms_version,granted_at,revoked_at)"
+            " values (?,?,?,?,?,'')",
+            (agent_id, merchant_id, runtime_keepalive.SCOPE, runtime_keepalive.TERMS_VERSION, _NOW),
+        )
+
     def _owner_payload(self, *, granted: bool, terms: str | None = None, merchant: str = _MERCHANT) -> dict:
         return {
             "owner_token": api_auth.owner_token(merchant),
@@ -229,7 +272,7 @@ class KeepaliveTest(unittest.TestCase):
         # Simulate the merchant's own signed heartbeat, not the scheduler.
         self.conn.execute("update catalog_agents set last_seen_at=?", (_NOW,))
         self.conn.commit()
-        second = self._scheduler(gateway).run_once(now="2026-11-04T04:10:00+00:00")
+        second = self._scheduler(gateway).run_once(now="2026-11-04T04:05:00+00:00")
         self.assertEqual(second.wake_requested, 0)
         self.assertEqual(len(gateway.calls), 1)
 
@@ -247,9 +290,11 @@ class KeepaliveTest(unittest.TestCase):
     def test_per_agent_cooldown_prevents_repeated_requests(self) -> None:
         self._grant()
         gateway = MockGateway()
-        scheduler = self._scheduler(gateway, interval_seconds=300)
+        scheduler = self._scheduler(
+            gateway, interval_seconds=120, per_agent_cooldown_seconds=300
+        )
         scheduler.run_once(now=_NOW)
-        tick = scheduler.run_once(now="2026-11-04T04:05:01+00:00")
+        tick = scheduler.run_once(now="2026-11-04T04:03:01+00:00")
         self.assertEqual(tick.skipped, "cooldown")
         self.assertEqual(len(gateway.calls), 1)
 
@@ -330,7 +375,7 @@ class KeepaliveTest(unittest.TestCase):
             env={
                 "KIWI_CATALOG_KEEPALIVE_ENABLED": "1",
                 "KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS": "300",
-                "KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS": "900",
+                "KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS": "300",
                 "KIWI_CATALOG_KEEPALIVE_CONCURRENCY": "2",
             },
         )
@@ -343,9 +388,55 @@ class KeepaliveTest(unittest.TestCase):
                 gateway=gateway,
                 env={
                     "KIWI_CATALOG_KEEPALIVE_ENABLED": "1",
-                    "KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS": "60",
+                    "KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS": "900",
                 },
             )
+
+    def test_pre_expiry_timeline_does_not_wait_for_stale(self) -> None:
+        self._grant()
+        scheduler = self._scheduler(MockGateway())
+        # Default TTL is 900, lead is 300: due at 600s, not at 900s.
+        row = {"freshness_state": "fresh", "last_seen_at": _NOW}
+        current = runtime_keepalive._parse(_NOW)
+        self.assertFalse(scheduler._probe_due(row, current + timedelta(seconds=599)))
+        self.assertTrue(scheduler._probe_due(row, current + timedelta(seconds=600)))
+        self.assertTrue(scheduler._probe_due(row, current + timedelta(seconds=900)))
+        self.assertTrue(
+            scheduler._probe_due({"freshness_state": "stale", "last_seen_at": _NOW}, current)
+        )
+
+    def test_fresh_row_is_not_claimed_before_it_is_due(self) -> None:
+        self._grant()
+        self.conn.execute(
+            "update catalog_agents set last_seen_at=?", (_NOW,)
+        )
+        self.conn.commit()
+        gateway = MockGateway()
+        tick = self._scheduler(gateway).run_once(now=_NOW)
+        self.assertEqual(tick.candidates, 0)
+        self.assertEqual(gateway.calls, [])
+        row = self.conn.execute(
+            "select last_attempt_at from runtime_keepalive_consents where catalog_agent_id=?",
+            (_AGENT,),
+        ).fetchone()
+        self.assertEqual(row[0], "")
+
+    def test_fair_pagination_skips_fresh_rows_to_find_due_agent(self) -> None:
+        # Fresh rows with no timestamp sort before a stale row. A fixed LIMIT
+        # would let them starve the stale merchant forever.
+        self.conn.execute(
+            "update catalog_agents set last_seen_at='', freshness_state='fresh' where catalog_agent_id=?",
+            (_AGENT,),
+        )
+        for index in range(7):
+            self._add_opted_in_agent(f"cagt_fresh_{index}", last_seen="")
+        self._add_opted_in_agent("cagt_due", last_seen=_OLD, freshness="stale")
+        self.conn.commit()
+        gateway = MockGateway()
+        scheduler = self._scheduler(gateway, max_agents=1)
+        tick = scheduler.run_once(now=_NOW)
+        self.assertEqual(tick.candidates, 1)
+        self.assertEqual([call[0] for call in gateway.calls], ["cagt_due"])
 
     def test_wrong_terms_are_rejected(self) -> None:
         with self.assertRaises(ValidationError):
