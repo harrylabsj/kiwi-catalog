@@ -35,6 +35,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
 from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
+from kiwi_catalog.api.handlers import runtime_keepalive as runtime_keepalive_handlers
 from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
@@ -617,6 +618,26 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, request: _FastAPIRequest
     ) -> _JSONResponse:
         result = cloud_binding_handlers.read_public_inquiry_consent(
+            db_path, catalog_agent_id, _cloud_payload({}, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
+    @app.put("/v1/agents/{catalog_agent_id}/runtime-keepalive-consent")
+    def update_runtime_keepalive_consent_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = runtime_keepalive_handlers.update_consent(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
+    @app.get("/v1/agents/{catalog_agent_id}/runtime-keepalive-consent")
+    def read_runtime_keepalive_consent_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = runtime_keepalive_handlers.read_consent(
             db_path, catalog_agent_id, _cloud_payload({}, request)
         )
         result.pop("__no_store__", None)

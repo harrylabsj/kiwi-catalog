@@ -25,7 +25,9 @@ from unittest import mock
 
 from cryptography.fernet import Fernet
 
-from kiwi_catalog.core.errors import ValidationError
+from kiwi_catalog.api import auth as api_auth
+from kiwi_catalog.api.handlers import runtime_keepalive as keepalive_api
+from kiwi_catalog.core.errors import AuthError, ValidationError
 from kiwi_catalog.db.session import init_db
 from kiwi_catalog.services import runtime_access, runtime_keepalive
 
@@ -62,6 +64,7 @@ class KeepaliveTest(unittest.TestCase):
                 runtime_access.KEYS_ENV: json.dumps(self.keys),
                 runtime_access.ACTIVE_KEY_ENV: "key-v1",
                 runtime_access.CUSTODY_ENV: "1",
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret",
             },
             clear=False,
         )
@@ -125,6 +128,65 @@ class KeepaliveTest(unittest.TestCase):
             clock=lambda: _NOW,
             **kwargs,
         )
+
+    def _owner_payload(self, *, granted: bool, terms: str | None = None, merchant: str = _MERCHANT) -> dict:
+        return {
+            "owner_token": api_auth.owner_token(merchant),
+            "consent": {
+                "granted": granted,
+                "terms_version": terms if terms is not None else runtime_keepalive.TERMS_VERSION,
+            },
+        }
+
+    def test_owner_entry_requires_owner_token_and_explicit_consent(self) -> None:
+        with self.assertRaises(AuthError):
+            keepalive_api.update_consent(self.db_path, _AGENT, {"consent": {
+                "granted": True, "terms_version": runtime_keepalive.TERMS_VERSION}})
+        with self.assertRaises(AuthError):
+            keepalive_api.update_consent(
+                self.db_path, _AGENT, self._owner_payload(granted=True, merchant="mkt_other")
+            )
+        # Existing custody consent alone is not keepalive consent.
+        view = keepalive_api.read_consent(self.db_path, _AGENT, {"owner_token": api_auth.owner_token(_MERCHANT)})
+        self.assertFalse(view["granted"])
+        self.assertFalse(view["default_enabled"])
+        self.assertFalse(view["scheduler_enabled"])
+
+    def test_owner_grant_and_revoke_are_visible_and_stop_scheduler(self) -> None:
+        granted = keepalive_api.update_consent(self.db_path, _AGENT, self._owner_payload(granted=True))
+        self.assertTrue(granted["granted"])
+        read = keepalive_api.read_consent(self.db_path, _AGENT, {"owner_token": api_auth.owner_token(_MERCHANT)})
+        self.assertTrue(read["granted"])
+        self.assertEqual(read["scope"], runtime_keepalive.SCOPE)
+        self.assertIn("签名心跳", read["terms_text"])
+
+        gateway = MockGateway()
+        self._scheduler(gateway).run_once(now=_NOW)
+        self.assertEqual(len(gateway.calls), 1)
+
+        revoked = keepalive_api.update_consent(
+            self.db_path, _AGENT,
+            self._owner_payload(granted=False, terms="obsolete-terms"),
+        )
+        self.assertFalse(revoked["granted"])
+        read_after = keepalive_api.read_consent(self.db_path, _AGENT, {"owner_token": api_auth.owner_token(_MERCHANT)})
+        self.assertFalse(read_after["granted"])
+        self.assertFalse(runtime_keepalive.enabled(self.conn, _AGENT))
+        self._scheduler(gateway).run_once(now="2026-11-04T04:20:00+00:00")
+        self.assertEqual(len(gateway.calls), 1)
+
+    def test_old_terms_are_rejected_for_grant_but_revoke_stays_available(self) -> None:
+        with self.assertRaises(ValidationError):
+            keepalive_api.update_consent(
+                self.db_path, _AGENT,
+                self._owner_payload(granted=True, terms="old-keepalive-terms"),
+            )
+        granted = keepalive_api.update_consent(self.db_path, _AGENT, self._owner_payload(granted=True))
+        self.assertTrue(granted["granted"])
+        revoked = keepalive_api.update_consent(
+            self.db_path, _AGENT, self._owner_payload(granted=False, terms="old-keepalive-terms")
+        )
+        self.assertFalse(revoked["granted"])
 
     def test_default_is_off_and_consent_is_separate_and_revocable(self) -> None:
         gateway = MockGateway()

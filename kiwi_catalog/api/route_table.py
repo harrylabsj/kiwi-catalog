@@ -33,6 +33,7 @@ from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
 from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
+from kiwi_catalog.api.handlers import runtime_keepalive as runtime_keepalive_handlers
 from kiwi_catalog.api.handlers import cloud_card as cloud_card_handlers
 from kiwi_catalog.api.handlers import connector_identity as connector_identity_handlers
 from kiwi_catalog.api.handlers import hosted_publication as hosted_publication_handlers
@@ -202,6 +203,20 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"PUT"},
+        "/v1/agents/{catalog_agent_id}/runtime-keepalive-consent",
+        lambda db_path, payload, query, catalog_agent_id: runtime_keepalive_handlers.update_consent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/runtime-keepalive-consent",
+        lambda db_path, payload, query, catalog_agent_id: runtime_keepalive_handlers.read_consent(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
         {"POST"},
         "/v1/agents/{catalog_agent_id}/public-inquiry",
         lambda db_path, payload, query, catalog_agent_id: public_inquiry_handlers.forward(
