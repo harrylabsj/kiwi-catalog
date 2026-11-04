@@ -628,7 +628,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.update_consent(
-            db_path, catalog_agent_id, _cloud_payload(payload, request)
+            db_path, catalog_agent_id, _account_payload(payload, request)
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})
@@ -638,7 +638,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.read_consent(
-            db_path, catalog_agent_id, _cloud_payload({}, request)
+            db_path, catalog_agent_id, _account_payload({}, request)
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})

@@ -25,7 +25,7 @@ from typing import Any
 
 from kiwi_catalog.agent_catalog.catalog_audit import append_catalog_audit
 from kiwi_catalog.api import auth as api_auth
-from kiwi_catalog.core.errors import NotFoundError, ValidationError
+from kiwi_catalog.core.errors import AuthError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import runtime_keepalive
 
@@ -47,6 +47,22 @@ def _agent_merchant(conn: Any, agent_id: str) -> str:
     return merchant_id
 
 
+def _require_owner(conn: Any, payload: dict[str, Any], merchant_id: str) -> None:
+    """Owner token first; otherwise the existing Workbench account session."""
+    presented = str(payload.get("owner_token") or payload.get("_auth_token") or "")
+    if presented:
+        api_auth.require_merchant_token(payload, merchant_id, conn)
+        return
+    from kiwi_catalog.api.handlers.merchant_publications import _require_session_account
+
+    try:
+        account = _require_session_account(conn, payload)
+    except AuthError:
+        raise
+    if str(account.get("merchant_id") or "") != merchant_id:
+        raise AuthError("invalid session for merchant")
+
+
 def _body(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         str(key): value
@@ -60,7 +76,7 @@ def read_consent(db_path: str | Path, catalog_agent_id: str, payload: dict[str, 
     agent_id = str(catalog_agent_id or "").strip()
     with db_session(db_path) as conn:
         merchant_id = _agent_merchant(conn, agent_id)
-        api_auth.require_merchant_token(payload, merchant_id, conn)
+        _require_owner(conn, payload, merchant_id)
         row = conn.execute(
             "select merchant_id,terms_version,granted_at,revoked_at"
             " from runtime_keepalive_consents where catalog_agent_id=?",
@@ -98,7 +114,7 @@ def update_consent(db_path: str | Path, catalog_agent_id: str, payload: dict[str
         raise ValidationError("consent.terms_version is required")
     with db_session(db_path) as conn:
         merchant_id = _agent_merchant(conn, agent_id)
-        api_auth.require_merchant_token(payload, merchant_id, conn)
+        _require_owner(conn, payload, merchant_id)
         if consent["granted"]:
             runtime_keepalive.grant(
                 conn,

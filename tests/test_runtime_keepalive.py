@@ -152,6 +152,15 @@ class KeepaliveTest(unittest.TestCase):
         self.assertFalse(view["default_enabled"])
         self.assertFalse(view["scheduler_enabled"])
 
+    def test_workbench_session_can_read_without_owner_token(self) -> None:
+        with mock.patch(
+            "kiwi_catalog.api.handlers.merchant_publications._require_session_account",
+            return_value={"merchant_id": _MERCHANT, "account_id": "acct-1"},
+        ):
+            view = keepalive_api.read_consent(self.db_path, _AGENT, {})
+        self.assertFalse(view["granted"])
+        self.assertEqual(view["scope"], runtime_keepalive.SCOPE)
+
     def test_owner_grant_and_revoke_are_visible_and_stop_scheduler(self) -> None:
         granted = keepalive_api.update_consent(self.db_path, _AGENT, self._owner_payload(granted=True))
         self.assertTrue(granted["granted"])
