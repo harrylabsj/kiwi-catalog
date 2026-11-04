@@ -10,12 +10,23 @@
 | kiwi-catalog | `0.5.15`（PyPI 已占用到 0.5.14，0.5.15 未占用） | `dist/kiwi_catalog-0.5.15-py3-none-any.whl` / `.tar.gz` |
 | kiwi-catalog-admin | `0.2.13`（私有仓，不发布 PyPI） | `dist/kiwi_catalog_admin-0.2.13-py3-none-any.whl` |
 
+admin 0.2.13 的依赖下限已收紧为：
+
+```text
+kiwi-catalog[api]>=0.5.15,<0.6
+```
+
+0.5.1–0.5.14 没有保活 consent 端点，不能与本 UI 搭配；`test_dependency_floor.py`
+和 wheel metadata 都必须显示该下限。
+
 依赖锁：
 
 - `kiwi-catalog/uv.lock` 已更新到本项目 `0.5.15`；
 - `kiwi-catalog-admin/uv.lock` 仍解析到已发布的 core `0.5.14`，因为 `0.5.15`
-  尚未发布。**发布 core 后**必须在 admin 仓重新执行 `uv lock`，确认
-  `kiwi-catalog` 为 `0.5.15`，再跑全量测试并重建 admin 制品。
+  尚未发布；该文件在 admin 仓被 `.gitignore` 忽略，不是发布制品。**发布 core 后**
+  必须在 admin 仓重新执行 `uv lock`，确认解析结果为 `0.5.15`，再跑全量测试、
+  重建 admin wheel 并检查 wheel `METADATA` 中的
+  `Requires-Dist: kiwi-catalog[api]<0.6,>=0.5.15`。
 
 ## 当前 schema 与升级
 
@@ -142,7 +153,51 @@ systemctl restart kiwi-catalog
    该竞态窗口可接受。
 8. **回滚演练**：在预生产用备份恢复并回装旧包验证。
 
+## 本地离线安装与 HTTP 联调（已做）
+
+使用已构建的 core 0.5.15 wheel 和 admin 0.2.13 wheel，在独立临时 venv 中：
+
+```bash
+pip install --no-index --no-deps \
+  kiwi_catalog-0.5.15-py3-none-any.whl \
+  kiwi_catalog_admin-0.2.13-py3-none-any.whl
+```
+
+实测：
+
+```text
+kiwi-catalog 0.5.15（从 wheel 安装）
+kiwi-catalog-admin 0.2.13（从 wheel 安装）
+FastAPI 0.141.1 / uvicorn 0.35.0
+```
+
+启动真实 uvicorn 后，用登录 session cookie 请求：
+
+```text
+GET  /portal/account/card                         200，包含 keepalive_card
+GET  /v1/agents/{id}/runtime-keepalive-consent    200，granted=false
+PUT  /v1/agents/{id}/runtime-keepalive-consent    200，granted=true
+PUT  /v1/agents/{id}/runtime-keepalive-consent    200，granted=false
+```
+
+服务收到 SIGTERM 后日志显示 application shutdown complete；日志未出现
+`sharecode=`、session token 或分享码。FastAPI 生命周期测试同时覆盖默认不启动
+线程、显式配置启动单线程、退出后线程停止。
+
+## 备份恢复测试
+
+本地已实测 v48→v49：
+
+```text
+test_v48_to_v49_preserves_rows_and_adds_state      passed
+test_backup_restores_v48_after_v49_upgrade         passed
+```
+
+备份必须是完整 SQLite 文件（停机 `.backup` + WAL checkpoint），恢复后再次
+`PRAGMA integrity_check`；不要只回滚 Python 包。
+
 ## 制品哈希
+
 
 记录 `dist/*` 的 SHA-256 后再发布；本地方案生成值见发布记录，不以本文件的
 静态文本替代重新计算。
