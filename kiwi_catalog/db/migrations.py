@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 47
+CURRENT_SCHEMA_VERSION = 48
 
 
 @dataclass(frozen=True)
@@ -1542,6 +1542,27 @@ def migration_047_public_inquiry_consent(conn: sqlite3.Connection) -> None:
     ) without rowid""")
 
 
+
+def migration_048_runtime_keepalive_consents(conn: sqlite3.Connection) -> None:
+    """Separate, default-off consent for catalog-side sharecode keepalive.
+
+    Directory custody consent and public-inquiry consent do not authorize
+    periodic keepalive. Only an explicit merchant grant for this scope is used.
+    """
+    conn.execute(
+        """
+create table if not exists runtime_keepalive_consents (
+        catalog_agent_id text primary key,
+        merchant_id text not null,
+        scope text not null check(scope = 'directory_keepalive'),
+        terms_version text not null,
+        granted_at text not null,
+        revoked_at text not null default ''
+    ) without rowid
+    """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1590,6 +1611,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(45, "runtime_access_revoked_reason", migration_045_runtime_access_revoked_reason),
     Migration(46, "runtime_access_faults", migration_046_runtime_access_faults),
     Migration(47, "public_inquiry_consent", migration_047_public_inquiry_consent),
+    Migration(48, "runtime_keepalive_consents", migration_048_runtime_keepalive_consents),
 )
 
 

@@ -875,6 +875,16 @@ create table if not exists runtime_access_consents (
         revoked_at text not null default ''
     ) without rowid
     """,
+    """
+create table if not exists runtime_keepalive_consents (
+        catalog_agent_id text primary key,
+        merchant_id text not null,
+        scope text not null check(scope = 'directory_keepalive'),
+        terms_version text not null,
+        granted_at text not null,
+        revoked_at text not null default ''
+    ) without rowid
+    """,
 ]
 
 
