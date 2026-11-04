@@ -740,6 +740,37 @@ class ProfileFetcher:
         record_profile_fetch(_time.monotonic() - start, ok=result.is_success or result.is_not_modified)
         return result
 
+    def fetch_no_redirect(self, url: str, *, timeout: float = 5.0) -> FetchResult:
+        """SSRF-safe GET that rejects every redirect and returns the raw status.
+
+        Used only for a fixed, reviewed liveness path. The caller must still
+        treat the HTTP result as reachability evidence, not as a heartbeat.
+        """
+        import time as _time
+
+        parsed = self._validate_url(url)
+        scheme, hostname = parsed.scheme, parsed.hostname
+        assert hostname is not None
+        port = _port_of(parsed, scheme)
+        if self._policy.require_https and scheme != "https":
+            raise SSRFBlockError("HTTPS is required")
+        _validate_port(port, self._policy.allowed_ports)
+        deadline = _time.monotonic() + _MAX_FETCH_DURATION_SECONDS
+        verified_ip = _resolve_and_validate(hostname, port, deadline=deadline)
+        return self._make_request(
+            url,
+            str(verified_ip),
+            hostname,
+            port,
+            None,
+            None,
+            _time.time(),
+            method="GET",
+            timeout=min(float(timeout), self._timeout),
+            redirect_limit=0,
+            deadline=deadline,
+        )
+
     def post_json(self, url: str, body: dict[str, Any], *, timeout: float = 5.0) -> FetchResult:
         """SSRF-safe bounded JSON POST; redirects are rejected for possession challenges."""
         parsed = self._validate_url(url)

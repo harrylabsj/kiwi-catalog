@@ -32,7 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Collection, Protocol
+from urllib.parse import urlsplit
 
 from kiwi_catalog.a2a.endpoint_policy import assert_safe_binding_endpoint
 from kiwi_catalog.agent_catalog.freshness import effective_freshness_state
@@ -161,6 +162,71 @@ def enabled(conn: sqlite3.Connection, catalog_agent_id: str) -> bool:
     if str(agent[1] or "") != "active" or str(agent[2] or "active") != "active":
         return False
     return _current_binding(conn, catalog_agent_id, merchant_id)
+
+
+class KeepaliveDeliveryError(RuntimeError):
+    """Fixed, redacted failure from a keepalive transport."""
+
+
+class NoRedirectFetcher(Protocol):
+    def fetch_no_redirect(self, url: str, *, timeout: float = 5.0) -> Any: ...
+
+
+class WorkBuddyKeepaliveGateway:
+    """Verified-path adapter for the evidence-backed ``GET /merchant/`` probe.
+
+    The target host must be explicitly allowlisted by the caller. The URL is
+    fixed to ``/merchant/``; no user path, query, redirect, cookie or header is
+    accepted. DNS pinning, private-range rejection and response bounds are
+    delegated to ProfileFetcher.fetch_no_redirect.
+    """
+
+    def __init__(
+        self,
+        *,
+        trusted_hosts: Collection[str],
+        fetcher: NoRedirectFetcher | None = None,
+        timeout: float = 5.0,
+    ) -> None:
+        hosts = frozenset(str(host).strip().lower() for host in trusted_hosts)
+        if not hosts or any(not host or "*" in host or "/" in host for host in hosts):
+            raise ValidationError("keepalive trusted_hosts must be explicit hostnames")
+        self.trusted_hosts = hosts
+        self.timeout = timeout
+        self._fetcher = fetcher
+
+    def wake(self, *, agent_id: str, runtime_origin: str, secret: str) -> str:
+        try:
+            parsed = urlsplit(runtime_origin)
+            if (
+                parsed.scheme != "https"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query != ""
+                or parsed.fragment != ""
+                or parsed.path not in ("", "/")
+                or parsed.hostname is None
+                or parsed.hostname.lower() not in self.trusted_hosts
+            ):
+                raise KeepaliveDeliveryError("origin_not_trusted")
+            target = runtime_access.append_share_parameter(
+                runtime_origin.rstrip("/") + "/merchant/", secret
+            )
+            fetcher = self._fetcher
+            if fetcher is None:
+                from kiwi_catalog.discovery.fetcher import ProfileFetcher
+                from kiwi_catalog.discovery.trust import TrustPolicy
+
+                fetcher = ProfileFetcher(TrustPolicy.defaults(), timeout=self.timeout)
+            result = fetcher.fetch_no_redirect(target, timeout=self.timeout)
+            if int(getattr(result, "status_code", 0)) != 200:
+                raise KeepaliveDeliveryError("delivery_failed")
+            return "request_sent"
+        except KeepaliveDeliveryError:
+            raise
+        except Exception:
+            # Never include URL, sharecode or upstream text.
+            raise KeepaliveDeliveryError("delivery_failed") from None
 
 
 @dataclass(frozen=True)
