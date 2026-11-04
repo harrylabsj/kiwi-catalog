@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 48
+CURRENT_SCHEMA_VERSION = 49
 
 
 @dataclass(frozen=True)
@@ -1563,6 +1563,36 @@ create table if not exists runtime_keepalive_consents (
     )
 
 
+
+def migration_049_runtime_keepalive_state(conn: sqlite3.Connection) -> None:
+    """Persist cross-process keepalive throttle/claims across restarts."""
+    tables = {
+        str(row[0])
+        for row in conn.execute("select name from sqlite_master where type = 'table'")
+    }
+    if "runtime_keepalive_consents" in tables:
+        columns = {
+            str(row[1])
+            for row in conn.execute("pragma table_info(runtime_keepalive_consents)").fetchall()
+        }
+        if "last_attempt_at" not in columns:
+            conn.execute(
+                "alter table runtime_keepalive_consents"
+                " add column last_attempt_at text not null default ''"
+            )
+    conn.execute(
+        """
+create table if not exists runtime_keepalive_state (
+        singleton integer primary key check(singleton = 1),
+        last_tick_at text not null default ''
+    ) without rowid
+    """
+    )
+    conn.execute(
+        "insert or ignore into runtime_keepalive_state(singleton,last_tick_at) values(1,'')"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1612,6 +1642,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(46, "runtime_access_faults", migration_046_runtime_access_faults),
     Migration(47, "public_inquiry_consent", migration_047_public_inquiry_consent),
     Migration(48, "runtime_keepalive_consents", migration_048_runtime_keepalive_consents),
+    Migration(49, "runtime_keepalive_state", migration_049_runtime_keepalive_state),
 )
 
 

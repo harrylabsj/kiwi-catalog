@@ -882,7 +882,14 @@ create table if not exists runtime_keepalive_consents (
         scope text not null check(scope = 'directory_keepalive'),
         terms_version text not null,
         granted_at text not null,
-        revoked_at text not null default ''
+        revoked_at text not null default '',
+        last_attempt_at text not null default ''
+    ) without rowid
+    """,
+    """
+create table if not exists runtime_keepalive_state (
+        singleton integer primary key check(singleton = 1),
+        last_tick_at text not null default ''
     ) without rowid
     """,
 ]

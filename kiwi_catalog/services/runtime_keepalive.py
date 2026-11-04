@@ -26,6 +26,7 @@ runtime's signed heartbeat endpoint can make an agent fresh again.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
@@ -122,7 +123,8 @@ def grant(
         " values (?,?,?,?,?,'')"
         " on conflict(catalog_agent_id) do update set"
         " merchant_id=excluded.merchant_id,scope=excluded.scope,"
-        " terms_version=excluded.terms_version,granted_at=excluded.granted_at,revoked_at=''",
+        " terms_version=excluded.terms_version,granted_at=excluded.granted_at,revoked_at='',"
+        " last_attempt_at=''",
         (catalog_agent_id, merchant_id, SCOPE, TERMS_VERSION, stamp),
     )
 
@@ -286,8 +288,6 @@ class KeepaliveScheduler:
         self.max_agents = max_agents
         self.clock = clock
         self._lock = threading.Lock()
-        self._last_tick: datetime | None = None
-        self._last_attempt: dict[str, datetime] = {}
 
     def run_once(self, *, now: str | None = None) -> KeepaliveTick:
         if not self.enabled:
@@ -299,29 +299,24 @@ class KeepaliveScheduler:
         try:
             stamp = now or self.clock()
             current = _parse(stamp)
-            if self._last_tick is not None and current < self._last_tick + timedelta(seconds=self.interval_seconds):
+            if not self._claim_tick(stamp, current):
                 return KeepaliveTick(True, False, 0, 0, 0, "interval")
-            self._last_tick = current
-            candidates = self._candidates(stamp)
-            ready = [
-                candidate for candidate in candidates
-                if self._cooldown_elapsed(candidate.agent_id, current)
-            ]
-            if not ready:
-                return KeepaliveTick(True, True, len(candidates), 0, 0, "cooldown")
-            for candidate in ready:
-                self._last_attempt[candidate.agent_id] = current
-            with ThreadPoolExecutor(max_workers=self.max_concurrency) as pool:
-                futures = [
-                    pool.submit(self._wake, candidate)
-                    for candidate in ready
-                ]
+            candidates = self._candidates(stamp, current)
+            if not candidates:
+                return KeepaliveTick(True, True, 0, 0, 0, "cooldown")
+            executor = ThreadPoolExecutor(max_workers=self.max_concurrency)
+            try:
+                futures = [executor.submit(self._wake, candidate) for candidate in candidates]
                 results: list[bool] = []
                 for future in futures:
                     try:
                         results.append(future.result(timeout=5))
                     except (FutureTimeout, Exception):
                         results.append(False)
+            finally:
+                # A timed-out worker is bounded by its own gateway timeout; do
+                # not make a new tick wait for it and accumulate scheduling work.
+                executor.shutdown(wait=False, cancel_futures=True)
             return KeepaliveTick(
                 True,
                 True,
@@ -332,12 +327,25 @@ class KeepaliveScheduler:
         finally:
             self._lock.release()
 
-    def _cooldown_elapsed(self, agent_id: str, current: datetime) -> bool:
-        last = self._last_attempt.get(agent_id)
-        return last is None or current >= last + timedelta(seconds=self.per_agent_cooldown_seconds)
+    def _claim_tick(self, stamp: str, current: datetime) -> bool:
+        cutoff = (current - timedelta(seconds=self.interval_seconds)).replace(microsecond=0).isoformat()
+        with db_session(self.db_path) as conn:
+            result = conn.execute(
+                "update runtime_keepalive_state set last_tick_at=?"
+                " where singleton=1 and (last_tick_at='' or last_tick_at<=?)",
+                (stamp, cutoff),
+            )
+            return result.rowcount == 1
 
     def _wake(self, candidate: Candidate) -> bool:
         if self.gateway is None:
+            return False
+        # Narrow the revoke race: consent/binding may have changed after claim.
+        try:
+            with db_session(self.db_path) as conn:
+                if not enabled(conn, candidate.agent_id):
+                    return False
+        except Exception:
             return False
         try:
             result = self.gateway.wake(
@@ -349,7 +357,8 @@ class KeepaliveScheduler:
         except Exception:
             return False
 
-    def _candidates(self, now: str) -> list[Candidate]:
+    def _candidates(self, now: str, current: datetime) -> list[Candidate]:
+        cutoff = (current - timedelta(seconds=self.per_agent_cooldown_seconds)).replace(microsecond=0).isoformat()
         with db_session(self.db_path) as conn:
             rows = conn.execute(
                 "select k.catalog_agent_id,k.merchant_id,b.runtime_origin,"
@@ -375,6 +384,14 @@ class KeepaliveScheduler:
                     assert_safe_binding_endpoint(str(row["runtime_origin"]), field="runtime_origin")
                 except Exception:
                     continue
+                claim = conn.execute(
+                    "update runtime_keepalive_consents set last_attempt_at=?"
+                    " where catalog_agent_id=? and revoked_at='' and terms_version=?"
+                    " and (last_attempt_at='' or last_attempt_at<=?)",
+                    (now, agent_id, TERMS_VERSION, cutoff),
+                )
+                if claim.rowcount != 1:
+                    continue
                 if not enabled(conn, agent_id):
                     continue
                 record = {"freshness_state": row["freshness_state"], "last_seen_at": row["last_seen_at"]}
@@ -398,6 +415,34 @@ class KeepaliveScheduler:
                     )
                 )
         return candidates
+
+
+def scheduler_from_env(
+    *,
+    db_path: str | Path,
+    gateway: KeepaliveGateway | None,
+    env: Any = None,
+) -> KeepaliveScheduler | None:
+    """Explicit production opt-in; returns None unless the flag is exactly on.
+
+    No timer is started here. An operator/caller must invoke ``run_once`` so
+    deployment and restart policy remain explicit.
+    """
+    values = os.environ if env is None else env
+    enabled = str(values.get("KIWI_CATALOG_KEEPALIVE_ENABLED") or "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return None
+    return KeepaliveScheduler(
+        db_path=db_path,
+        gateway=gateway,
+        enabled=True,
+        interval_seconds=int(values.get("KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS") or 900),
+        per_agent_cooldown_seconds=int(
+            values.get("KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS") or 900
+        ),
+        max_concurrency=int(values.get("KIWI_CATALOG_KEEPALIVE_CONCURRENCY") or 1),
+        max_agents=int(values.get("KIWI_CATALOG_KEEPALIVE_MAX_AGENTS") or 10),
+    )
 
 
 def _parse(value: str) -> datetime:

@@ -209,7 +209,7 @@ class KeepaliveTest(unittest.TestCase):
             ).run_once(now=_NOW).wake_requested
         )
         self._grant()
-        self._scheduler(gateway).run_once(now=_NOW)
+        self._scheduler(gateway).run_once(now="2026-11-04T04:15:00+00:00")
         self.assertEqual(len(gateway.calls), 1)
 
         runtime_keepalive.revoke(self.conn, catalog_agent_id=_AGENT, merchant_id=_MERCHANT)
@@ -231,6 +231,17 @@ class KeepaliveTest(unittest.TestCase):
         self.conn.commit()
         second = self._scheduler(gateway).run_once(now="2026-11-04T04:10:00+00:00")
         self.assertEqual(second.wake_requested, 0)
+        self.assertEqual(len(gateway.calls), 1)
+
+    def test_two_processes_share_persistent_tick_claim(self) -> None:
+        self._grant()
+        gateway = MockGateway()
+        first = self._scheduler(gateway)
+        second = self._scheduler(gateway)
+        a = first.run_once(now=_NOW)
+        b = second.run_once(now=_NOW)
+        self.assertEqual(a.wake_requested, 1)
+        self.assertEqual(b.skipped, "interval")
         self.assertEqual(len(gateway.calls), 1)
 
     def test_per_agent_cooldown_prevents_repeated_requests(self) -> None:
@@ -296,7 +307,9 @@ class KeepaliveTest(unittest.TestCase):
             (second, "mkt_2", "directory_custody", runtime_access.CONSENT_TERMS_VERSION, _NOW),
         )
         self.conn.execute(
-            "insert into runtime_keepalive_consents values (?,?,?,?,?,'')",
+            "insert into runtime_keepalive_consents"
+            " (catalog_agent_id,merchant_id,scope,terms_version,granted_at,revoked_at)"
+            " values (?,?,?,?,?,'')",
             (second, "mkt_2", runtime_keepalive.SCOPE, runtime_keepalive.TERMS_VERSION, _NOW),
         )
         self._grant()
@@ -305,6 +318,34 @@ class KeepaliveTest(unittest.TestCase):
         tick = self._scheduler(gateway, max_concurrency=2).run_once(now=_NOW)
         self.assertEqual(tick.wake_requested, 2)
         self.assertEqual(len(gateway.calls), 2)
+
+    def test_scheduler_from_env_is_default_off_and_explicitly_configured(self) -> None:
+        gateway = MockGateway()
+        self.assertIsNone(
+            runtime_keepalive.scheduler_from_env(db_path=self.db_path, gateway=gateway, env={})
+        )
+        scheduler = runtime_keepalive.scheduler_from_env(
+            db_path=self.db_path,
+            gateway=gateway,
+            env={
+                "KIWI_CATALOG_KEEPALIVE_ENABLED": "1",
+                "KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS": "300",
+                "KIWI_CATALOG_KEEPALIVE_COOLDOWN_SECONDS": "900",
+                "KIWI_CATALOG_KEEPALIVE_CONCURRENCY": "2",
+            },
+        )
+        self.assertIsNotNone(scheduler)
+        self.assertTrue(scheduler.enabled)
+        self.assertEqual(scheduler.interval_seconds, 300)
+        with self.assertRaises(ValidationError):
+            runtime_keepalive.scheduler_from_env(
+                db_path=self.db_path,
+                gateway=gateway,
+                env={
+                    "KIWI_CATALOG_KEEPALIVE_ENABLED": "1",
+                    "KIWI_CATALOG_KEEPALIVE_INTERVAL_SECONDS": "60",
+                },
+            )
 
     def test_wrong_terms_are_rejected(self) -> None:
         with self.assertRaises(ValidationError):
