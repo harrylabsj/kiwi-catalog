@@ -5,6 +5,7 @@
 - **目录侧 WorkBuddy 保活（默认关闭）**：新增商家独立授权 `directory_keepalive`、商家工作台授权/撤销、受控调度器、真实 `/merchant/` 只读适配器；探测在 TTL 前 300 秒开始，interval/cooldown 由 TTL 派生，避免先离线后探测。
 - **公平分页与持久限流**：schema v49 增加 `runtime_keepalive_state.last_tick_at` 与 `runtime_keepalive_consents.last_attempt_at`；多进程共享 claim、重启恢复；fresh 行不写 claim，避免推迟恢复；分页扫描避免 fresh/无时间戳商家饿死 stale/临期商家。
 - **安全边界**：固定可信 host、固定 `/merchant/`、无重定向、DNS 固定、错误脱敏、探测不改在线状态；scheduler 默认关闭，必须显式配置 `KIWI_CATALOG_KEEPALIVE_ENABLED=1` 与 `KIWI_CATALOG_KEEPALIVE_TRUSTED_HOSTS`。
+- **商家账号认证限流持久化**：登录、注册、验证码、重发和找回密码的失败尝试改为独立连接先提交计数，避免失败请求回滚把限流计数一并抹掉；计数写在业务写入之前，存储失败 fail-closed，不签发会话。双栈回归覆盖并发、限流窗口、FastAPI/fallback。
 - **部署约束（breaking）**：schema v49 在旧包中无法打开；升级后只能通过备份恢复回滚，不能回滚到旧包。
 
 ## 0.5.14 — 2026-11-03
