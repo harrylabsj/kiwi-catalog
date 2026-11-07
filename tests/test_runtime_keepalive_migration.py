@@ -42,6 +42,85 @@ class RuntimeKeepaliveMigrationTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def _v47_database(self, path: Path) -> None:
+        conn = sqlite3.connect(path)
+        try:
+            init_db(conn)
+            conn.execute(
+                "insert into catalog_agents"
+                " (catalog_agent_id,merchant_id,display_name,source_type,lifecycle_status,"
+                " verification_status,freshness_state,administrative_state,first_seen_at,"
+                " last_seen_at,created_at,updated_at)"
+                " values ('cagt_v47','mkt_v47','v47','hosted','active','commerce_verified',"
+                " 'fresh','active','2026-11-01T00:00:00+00:00','2026-11-01T00:00:00+00:00',"
+                " '2026-11-01T00:00:00+00:00','2026-11-01T00:00:00+00:00')"
+            )
+            conn.execute(
+                "insert into runtime_access_consents values"
+                " ('cagt_v47','mkt_v47','directory_custody',"
+                " 'workbuddy-share-v1-2026-10-27','2026-11-01T00:00:00+00:00','')"
+            )
+            conn.execute(
+                "insert into public_inquiry_consents values"
+                " ('cagt_v47','mkt_v47','binding-v47','open-inquiry-v1',"
+                " '2026-11-01T00:00:00+00:00','')"
+            )
+            # v47 did not have either keepalive table.
+            conn.execute("drop table runtime_keepalive_consents")
+            conn.execute("drop table runtime_keepalive_state")
+            conn.execute("pragma user_version = 47")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_v47_to_v49_preserves_existing_authorizations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "catalog.sqlite"
+            backup_path = Path(tmp) / "catalog-v47.sqlite"
+            self._v47_database(path)
+            source = sqlite3.connect(path)
+            target = sqlite3.connect(backup_path)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+
+            conn = open_connection(path)
+            try:
+                self.assertEqual(conn.execute("pragma user_version").fetchone()[0], 49)
+                custody = conn.execute(
+                    "select merchant_id,terms_version from runtime_access_consents where catalog_agent_id='cagt_v47'"
+                ).fetchone()
+                self.assertEqual(custody["merchant_id"], "mkt_v47")
+                self.assertEqual(custody["terms_version"], "workbuddy-share-v1-2026-10-27")
+                inquiry = conn.execute(
+                    "select binding_id,terms_version from public_inquiry_consents where catalog_agent_id='cagt_v47'"
+                ).fetchone()
+                self.assertEqual(inquiry["binding_id"], "binding-v47")
+                self.assertEqual(inquiry["terms_version"], "open-inquiry-v1")
+                self.assertEqual(conn.execute("pragma integrity_check").fetchone()[0], "ok")
+            finally:
+                conn.close()
+
+            restored = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+            try:
+                self.assertEqual(restored.execute("pragma user_version").fetchone()[0], 47)
+                self.assertEqual(restored.execute("pragma integrity_check").fetchone()[0], "ok")
+                self.assertEqual(
+                    restored.execute(
+                        "select count(*) from runtime_access_consents where catalog_agent_id='cagt_v47'"
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertFalse(
+                    restored.execute(
+                        "select 1 from sqlite_master where type='table' and name='runtime_keepalive_consents'"
+                    ).fetchone()
+                )
+            finally:
+                restored.close()
+
     def test_v48_to_v49_preserves_rows_and_adds_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "catalog.sqlite"
