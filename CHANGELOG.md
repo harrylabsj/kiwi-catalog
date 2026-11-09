@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.16 — 2026-11-09
 
 - **账号注册来源（运营归因）**：schema v50 增加
   `merchant_accounts.registration_source`（白名单 `unknown/website/workbuddy/admin/partner/import`，
