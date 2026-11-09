@@ -30,7 +30,7 @@ owner token 双路径（`api/auth.py`）：
 
 | 表 | 用途 |
 | --- | --- |
-| `merchant_accounts` | 商家账号（email、PBKDF2 口令哈希、email_verified、merchant_name、phone、wechat） |
+| `merchant_accounts` | 商家账号（email、PBKDF2 口令哈希、email_verified、merchant_name、phone、wechat、registration_source） |
 | `account_sessions` | 登录会话（随机 session token，SHA-256 存储） |
 | `merchants` | 商家影子表（admin dashboard 只读；**注册即创建**——`register_account` 经 `ensure_merchant_id` 同步 `insert or ignore`，审批/Agent 注册兜底；存量账号会话解析懒回填） |
 | `merchant_applications` | 接入申请（merchant_id、状态 pending/approved/rejected、工单字段） |
@@ -65,7 +65,7 @@ owner token 双路径（`api/auth.py`）：
 | --- | --- |
 | `POST /v1/accounts/register/code` | **邮箱先行第一步**：为尚未注册的邮箱签发 6 位验证码（15 分钟）。邮箱已注册 → 409（明确提示，接受枚举代价换取 UX 清晰）。响应回显 `verification_code`（console 模式） |
 | `POST /v1/accounts/register/verify` | **第二步**：校验验证码 → 返回一次性 `verification_ticket`（15 分钟、单次使用）。失败一律同形 403，不区分"没发过码/码错/码过期" |
-| `POST /v1/accounts/register` | **第三步**：凭 `verification_ticket` 建号（**商家名称、电话必填** + 邮箱 + 密码 + 微信选填）→ 分配 merchant_id、影子 `merchants` 行和 free 商品方案（默认 20 个名额）→ **建号即 `email_verified=1`** 并自动登录（`__cookies__`）。ticket 缺失/过期 → 403；邮箱已注册 → 409 |
+| `POST /v1/accounts/register` | **第三步**：凭 `verification_ticket` 建号（**商家名称、电话必填** + 邮箱 + 密码 + 微信选填；可选 `source` 注册入口）→ 分配 merchant_id、影子 `merchants` 行和 free 商品方案（默认 20 个名额）→ **建号即 `email_verified=1`** 并自动登录（`__cookies__`）。ticket 缺失/过期 → 403；邮箱已注册 → 409 |
 | `POST /v1/accounts/login` | 校验 + 签发会话（`__cookies__` 透传）；邮箱未验证 → 403 |
 | `POST /v1/accounts/verify-email` | 验证码核验（通过后才可登录）。**legacy**：邮箱先行改造后不再有新账号处于未验证态，本端点只服务 2026-10-13 之前的存量账号 |
 | `POST /v1/accounts/resend-code` | 重发验证码。**legacy**：同上，且是存量未验证账号唯一的取码途径 |
@@ -102,6 +102,18 @@ POST /v1/accounts/register         {email, password, merchant_name, phone, wecha
   是一个没有凭据的能力，任何知道该邮箱的人都能在窗口内抢先建号并设自己的
   密码（账号接管）。ticket 只有真正读到过验证码的人持有。
 - 验证码邮件仍是 **fail-closed**：发不出去就整个事务回滚，不留半条待验证记录。
+
+### 3.1.2 注册来源（v50 起）
+
+`merchant_accounts.registration_source` 只记录**入口**，取值白名单
+`unknown | website | workbuddy | admin | partner | import`，缺省 `unknown`：
+
+- 官网注册页默认提交 `website`；
+- WorkBuddy 等入口使用 `/portal/register?src=workbuddy`（页面转成 `source`
+  隐藏提交），服务端只接受白名单值，白名单外 → 400；
+- 老客户端/直接调接口不传 `source` → `unknown`，不根据 Referer/UA 猜测；
+- 存量账号停留在 `unknown`，不做推断性回填；运营后台按「账号来源优先、
+  hosted 投影兜底 workbuddy」展示。
 
 ### 3.2 `/v1/merchants/*`（token 分发，owner/admin）
 

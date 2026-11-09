@@ -88,7 +88,7 @@ class RuntimeKeepaliveMigrationTest(unittest.TestCase):
 
             conn = open_connection(path)
             try:
-                self.assertEqual(conn.execute("pragma user_version").fetchone()[0], 49)
+                self.assertEqual(conn.execute("pragma user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
                 custody = conn.execute(
                     "select merchant_id,terms_version from runtime_access_consents where catalog_agent_id='cagt_v47'"
                 ).fetchone()
@@ -155,7 +155,7 @@ class RuntimeKeepaliveMigrationTest(unittest.TestCase):
                 source.close()
             upgraded = open_connection(path)
             try:
-                self.assertEqual(upgraded.execute("pragma user_version").fetchone()[0], 49)
+                self.assertEqual(upgraded.execute("pragma user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
             finally:
                 upgraded.close()
             restored = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)

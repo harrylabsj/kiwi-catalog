@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **账号注册来源（运营归因）**：schema v50 增加
+  `merchant_accounts.registration_source`（白名单 `unknown/website/workbuddy/admin/partner/import`，
+  默认 `unknown`）；`POST /v1/accounts/register` 接受可选 `source` 并在响应回显。
+  官网注册页默认 `website`，WorkBuddy 入口使用 `/portal/register?src=workbuddy`；
+  白名单外取值 400，缺省不猜 Referer/UA。运营后台商家列表与详情新增「注册来源」列，
+  账号来源缺失时用 hosted 投影兜底标 `workbuddy`，其余保持 `unknown`。
+- **部署约束（breaking）**：schema v50 在旧包中无法打开；升级后不能回滚到旧包。
+
 ## 0.5.15 — 2026-11-04
 
 - **目录侧 WorkBuddy 保活（默认关闭）**：新增商家独立授权 `directory_keepalive`、商家工作台授权/撤销、受控调度器、真实 `/merchant/` 只读适配器；探测在 TTL 前 300 秒开始，interval/cooldown 由 TTL 派生，避免先离线后探测。
