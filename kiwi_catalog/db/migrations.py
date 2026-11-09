@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 49
+CURRENT_SCHEMA_VERSION = 50
 
 
 @dataclass(frozen=True)
@@ -1593,6 +1593,22 @@ create table if not exists runtime_keepalive_state (
     )
 
 
+def migration_050_account_registration_source(conn: sqlite3.Connection) -> None:
+    """账号注册来源（运营归因）：区分官网 / WorkBuddy / 管理端 / 合作方 / 导入。
+
+    只记录**入口**，不推断：缺省 ``unknown``；服务端只接受白名单值（见
+    services.accounts.REGISTRATION_SOURCES），不信任任意 Referer/UA。存量账号
+    停留在 ``unknown``，不做猜测性回填。
+    """
+    if not _column_exists(conn, "merchant_accounts", "registration_source"):
+        conn.execute(
+            "alter table merchant_accounts"
+            " add column registration_source text not null default 'unknown'"
+            " check(registration_source in"
+            " ('unknown','website','workbuddy','admin','partner','import'))"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1643,6 +1659,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(47, "public_inquiry_consent", migration_047_public_inquiry_consent),
     Migration(48, "runtime_keepalive_consents", migration_048_runtime_keepalive_consents),
     Migration(49, "runtime_keepalive_state", migration_049_runtime_keepalive_state),
+    Migration(50, "account_registration_source", migration_050_account_registration_source),
 )
 
 

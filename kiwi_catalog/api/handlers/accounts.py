@@ -302,6 +302,9 @@ def register(
     # 执行，否则"商家名称必填"这类 400 会被 ticket 的 400 掩盖，商家看不出
     # 到底是哪一步不对。
     verification_ticket = str(payload.get("verification_ticket") or "").strip()
+    # 运营归因：只接受白名单入口值（register_account 内再校验一次）；
+    # 老客户端不传 → unknown，不猜测 Referer/UA。
+    registration_source = str(payload.get("source") or "").strip()
 
     with db_session(db_path) as conn:
         limit = _login_rate_limit_per_15min()
@@ -330,6 +333,7 @@ def register(
             phone=phone,
             wechat=wechat,
             verification_ticket=verification_ticket,
+            registration_source=registration_source,
         )
         session_token = accounts_service.create_session(
             conn, int(registered["account_id"])
@@ -339,6 +343,7 @@ def register(
             "account_id": registered["account_id"],
             "email": registered["email"],
             "email_verified": True,
+            "registration_source": registered["registration_source"],
             "__cookies__": [accounts_service.session_cookie_value(session_token)],
         }
     # 两封信都在事务提交之后发：账号已落库，发信失败不得影响注册

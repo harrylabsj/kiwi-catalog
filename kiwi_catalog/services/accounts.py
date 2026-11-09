@@ -58,6 +58,19 @@ from kiwi_catalog.services import merchant_tokens as tokens_service
 _LOGGER = logging.getLogger(__name__)
 
 _SESSION_TTL_DAYS = 7
+
+# 注册来源白名单（运营归因）：只记录**入口**，不做 Referer/UA 推断。
+REGISTRATION_SOURCES = ("unknown", "website", "workbuddy", "admin", "partner", "import")
+
+
+def normalize_registration_source(value: object) -> str:
+    """规范化注册来源；缺省 ``unknown``，白名单外一律拒绝（不静默落库）。"""
+    source = str(value or "").strip().lower()
+    if not source:
+        return "unknown"
+    if source not in REGISTRATION_SOURCES:
+        raise ValidationError(f"registration_source must be one of {REGISTRATION_SOURCES}")
+    return source
 _PBKDF2_ITERATIONS = 200_000
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
@@ -755,6 +768,7 @@ def register_account(
     phone: str = "",
     wechat: str = "",
     verification_ticket: str = "",
+    registration_source: str = "unknown",
 ) -> dict[str, Any]:
     """注册商家账号（邮箱 + 密码 + 商家名称 + 联系方式）→ 建账号 + 分配
     merchant_id + 影子 merchants 行。
@@ -793,6 +807,9 @@ def register_account(
         raise ValidationError("password must be at least 8 characters")
     if len(password) > 200:
         raise ValidationError("password too long")
+    # 来源白名单与字段校验同层：入口值由页面/合作方提供，服务端只认枚举，
+    # 不把任意 query/referer 字符串写进运营报表。
+    source = normalize_registration_source(registration_source)
 
     # ticket 校验放在输入校验之后：否则 400 会被 403 掩盖，商家看不出是
     # 字段填错还是验证过期。这里是**服务端**的唯一防线——页面上的字段解锁
@@ -811,9 +828,9 @@ def register_account(
         cursor = conn.execute(
             "insert into merchant_accounts"
             " (email, password_hash, status, merchant_name, phone, wechat,"
-            "  email_verified, created_at, updated_at)"
-            " values (?, ?, 'active', ?, ?, ?, 1, ?, ?)",
-            (email, hash_password(password), merchant_name, phone, wechat, now, now),
+            "  email_verified, registration_source, created_at, updated_at)"
+            " values (?, ?, 'active', ?, ?, ?, 1, ?, ?, ?)",
+            (email, hash_password(password), merchant_name, phone, wechat, source, now, now),
         )
     except sqlite3.IntegrityError as exc:
         # UNIQUE(email) 兜底：并发建号时先到的赢。IntegrityError 不是
@@ -843,6 +860,7 @@ def register_account(
         "merchant_id": merchant_id,
         "status": "active",  # 注册即商家；令牌状态单独看 token
         "email_verified": True,  # 邮箱先行：建号时验证已完成（ticket 已消费）
+        "registration_source": source,
     }
 
 
