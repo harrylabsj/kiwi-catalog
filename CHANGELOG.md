@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.5.16 — 2026-11-09
+## 0.5.17 — 2026-11-09
+
+> 0.5.16 已由旧源发布（不含本条目）；0.5.17 是包含注册来源的首个正式版本。
 
 - **账号注册来源（运营归因）**：schema v50 增加
   `merchant_accounts.registration_source`（白名单 `unknown/website/workbuddy/admin/partner/import`，
