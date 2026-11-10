@@ -503,6 +503,36 @@ class PublicInquiryRelayHardeningTest(unittest.TestCase):
         self.assertEqual(injected["_client_ip"], "127.0.0.1")  # 传输层直连对端,非伪造值
         self.assertEqual(seen["kwargs"], "none")  # 自定义 handler 不接收 trusted keys
 
+    # ── 契约不变量(docs/open-inquiry-transport-contract.md §3) ──────────
+    def test_contract_method_allowlist_and_response_shape(self) -> None:
+        """白名单外的方法不外发;多余顶层键或回显分享码一律固定 502。"""
+        unsupported = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "message/stream",
+                                  "params": {}}).encode()
+        for stack in ("fastapi", "fallback"):
+            with self.subTest(stack=stack, case="method"):
+                status, _payload, _h = self._relay(stack, unsupported)
+                self.assertEqual(status, 400)
+                self.assertEqual(self.calls, [])  # 未外发
+        cases = {
+            "extra-key": lambda target, raw, headers: FetchResult(
+                url=target, status_code=200, fetched_at=0.0,
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}, "extra": 1})),
+            "missing-both": lambda target, raw, headers: FetchResult(
+                url=target, status_code=200, fetched_at=0.0,
+                body=json.dumps({"jsonrpc": "2.0", "id": 1})),
+            "share-secret": lambda target, raw, headers: FetchResult(
+                url=target, status_code=200, fetched_at=0.0,
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"echo": SHARE_SECRET_V1}})),
+        }
+        for name, fetch in cases.items():
+            for stack in ("fastapi", "fallback"):
+                with self.subTest(case=name, stack=stack):
+                    status, payload, headers = self._relay(stack, _inquiry_body(f"c-{name}"), fetch=fetch)
+                    self.assertEqual(status, 502, payload)
+                    self.assertEqual(payload["error"]["code"], -32000)
+                    self.assertEqual(headers.get("cache-control"), "no-store")
+                    self.assertNotIn(SHARE_SECRET_V1, json.dumps(payload))
+
 
 if __name__ == "__main__":
     unittest.main()
