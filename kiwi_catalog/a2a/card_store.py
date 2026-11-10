@@ -317,20 +317,24 @@ def create_card_revision(
         (catalog_agent_id,),
     ).fetchone()
     revision = int(row["rev"]) + 1
-    conn.execute(
-        "insert into agent_card_versions"
-        " (catalog_agent_id, card_revision, wire_profile, canonical_bytes, digest, created_by, created_at)"
-        " values (?, ?, ?, ?, ?, ?, ?)",
-        (
-            catalog_agent_id,
-            revision,
-            WIRE_PROFILE,
-            _storage_json(card),
-            digest,
-            actor,
-            now,
-        ),
-    )
+    try:
+        conn.execute(
+            "insert into agent_card_versions"
+            " (catalog_agent_id, card_revision, wire_profile, canonical_bytes, digest, created_by, created_at)"
+            " values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                catalog_agent_id,
+                revision,
+                WIRE_PROFILE,
+                _storage_json(card),
+                digest,
+                actor,
+                now,
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        # 审查 P2：并发 max+1 撞唯一索引此前抛未类型化 500。映射为 409。
+        raise ConflictError("concurrent card revision allocation; retry") from exc
     return {"card_revision": revision, "card_digest": digest, "etag": compute_etag(card)}
 
 

@@ -192,9 +192,23 @@ def decrypt_merchant_token(encrypted: str) -> str:
 # ── 邮箱验证（验证码 + SMTP 发送）────────────────────────────────────────
 
 
+def assert_email_configuration() -> None:
+    """启动期校验：console 模式不得与 SMTP 同时配置（审查 C-13）。
+
+    console 会把验证码放进 HTTP 响应体；若部署同时有生产 SMTP 凭据，说明
+    模式误配，必须在启动时失败，而不是等第一个注册请求才 500。
+    """
+    mode = str(os.environ.get("KIWI_CATALOG_EMAIL_VERIFICATION_MODE") or "").strip().lower()
+    if mode == "console" and str(os.environ.get("KIWI_CATALOG_SMTP_HOST") or "").strip():
+        raise RuntimeError(
+            "refusing console email verification mode while KIWI_CATALOG_SMTP_HOST is configured"
+        )
+
+
 def _verification_mode() -> str:
     """邮件验证模式：smtp（生产发邮件）/ console（开发：验证码随注册响应
     返回）/ 其他或未配置 → fail-closed（注册拒绝，见 register_account）。"""
+    assert_email_configuration()
     return str(os.environ.get("KIWI_CATALOG_EMAIL_VERIFICATION_MODE") or "").strip().lower()
 
 
@@ -864,6 +878,20 @@ def register_account(
     }
 
 
+_DUMMY_PASSWORD_SALT = b"kiwi-catalog-dummy-login-salt"
+
+
+def dummy_verify_password(password: str) -> None:
+    """对未知邮箱执行一次同成本 PBKDF2（审查 P2：登录时序侧信道）。
+
+    邮箱不存在时直接返回会让登录耗时在 ~1ms 与 ~60-100ms 之间明显分层，可
+    远程枚举已注册邮箱。这里用固定盐跑同样的迭代次数，只丢弃结果。
+    """
+    hashlib.pbkdf2_hmac(
+        "sha256", str(password or "").encode("utf-8"), _DUMMY_PASSWORD_SALT, _PBKDF2_ITERATIONS
+    )
+
+
 def authenticate(conn: sqlite3.Connection, email: str, password: str) -> dict[str, Any] | None:
     """邮箱 + 密码校验；成功返回账号行 dict，失败返回 None。"""
     row = conn.execute(
@@ -871,6 +899,7 @@ def authenticate(conn: sqlite3.Connection, email: str, password: str) -> dict[st
         (str(email or "").strip().lower(),),
     ).fetchone()
     if row is None:
+        dummy_verify_password(password)
         return None
     if not verify_password(str(password or ""), str(row["password_hash"])):
         return None

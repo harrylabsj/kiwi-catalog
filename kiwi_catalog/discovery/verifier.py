@@ -32,6 +32,7 @@ network dependency is the SSRF-safe ``ProfileFetcher`` (W1), injected here.
 
 from __future__ import annotations
 
+import hmac
 import re
 import urllib.parse
 from collections.abc import Mapping
@@ -182,6 +183,12 @@ class VerificationEvidence:
 
 # ── HTTPS domain-control verification (§6) ──────────────────────────────────
 
+# 审查 P1-12：domain-control 的 well-known 200 只证明域名可达，不证明该
+# catalog_agent 行属于域名控制者。域名必须发布一份回指本行的一次性 challenge
+# 文件；文件路径与必需键是跨模块单一口径（services/domain_bindings.py 复用）。
+CHALLENGE_WELL_KNOWN_PATH = ".well-known/kiwi-catalog-agent.json"
+CHALLENGE_DOCUMENT_KEYS: tuple[str, ...] = ("catalog_agent_id", "challenge")
+
 
 class IdentityVerifier:
     """Prove HTTPS domain control over a catalog agent's canonical domain.
@@ -208,12 +215,23 @@ class IdentityVerifier:
         canonical_domain: str,
         *,
         declared: Mapping[str, str],
+        expected_catalog_agent_id: str = "",
+        challenge: str = "",
+        allow_unbound: bool = False,
+        unbound_reason: str = "legacy",
     ) -> VerificationEvidence:
         """Verify that *canonical_domain* controls its well-known locations.
 
         Args:
             canonical_domain: the agent's canonical domain (lowercase host).
             declared: mapping of profile kind -> declared URL (agent_card, ucp).
+            expected_catalog_agent_id: this catalog agent row's id.  The domain
+                must echo it from its challenge document (P1-12).
+            challenge: the one-time token issued for this row.
+            allow_unbound: skip the challenge file check.  Only for explicitly
+                trusted legacy bindings or non-self-registered source types;
+                secure by default (False → challenge required).
+            unbound_reason: evidence label when *allow_unbound* is set.
 
         Returns:
             ``VerificationEvidence`` with ``result == "passed"`` when HTTPS
@@ -268,6 +286,63 @@ class IdentityVerifier:
         details["well_known"] = well_known
         details["statuses"] = statuses
 
+        # 3. Bind the domain to *this* catalog agent row (审查 P1-12).
+        if allow_unbound:
+            # Legacy（升级前已通过）或运营方可信来源：保留旧语义，明确标注，
+            # 不让新规则把存量已验证记录突然打回。
+            details["domain_binding"] = unbound_reason
+            return VerificationEvidence(
+                verification_type="domain_control", result="passed", details=details
+            )
+
+        challenge_url = f"https://{canonical_domain}/{CHALLENGE_WELL_KNOWN_PATH}"
+        details["challenge_url"] = challenge_url
+        if not expected_catalog_agent_id or not challenge:
+            return _failed_evidence(
+                "domain_control",
+                "no domain-control challenge is issued for this catalog agent; "
+                f"operators must issue one and publish it at {challenge_url}",
+                details,
+            )
+        try:
+            challenge_result = self._fetcher.fetch(challenge_url)
+        except (FetchError, SSRFBlockError) as exc:
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge fetch failed at {challenge_url}: {exc}",
+                details,
+            )
+        if not challenge_result.is_success:
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge at {challenge_url} returned HTTP "
+                f"{challenge_result.status_code}",
+                details,
+            )
+        document = challenge_result.parsed
+        if not isinstance(document, dict):
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge at {challenge_url} is not a JSON object",
+                details,
+            )
+        published_agent_id = str(document.get("catalog_agent_id") or "")
+        published_challenge = str(document.get("challenge") or "")
+        if not hmac.compare_digest(published_agent_id.encode("utf-8"), str(expected_catalog_agent_id).encode("utf-8")):
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge at {challenge_url} does not reference "
+                f"catalog agent {expected_catalog_agent_id}",
+                details,
+            )
+        if not hmac.compare_digest(published_challenge.encode("utf-8"), str(challenge).encode("utf-8")):
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge token at {challenge_url} does not match "
+                "the issued challenge",
+                details,
+            )
+        details["domain_binding"] = "challenge"
         return VerificationEvidence(verification_type="domain_control", result="passed", details=details)
 
 

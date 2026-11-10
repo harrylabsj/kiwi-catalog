@@ -892,6 +892,26 @@ create table if not exists runtime_keepalive_state (
         last_tick_at text not null default ''
     ) without rowid
     """,
+    # v51 — domain-control 一次性挑战绑定（审查 P1-12）。well-known 200 只证明
+    # 域名可达，不证明该 catalog_agent 行属于域名控制者；验证时必须回指本行
+    # 的 challenge。state 语义见 services/domain_bindings.py。
+    """
+create table if not exists catalog_domain_bindings (
+        catalog_agent_id text primary key
+            references catalog_agents(catalog_agent_id) on delete cascade,
+        canonical_domain text not null,
+        state text not null default 'challenge_pending'
+            check(state in ('challenge_pending','verified','legacy')),
+        challenge text not null default '',
+        challenge_issued_at text not null default '',
+        bound_at text not null default '',
+        updated_at text not null
+    ) without rowid
+    """,
+    """
+create index if not exists idx_catalog_domain_bindings_domain
+        on catalog_domain_bindings(canonical_domain, state)
+    """,
 ]
 
 

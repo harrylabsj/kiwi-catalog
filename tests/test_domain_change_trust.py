@@ -244,7 +244,7 @@ class VerificationAuthorityConsistencyTest(unittest.TestCase):
 
         captured: dict[str, str] = {}
 
-        def _recording_domain_control(canonical: str, declared: dict | None = None) -> VerificationEvidence:
+        def _recording_domain_control(canonical: str, declared: dict | None = None, **kwargs) -> VerificationEvidence:
             captured["domain"] = canonical
             return VerificationEvidence(
                 verification_type="domain_control", result="passed", details={}, reason="mock"

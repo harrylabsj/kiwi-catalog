@@ -120,7 +120,7 @@ class VerificationTransactionTest(unittest.TestCase):
             other.commit()
             return profiles
 
-        def acquire(domain, declared=None):
+        def acquire(domain, declared=None, **kwargs):
             domains.append(domain)
             other.execute(
                 "UPDATE catalog_agents SET canonical_domain='slow.example' WHERE catalog_agent_id=?", (self.agent,)
@@ -148,7 +148,7 @@ class VerificationTransactionTest(unittest.TestCase):
                 fetch.release.set()
                 service = VerificationService(c, fetcher=fetch)
 
-                def acquire(domain, declared=None):
+                def acquire(domain, declared=None, **kwargs):
                     self.assertFalse(c.in_transaction)
                     if mutation == "endpoint":
                         other.execute(
@@ -201,7 +201,7 @@ class VerificationTransactionTest(unittest.TestCase):
         fetch.release.set()
         service = VerificationService(c, fetcher=fetch)
 
-        def acquire(domain, declared=None):
+        def acquire(domain, declared=None, **kwargs):
             other.execute(
                 "UPDATE agent_endpoints SET url='https://slow.example/changed.json' WHERE catalog_agent_id=? AND kind='agent_card'",
                 (self.agent,),

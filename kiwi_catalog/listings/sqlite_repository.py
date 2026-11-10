@@ -274,6 +274,15 @@ def expire_stale_listings(conn: sqlite3.Connection, now: str) -> int:
     幂等 UPDATE（WHERE 已限定 freshness_state='FRESH'），返回翻转行数；
     无后台进程。调用方每次读 listing / 搜索前执行。
     """
+    # 审查 P3：读路径每次执行 UPDATE 会拿写锁（WAL 单写者）。先做只读探测，
+    # 没有过期行时不产生写事务——绝大多数公开搜索请求零写入。
+    expired = conn.execute(
+        "select 1 from commerce_listings"
+        " where listing_freshness_state = 'FRESH' and fresh_until < ? limit 1",
+        (now,),
+    ).fetchone()
+    if expired is None:
+        return 0
     cursor = conn.execute(
         "update commerce_listings set listing_freshness_state = 'STALE', updated_at = ?"
         " where listing_freshness_state = 'FRESH' and fresh_until < ?",

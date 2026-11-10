@@ -101,6 +101,32 @@ def _login_rate_limit_per_15min() -> int:
         return 10
 
 
+def _enforce_login_ip_limit(
+    conn: sqlite3.Connection,
+    db_path: str | Path,
+    payload: dict[str, Any],
+    *,
+    scope: str,
+) -> None:
+    """登录家族的 per-IP 桶（审查 P2）。
+
+    只有 per-email 桶时，密码喷洒可换邮箱绕过；per-IP 上限按邮箱预算的
+    5 倍（至少 20/15min）给出，与注册/发码路径同口径。
+    """
+    limit = _login_rate_limit_per_15min()
+    if limit <= 0:
+        return
+    ip_limit = max(limit * 5, 20)
+    _enforce_persisted_rate_limit(
+        conn,
+        db_path,
+        key=f"{scope}-ip:{_client_ip_prefix(payload)}",
+        limit=ip_limit,
+        window_seconds=900,
+        description=f"{scope} per-IP ({ip_limit}/15min per IP prefix)",
+    )
+
+
 def _enforce_persisted_rate_limit(
     conn: sqlite3.Connection,
     db_path: str | Path,
@@ -383,6 +409,7 @@ def login(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 window_seconds=900,
                 description=f"account login ({limit}/15min per email)",
             )
+            _enforce_login_ip_limit(conn, db_path, payload, scope="login")
         account = accounts_service.authenticate(conn, email, password)
         if account is None:
             raise AuthError("invalid email or password")
@@ -416,6 +443,7 @@ def verify_email(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]
                 window_seconds=900,
                 description=f"email verification ({limit}/15min per email)",
             )
+            _enforce_login_ip_limit(conn, db_path, payload, scope="verify-email")
         account = accounts_service.account_by_email(conn, email)
         if account is None:
             raise AuthError("invalid verification code")
@@ -513,6 +541,7 @@ def forgot_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, A
                 window_seconds=900,
                 description=f"password reset request ({limit}/15min per email)",
             )
+            _enforce_login_ip_limit(conn, db_path, payload, scope="forgot-password")
         account = accounts_service.account_by_email(conn, email)
         code = ""
         if account is not None:
@@ -554,6 +583,7 @@ def reset_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
                 window_seconds=900,
                 description=f"password reset verification ({limit}/15min per email)",
             )
+            _enforce_login_ip_limit(conn, db_path, payload, scope="reset-password")
         account = accounts_service.account_by_email(conn, email)
         if account is None or not accounts_service.reset_password(
             conn, account, code, new_password

@@ -209,7 +209,7 @@ class MerchantSingleAgentTest(unittest.TestCase):
         free = register_catalog_agent(conn, domain="free.example", actor="test")
         # 无网络环境：identity_verifier 提供假通过。
         class _Pass:
-            def verify_domain_control(self, domain: str, declared: dict | None = None) -> object:
+            def verify_domain_control(self, domain: str, declared: dict | None = None, **kwargs) -> object:
                 return type("E", (), {"passed": True, "reason": "mock"})
 
         result = claim_catalog_agent(

@@ -47,6 +47,7 @@ from kiwi_catalog.api.route_table import (
     _create_card_publication,
     _create_runtime_binding,
     _get_catalog_agent,
+    _get_domain_challenge,
     _health,
     _heartbeat_catalog_agent,
     _hosted_agent_card_document,
@@ -60,6 +61,7 @@ from kiwi_catalog.api.route_table import (
     _register_catalog_agent,
     _reinstate_catalog_agent,
     _revoke_runtime_binding,
+    _rotate_domain_challenge,
     _search_agent_catalog,
     _set_card_publication_state,
     _suspend_catalog_agent,
@@ -421,6 +423,30 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
         )
 
+    @app.get("/v1/agent-catalog/agents/{catalog_agent_id}/domain-challenge")
+    def get_domain_challenge(
+        catalog_agent_id: str,
+        merchant_id: str = "",
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        payload = api_auth.payload_with_auth({}, authorization, "")
+        if merchant_id:
+            payload["merchant_id"] = merchant_id
+        return _get_domain_challenge(db_path, catalog_agent_id, payload)
+
+    @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/domain-challenge/rotate")
+    def rotate_domain_challenge(
+        catalog_agent_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return _rotate_domain_challenge(
+            db_path,
+            catalog_agent_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
     @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/claim")
     def claim_catalog_agent(
         catalog_agent_id: str,
@@ -525,12 +551,22 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         }
 
     def _cloud_payload(payload: dict[str, Any], request: _FastAPIRequest) -> dict[str, Any]:
-        return api_auth.payload_with_auth(
+        merged = api_auth.payload_with_auth(
             payload,
             request.headers.get("authorization", ""),
             request.headers.get("idempotency-key", ""),
             request.headers.get(BINDING_JWS_HEADER_NAME, ""),
         )
+        # 审查 P1-13：首绑 per-IP 预算需要传输层解析的来源 IP（可信 XFF /
+        # 直连对端）。与 fallback 栈及账号限流同口径：先剥除客户端可伪造值
+        # 再注入 server 侧解析结果。
+        merged.pop("_client_ip", None)
+        client = getattr(request, "client", None)
+        merged["_client_ip"] = resolve_client_ip(
+            request.headers.get("x-forwarded-for", ""),
+            str(client.host or "") if client is not None else None,
+        )
+        return merged
 
     @app.get("/v1/agents/{catalog_agent_id}/agent-card.json")
     def published_agent_card_route(catalog_agent_id: str, request: _FastAPIRequest) -> Any:
@@ -634,7 +670,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.update_consent(
-            db_path, catalog_agent_id, _account_payload(request, payload)
+            db_path, catalog_agent_id, _merchant_payload(request, payload)
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})
@@ -644,7 +680,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.read_consent(
-            db_path, catalog_agent_id, _account_payload(request, {})
+            db_path, catalog_agent_id, _merchant_payload(request, {})
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})
@@ -879,28 +915,36 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _account_response(accounts_handlers.register(db_path, _rate_limit_ip_payload(request, payload)))
 
     @app.post("/v1/accounts/login")
-    def v1_account_login(payload: dict[str, Any]) -> _JSONResponse:
-        return _account_response(accounts_handlers.login(db_path, payload))
+    def v1_account_login(request: _FastAPIRequest, payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(
+            accounts_handlers.login(db_path, _rate_limit_ip_payload(request, payload))
+        )
 
     @app.post("/v1/accounts/logout")
     def v1_account_logout(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         return accounts_handlers.logout(db_path, _account_payload(request, payload))
 
     @app.post("/v1/accounts/verify-email")
-    def v1_account_verify_email(payload: dict[str, Any]) -> _JSONResponse:
-        return _account_response(accounts_handlers.verify_email(db_path, payload))
+    def v1_account_verify_email(request: _FastAPIRequest, payload: dict[str, Any]) -> _JSONResponse:
+        return _account_response(
+            accounts_handlers.verify_email(db_path, _rate_limit_ip_payload(request, payload))
+        )
 
     @app.post("/v1/accounts/resend-code")
     def v1_account_resend_code(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         return accounts_handlers.resend_code(db_path, _rate_limit_ip_payload(request, payload))
 
     @app.post("/v1/accounts/forgot-password")
-    def v1_account_forgot_password(payload: dict[str, Any]) -> dict[str, Any]:
-        return accounts_handlers.forgot_password(db_path, payload)
+    def v1_account_forgot_password(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.forgot_password(
+            db_path, _rate_limit_ip_payload(request, payload)
+        )
 
     @app.post("/v1/accounts/reset-password")
-    def v1_account_reset_password(payload: dict[str, Any]) -> dict[str, Any]:
-        return accounts_handlers.reset_password(db_path, payload)
+    def v1_account_reset_password(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        return accounts_handlers.reset_password(
+            db_path, _rate_limit_ip_payload(request, payload)
+        )
 
     @app.get("/v1/accounts/me")
     def v1_account_me(request: _FastAPIRequest) -> dict[str, Any]:

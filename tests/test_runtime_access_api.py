@@ -1197,7 +1197,7 @@ class RuntimeAccessApiTest(unittest.TestCase):
                 signature = signed(self.runtime_pem)
                 status, result, headers = _call_full(app, "GET", path, signature=signature)
                 self.assertEqual(status, 200, result)
-                self.assertEqual(result, {"email": "owner@acme.example"})
+                self.assertEqual(result, {"email": "o***@acme.example"})
                 self.assertEqual(headers.get("cache-control"), "no-store")
                 self.assertGreaterEqual(_call(app, "GET", path, signature=signature)[0], 400)
 

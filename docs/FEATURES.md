@@ -49,6 +49,8 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | POST | `/v1/agent-catalog/agents/{id}/refresh` | 显式刷新（重抓 profile + 重跑阶梯） |
 | POST | `/v1/agent-catalog/agents/{id}/verify` | 同步跑验证阶梯 |
 | POST | `/v1/agent-catalog/agents/{id}/claim` | owner 认领（domain-control / hosted 身份证明） |
+| GET | `/v1/agent-catalog/agents/{id}/domain-challenge` | 读取/签发 domain-control challenge 文档（商家/管理员鉴权） |
+| POST | `/v1/agent-catalog/agents/{id}/domain-challenge/rotate` | admin 轮换 challenge（旧文档立即失效） |
 | POST | `/v1/agent-catalog/agents/{id}/suspend` | admin 处置：挂起 |
 | POST | `/v1/agent-catalog/agents/{id}/reinstate` | admin 处置：恢复（保留 verification_level 与 freshness；折叠状态重验证，证据未失效不丢级别） |
 | GET | `/v1/agents` | 列出（v1 面，三态域过滤） |
@@ -178,10 +180,21 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 
 verified 级别是**自证语义**，消费方须按证据强度理解（审查 P2 明确化）：
 
-- **domain_verified**：仅证明「canonical 域上两个 well-known 路径返回
-  200/304」——响应体**不解析、不与声明 URL 内容比对**。任何返回 200 的
-  服务器（含 catch-all/错误兜底页）都能通过。域控制是本 MVP 的身份锚点，
-  不是内容公证。
+- **domain_verified**：证明「canonical 域上两个 well-known 路径返回
+  200/304」**且**域名发布了一份回指**本 catalog_agent 行**的一次性
+  challenge（`https://{domain}/.well-known/kiwi-catalog-agent.json`，
+  含 `catalog_agent_id` 与 `challenge`）。签发/读取：
+  `GET /v1/agent-catalog/agents/{id}/domain-challenge` 或
+  `kiwi-catalog catalog challenge <id>`。每次验证都会重新读取比对，文件
+  撤掉/换 token 即降级。
+  存量说明：升级前已通过 domain 阶段的非 hosted 行标记为 `legacy`，保持旧
+  语义且不阻止新规则；**新注册行**没有 challenge 一律不能通过 domain 阶段。
+  未绑定的 `legacy` 行在 owner 读取 challenge 或发起 claim 时会自动轮换签发
+  新 challenge（在此之前 `--rotate` 是唯一出口），发布后即可完成认领。
+  这关闭了「一域多商家时第二行指向受害者真实 card/ucp 克隆已验证身份」的
+  路径（审查 P1-12）。well-known 200 本身仍只是域可达性，不是内容公证。
+  同域存在多个 active agent 时，证据 details 记录 `shared_domain_agents`
+  计数供运营核查（不改变公开 wire 契约）。
 - **agent_verified**：身份绑定在解析阶段由 `assert_same_domain` 强制
   （card/ucp 内容声明的 url 必须与抓取源同域）——评估器基本是复检。
 - **commerce_verified**：**纯自证**——UCP 自报的任意非 a2a/ucp namespace

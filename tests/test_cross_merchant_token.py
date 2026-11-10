@@ -83,7 +83,7 @@ def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dic
 class _PassVerifier:
     """Fake IdentityVerifier（无网络）：domain-control 恒通过。"""
 
-    def verify_domain_control(self, domain: str, declared: dict | None = None) -> object:
+    def verify_domain_control(self, domain: str, declared: dict | None = None, **kwargs) -> object:
         return type("E", (), {"passed": True, "reason": "mock"})()
 
 

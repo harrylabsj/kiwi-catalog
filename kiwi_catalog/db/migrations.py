@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 50
+CURRENT_SCHEMA_VERSION = 52
 
 
 @dataclass(frozen=True)
@@ -1609,6 +1609,91 @@ def migration_050_account_registration_source(conn: sqlite3.Connection) -> None:
         )
 
 
+def migration_051_catalog_domain_bindings(conn: sqlite3.Connection) -> None:
+    """domain-control 一次性挑战绑定（审查 P1-12）。
+
+    背景：domain-control 旧实现只要求 ``https://{domain}/.well-known/agent-card.json``
+    与 ``/.well-known/ucp`` 返回 200，**不校验内容回指哪个 catalog_agent 行**；
+    而「一个域名可注册多个商家」是显式产品规则。攻击者注册第二商家、把
+    profile URL 指向受害者的真实 card/ucp 即可借走已验证身份。
+
+    修复：自注册/发现类 agent 的 domain-control 必须让域名发布本行的
+    challenge（``/.well-known/kiwi-catalog-agent.json``），验证时逐次回读比对。
+
+    存量迁移：升级前已通过 domain 阶段的非 hosted 行标记为 ``legacy``——它们
+    继续按旧证据通过，不因新规则突然掉级；**新注册行**一律
+    ``challenge_pending``，必须先发布 challenge 才能通过 domain 阶段。域名变更
+    时绑定行被清除并重新签发（见 agent_catalog_writes）。
+    """
+    conn.execute(
+        """
+create table if not exists catalog_domain_bindings (
+        catalog_agent_id text primary key
+            references catalog_agents(catalog_agent_id) on delete cascade,
+        canonical_domain text not null,
+        state text not null default 'challenge_pending'
+            check(state in ('challenge_pending','verified','legacy')),
+        challenge text not null default '',
+        challenge_issued_at text not null default '',
+        bound_at text not null default '',
+        updated_at text not null
+    ) without rowid
+    """
+    )
+    conn.execute(
+        """
+create index if not exists idx_catalog_domain_bindings_domain
+        on catalog_domain_bindings(canonical_domain, state)
+    """
+    )
+    rows = conn.execute(
+        "select catalog_agent_id, canonical_domain, created_at, last_verified_at"
+        " from catalog_agents"
+        " where canonical_domain != ''"
+        " and source_type != 'hosted'"
+        " and verification_level in ('domain_verified','agent_verified','commerce_verified')"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "insert or ignore into catalog_domain_bindings"
+            " (catalog_agent_id, canonical_domain, state, bound_at, updated_at)"
+            " values (?, ?, 'legacy', ?, ?)",
+            (
+                str(row["catalog_agent_id"]),
+                str(row["canonical_domain"]),
+                str(row["last_verified_at"] or row["created_at"] or ""),
+                str(row["created_at"] or ""),
+            ),
+        )
+
+
+def migration_052_anonymous_domain_unique(conn: sqlite3.Connection) -> None:
+    """匿名注册同域并发兜底（审查 P3）。
+
+    v17 删除域名唯一索引后，匿名路径的 check-then-act 在并发下可产生重复
+    active 匿名行（一域一 agent 规则只靠应用层读检查）。补 partial unique
+    index：仅约束「未绑定商家 + active」的行，商家多行同域与治理态行不受影响。
+
+    存量库若已存在重复行（历史竞态），跳过建索引以免升级失败；应用层规则
+    继续生效，运营可清理后再重建。
+    """
+    duplicate = conn.execute(
+        "select canonical_domain from catalog_agents"
+        " where (merchant_id is null or merchant_id = '')"
+        " and administrative_state = 'active'"
+        " group by canonical_domain having count(*) > 1 limit 1"
+    ).fetchone()
+    if duplicate is not None:
+        return
+    conn.execute(
+        """
+create unique index if not exists idx_catalog_agents_anonymous_domain
+        on catalog_agents(canonical_domain)
+        where (merchant_id is null or merchant_id = '') and administrative_state = 'active'
+    """
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1660,6 +1745,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(48, "runtime_keepalive_consents", migration_048_runtime_keepalive_consents),
     Migration(49, "runtime_keepalive_state", migration_049_runtime_keepalive_state),
     Migration(50, "account_registration_source", migration_050_account_registration_source),
+    Migration(51, "catalog_domain_bindings", migration_051_catalog_domain_bindings),
+    Migration(52, "anonymous_domain_unique", migration_052_anonymous_domain_unique),
 )
 
 

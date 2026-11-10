@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.18 — 2026-11-10
+
+- **domain-control 挑战绑定（审查 P1-12）**：schema v51 新增
+  `catalog_domain_bindings`。`self_registered`/`discovered` agent 的 domain
+  阶段必须在 `https://{domain}/.well-known/kiwi-catalog-agent.json` 发布
+  回指本行的 `catalog_agent_id` + `challenge`；仅返回 200 的 well-known
+  不再构成身份证明，关闭「一域多商家」下克隆已验证身份的路径。
+- 新增 `GET /v1/agent-catalog/agents/{id}/domain-challenge`（商家/管理员鉴权）
+  与 admin-only `POST .../domain-challenge/rotate`；CLI 新增
+  `catalog challenge <id> [--rotate]`。换域名重注册自动轮换 challenge。
+- 迁移兼容：升级前已通过 domain 阶段的非 hosted 行标记为 `legacy`，继续按
+  旧证据通过，不突然掉级；新注册行一律 `challenge_pending`。
+- 验证证据 details 新增 `shared_domain_agents` 计数（同域多 active agent 时）。
+- **首绑滥用面收敛（审查 P1-13）**：未认证首绑在落请求前按来源 IP
+  （`KIWI_CATALOG_FIRST_BIND_IP_PER_HOUR`，默认 10）与绑定密钥指纹
+  （`KIWI_CATALOG_FIRST_BIND_KEY_PER_HOUR`，默认 5）双桶限流；运营邮件通知
+  改为进程内旁路队列（有界、失败丢弃、同 agent+密钥 10 分钟去重），SMTP
+  故障不再阻塞请求线程。
+- **登录/账号安全（审查 P2/P3）**：登录、邮箱验证、找回/重置密码补 per-IP
+  预算（邮箱预算的 5 倍、至少 20/15min）；未知邮箱执行同成本 dummy PBKDF2，
+  消除登录时序枚举；`resolve_client_ip` 改为从右往左跳过可信代理（伪造左侧
+  XFF 不再能轮换限流桶）；FastAPI 栈登录家族统一注入传输层来源 IP。
+- **设备授权配对码默认收紧（breaking）**：`KIWI_CATALOG_ENROLLMENT_PAIRING_MODE`
+  缺省改为 `required`；未知取值按 required 处理。确有旧授权页的部署必须
+  显式设置 `optional` 过渡。
+- **发布/绑定治理**：有商家账号的 legacy owner-token Listing 发布同样受
+  free-plan 名额约束；域名未变的重注册保留原 verification_level/freshness；
+  名片版本/绑定版本并发的 `max+1` 唯一索引冲突映射为 409 而非 500；
+  `verify_binding_possession` 对畸形 JWS/JWK 统一 403；设备授权页/Keepalive
+  同意路由补齐 Authorization 头合并。
+- **其余 P3**：公开 listing 搜索先做只读探测，没有过期行时不产生写事务；
+  console 邮件模式与 SMTP 配置同时存在时拒绝运行（防验证码进响应体）；
+  围观列表等既有行为不变。
+- **匿名域名占位回收**：未验证（discovered）的匿名域名行超过
+  `KIWI_CATALOG_ANONYMOUS_CLAIM_TTL_DAYS`（默认 7 天）后可被新的匿名注册
+  复用；已进入验证阶梯或绑定商家的行不受影响。
+- **domain 阶段前不再公开 profile 能力**：capabilities/skills/端点索引改为
+  domain-control 通过后才写入——避免把受害者 profile 的能力发布到攻击者行上。
+- **schema v52**：匿名域名 active 行的 partial unique index（并发兜底）；旧库已有
+  重复行时跳过建索引，升级不失败。
+- **部署约束**：schema v52 在旧包中无法打开；升级后不能回滚到旧包。
+
 ## 0.5.17 — 2026-11-09
 
 > 0.5.16 已由旧源发布（不含本条目）；0.5.17 是包含注册来源的首个正式版本。
