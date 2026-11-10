@@ -2,6 +2,7 @@
 
 ## 0.5.18 — 2026-11-10
 
+- **门户取消连接**：新增 `POST /v1/accounts/agents/{cagt}/disconnect`（商家会话；body 带 `binding_id`）。与运行时签名面的 revoke 同一结果：绑定置 revoked、无其他活动绑定时下线 a2a/agent_card 端点行、写 `runtime_binding_revoked` 审计（actor `merchant:<id>`、channel `portal`）；重复解除幂等，非本商家或未知绑定一律 404。依赖该绑定的代管/开放询价/保活/访问配置随即 fail-closed，不删历史行。
 - **domain-control 挑战绑定（审查 P1-12）**：schema v51 新增
   `catalog_domain_bindings`。`self_registered`/`discovered` agent 的 domain
   阶段必须在 `https://{domain}/.well-known/kiwi-catalog-agent.json` 发布
