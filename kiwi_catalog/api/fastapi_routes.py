@@ -1062,6 +1062,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, catalog_agent_id, binding_request_id, _account_payload(request, payload), {}, "reject"
         )
 
+    @app.post("/v1/accounts/agents/{catalog_agent_id}/disconnect")
+    def v1_account_disconnect_binding(
+        request: _FastAPIRequest, catalog_agent_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return accounts_handlers.disconnect_binding(
+            db_path, catalog_agent_id, _account_payload(request, payload)
+        )
+
     # ── /v1/merchant-publications（M0 商家公开资料；会话 cookie 经 _account_payload 透传）
     @app.post("/v1/merchant-publications")
     def v1_create_merchant_publication(

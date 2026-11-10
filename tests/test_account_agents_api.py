@@ -566,6 +566,117 @@ class AccountAgentsApiTest(unittest.TestCase):
             conn.close()
         self.assertEqual(read_card()["public_shop_url"], "https://shop.example.com/acme")
 
+    def test_disconnect_revokes_binding_and_is_idempotent(self) -> None:
+        """门户取消连接：撤销绑定/下线端点/写审计；无会话 403；越权与未知绑定 404；重复幂等。"""
+        session = self._register()
+        cagt = self._create_agent(session)["catalog_agent_id"]
+        conn = sqlite3.connect(self.db_path)
+        try:
+            merchant_id = conn.execute(
+                "select merchant_id from catalog_agents where catalog_agent_id = ?", (cagt,)
+            ).fetchone()[0]
+            now = "2026-11-11T00:00:00+00:00"
+            conn.execute(
+                "insert into runtime_bindings"
+                " (binding_id, catalog_agent_id, merchant_id, runtime_origin, a2a_endpoint,"
+                " key_id, key_thumbprint, key_jwk_json, binding_version, service_epoch,"
+                " status, created_at, updated_at)"
+                " values ('bind-1', ?, ?, 'https://acme.app.workbuddy.host',"
+                " 'https://acme.app.workbuddy.host/a2a', 'key-1', 'thumb-1', '{}', 1, 1,"
+                " 'active', ?, ?)",
+                (cagt, merchant_id, now, now),
+            )
+            conn.execute(
+                "insert into agent_endpoints"
+                " (catalog_agent_id, kind, url, protocol, protocol_version, preference, status)"
+                " values (?, 'a2a', 'https://acme.app.workbuddy.host/a2a', 'a2a', '', 1, 'active')",
+                (cagt,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        path = f"/v1/accounts/agents/{cagt}/disconnect"
+        body = json.dumps({"binding_id": "bind-1"}).encode()
+        # 无会话 → 403（与 /v1/accounts/me 同一会话约定）
+        status, payload, _ = _call_http(self.app, "POST", path, body)
+        self.assertEqual(status, 403, payload)
+        # 越权（他人会话）→ 404，不可区分
+        other = self._register("other@acme.example")
+        status, payload, _ = _call_http(
+            self.app, "POST", path, body, cookie=f"kiwi_session={other}"
+        )
+        self.assertEqual(status, 404, payload)
+        # 未知绑定 → 404
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            path,
+            json.dumps({"binding_id": "bind-x"}).encode(),
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 404, payload)
+        # 本人解除：撤销并下线 a2a 端点行
+        status, payload, _ = _call_http(
+            self.app, "POST", path, body, cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "revoked")
+        self.assertTrue(payload["changed"])
+        # 重复解除幂等
+        status, payload, _ = _call_http(
+            self.app, "POST", path, body, cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["status"], "revoked")
+        self.assertFalse(payload["changed"])
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                conn.execute(
+                    "select status from runtime_bindings where binding_id = 'bind-1'"
+                ).fetchone()[0],
+                "revoked",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from agent_endpoints"
+                    " where catalog_agent_id = ? and kind = 'a2a'",
+                    (cagt,),
+                ).fetchone()[0],
+                0,
+            )
+            actor, event = conn.execute(
+                "select actor, event from audit_events"
+                " where event = 'runtime_binding_revoked' order by id desc limit 1"
+            ).fetchone()
+            self.assertEqual(actor, f"merchant:{merchant_id}")
+            self.assertEqual(event, "runtime_binding_revoked")
+        finally:
+            conn.close()
+
+    def test_disconnect_without_binding_returns_404(self) -> None:
+        """从未绑定过的商家：解除返回 404，不创建任何绑定/端点行。"""
+        session = self._register("nobind@acme.example")
+        cagt = self._create_agent(session)["catalog_agent_id"]
+        status, payload, _ = _call_http(
+            self.app,
+            "POST",
+            f"/v1/accounts/agents/{cagt}/disconnect",
+            json.dumps({"binding_id": "bind-none"}).encode(),
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 404, payload)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from runtime_bindings where catalog_agent_id = ?", (cagt,)
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
 
 class AccountCardGovernanceTest(unittest.TestCase):
     """门户名片治理端点（P1；设计 §5.2/§5.3）：pause/resume/withdraw。

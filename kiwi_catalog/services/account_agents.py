@@ -20,7 +20,8 @@
   **不复活治理行**（suspended/rejected 的恢复是 admin reinstate 语义）。
 - 列表 / 名片详情：纯读投影（catalog_agents + card_publications +
   agent_card_versions + runtime_bindings，均 v33 表）。门户不产出内容——
-  本模块没有任何写名片/写绑定的路径。
+  本模块只有两处写路径：名片治理（pause/resume/withdraw，与运行时同核心）
+  和解除连接（撤销当前绑定，与运行时签名面同一结果）。
 - 归属检查：会话 merchant_id 必须等于 agent 的 merchant_id，不一致一律
   404（与不存在不可区分，沿用 management-descriptor 的写法）。
 """
@@ -448,3 +449,53 @@ def set_my_card_state(
         details = {"active_revision": result["active_revision"]}
     append_catalog_audit(conn, agent_id, actor, event, details)
     return {"ok": True, **result}
+
+
+def disconnect_my_binding(
+    conn: sqlite3.Connection,
+    account: dict[str, Any],
+    catalog_agent_id: str,
+    binding_id: str,
+) -> dict[str, Any]:
+    """门户「取消连接」（会话）：撤销本商家的当前绑定。
+
+    与运行时签名面 `cloud_binding.revoke_runtime_binding` 同一结果：绑定置
+    revoked、按当前库状态同步端点行（无其他活动绑定时 a2a / agent_card 行被
+    删除）、写 catalog 审计（actor = `merchant:<merchant_id>`，事件
+    `runtime_binding_revoked`，details.channel = `portal`）。重复解除幂等
+    （`changed:false`），不存在的绑定或非本商家 agent 一律 404。
+
+    不在这里删依赖行：目录代管、开放询价、保活、访问配置的判定都要求活动
+    绑定，撤销后自然 fail-closed；保留行作为历史，便于商家重新连接后核对。
+    """
+    from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
+
+    row = _require_owned_agent(conn, account, catalog_agent_id)
+    agent_id = str(row["catalog_agent_id"])
+    merchant_id = str(row["merchant_id"] or "").strip()
+    target = str(binding_id or "").strip()
+    if not target:
+        raise ValidationError("binding_id is required")
+    binding = conn.execute(
+        "select binding_id, status from runtime_bindings"
+        " where catalog_agent_id = ? and binding_id = ?",
+        (agent_id, target),
+    ).fetchone()
+    if binding is None:
+        raise NotFoundError("runtime binding not found")
+    if str(binding["status"]) == "revoked":
+        return {"binding_id": target, "status": "revoked", "changed": False}
+    now = now_iso()
+    conn.execute(
+        "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
+        (now, target),
+    )
+    sync_cloud_endpoints(conn, agent_id, now)
+    append_catalog_audit(
+        conn,
+        agent_id,
+        f"merchant:{merchant_id}",
+        "runtime_binding_revoked",
+        {"binding_id": target, "channel": "portal"},
+    )
+    return {"binding_id": target, "status": "revoked", "changed": True}

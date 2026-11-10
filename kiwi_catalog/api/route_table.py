@@ -523,6 +523,13 @@ RouteEntry(
             _v1_account_decide_binding(db_path, catalog_agent_id, binding_request_id, payload, query, "reject")
         ),
     ),
+RouteEntry(
+        {"POST"},
+        "/v1/accounts/agents/{catalog_agent_id}/disconnect",
+        lambda db_path, payload, query, catalog_agent_id: (
+            _v1_account_disconnect_binding(db_path, catalog_agent_id, payload)
+        ),
+    ),
     # ── /v1/merchant-publications（M0 商家公开资料，docs/accounts.md §publications）
     # 顺序约束：/search 与 /stats 静态段必须先于 /{publication_id} 参数段
     #（_match_path 顺序匹配；与 /v1/listings/search 先例一致）。
@@ -917,6 +924,10 @@ def _v1_account_decide_binding(db_path, catalog_agent_id, binding_request_id, pa
     return accounts_handlers.decide_binding(
         db_path, catalog_agent_id, binding_request_id, payload, query or {}, action
     )
+
+
+def _v1_account_disconnect_binding(db_path, catalog_agent_id, payload):
+    return accounts_handlers.disconnect_binding(db_path, catalog_agent_id, payload)
 
 
 def _v1_create_device_enrollment(db_path, payload):

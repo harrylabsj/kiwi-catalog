@@ -841,6 +841,38 @@ def decide_binding(
         _ctx.__exit__(None, None, None)
 
 
+def disconnect_binding(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """POST /v1/accounts/agents/{cagt}/disconnect（会话；body 带 binding_id）。
+
+    门户「取消连接」：撤销本商家的当前绑定，与运行时签名面的 revoke 同一结果
+    （含端点行下线与审计）。非本商家 → 404（与不存在不可区分）；已撤销的绑定
+    重复解除幂等返回 `changed:false`；按账号限流（同 token-request 的 env 值）。
+    """
+    _ctx, conn, account = _require_session(db_path, payload)
+    try:
+        limit = _login_rate_limit_per_15min()
+        if limit > 0:
+            backend = SQLiteRateLimitBackend(
+                conn, table="merchant_application_limits", key_column="actor_key"
+            )
+            enforce_rate_limit(
+                backend,
+                key=f"binding-disconnect:{str(account.get('id') or account.get('email') or 'unknown')}",
+                limit=limit,
+                window_seconds=900,
+                description=f"binding disconnect ({limit}/15min per account)",
+            )
+        return account_agents_service.disconnect_my_binding(
+            conn, account, catalog_agent_id, str(payload.get("binding_id") or "")
+        )
+    finally:
+        _ctx.__exit__(None, None, None)
+
+
 def enrollment_detail(db_path: str | Path, enrollment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     from kiwi_catalog.services import enrollments as service
     ctx, conn, account = _require_session(db_path, payload)
