@@ -1,4 +1,15 @@
-"""Account-free A2A relay. Gate credentials never leave Catalog's server."""
+"""Account-free A2A relay. Gate credentials never leave Catalog's server.
+
+Transport-only by contract: the relay forwards signed JSON-RPC bytes to the
+merchant's ``/a2a`` and never parses terms, rewrites offers, adjudicates, or
+persists negotiation state. Method/header/response allowlists, the consent
+recheck, and the "no share code in the response, no-store" rules are the
+invariants; changing any of them is a contract change.
+
+Canonical contract: ``docs/open-inquiry-transport-contract.md`` in
+harrylabsj/kiwi (the directory is an explicit, documented exception to the
+"buyers negotiate directly with merchants" baseline).
+"""
 from __future__ import annotations
 
 import base64
