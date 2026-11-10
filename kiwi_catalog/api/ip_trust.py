@@ -28,7 +28,10 @@ def resolve_client_ip(xff: str, direct_peer: str | None) -> str:
     )
     peer = (direct_peer or "").strip()
     if peer and peer.lower() in trusted and xff.strip():
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
+        # 审查 P2：取**最右**的非可信代理地址——代理把真实对端追加在右侧，
+        # 左侧条目客户端可伪造/轮换。从右往左跳过已知可信代理。
+        hops = [item.strip() for item in xff.split(",") if item.strip()]
+        for candidate in reversed(hops):
+            if candidate.lower() not in trusted:
+                return candidate
     return peer

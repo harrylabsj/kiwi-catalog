@@ -259,6 +259,63 @@ def cmd_agent_catalog_claim(args: argparse.Namespace) -> None:
     emit({"ok": True, "catalog_agent": result}, args.format)
 
 
+def cmd_agent_catalog_challenge(args: argparse.Namespace) -> None:
+    """Print the domain-control challenge document (审查 P1-12).
+
+    域名所有者把 ``document`` 原样发布到 ``publish_url``，随后
+    ``agent catalog verify`` 才会通过 domain 阶段。``--rotate`` 作废旧 token
+    （本地 CLI 属可信操作，与其它本地命令同一信任模型）。
+    """
+    from kiwi_catalog.agent_catalog.sqlite_repository import require_catalog_agent
+    from kiwi_catalog.db.session import now_iso
+    from kiwi_catalog.services.domain_bindings import (
+        CHALLENGE_REQUIRED_SOURCE_TYPES,
+        STATE_LEGACY,
+        challenge_document,
+        challenge_url,
+        ensure_domain_binding,
+        rotate_domain_binding,
+    )
+
+    catalog_agent_id = str(args.catalog_agent_id).strip()
+    with db_session(db_path_from_args(args)) as conn:
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        source_type = str(agent.get("source_type") or "")
+        if source_type not in CHALLENGE_REQUIRED_SOURCE_TYPES:
+            raise SystemExit(
+                "domain challenge is only required for self_registered/discovered agents"
+            )
+        canonical = str(agent.get("canonical_domain") or "").strip()
+        if not canonical:
+            raise SystemExit("catalog agent has no canonical_domain")
+        if getattr(args, "rotate", False):
+            binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+        else:
+            binding = ensure_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+            # 审查 P2-2：legacy 行没有 token；打印前按需轮换，避免给出永远
+            # 无法通过的文档。
+            if str(binding.get("state")) == STATE_LEGACY:
+                binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+        payload = {
+            "ok": True,
+            "catalog_agent_id": catalog_agent_id,
+            "canonical_domain": canonical,
+            "state": binding.get("state", ""),
+            "publish_url": challenge_url(canonical),
+            "document": challenge_document(
+                catalog_agent_id, canonical, str(binding.get("challenge") or "")
+            ),
+            "challenge_issued_at": binding.get("challenge_issued_at", ""),
+            "bound_at": binding.get("bound_at", ""),
+        }
+    if args.format == "text":
+        print(f"Publish this JSON at {payload['publish_url']}:")
+        print(payload["document"])
+        print(f"State: {payload['state']}")
+        return
+    emit(payload, args.format)
+
+
 def cmd_agent_catalog_suspend(args: argparse.Namespace) -> None:
     """Suspend a catalog agent (v3.0 moderation, §10.4 P2)."""
     catalog_agent_id = str(args.catalog_agent_id).strip()

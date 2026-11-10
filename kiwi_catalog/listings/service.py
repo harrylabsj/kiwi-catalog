@@ -132,8 +132,14 @@ def publish_listing(
         existing is not None
         and int(existing.get("governance_hold") or 0) == QUARANTINE_HOLD
     )
-    if actor.startswith("runtime:"):
+    # 审查 P2：名额治理此前只对 `runtime:` actor 生效——有账号的 legacy
+    # owner-token 发布路径完全绕过 free-plan 名额。除 admin 运维处置外，只要
+    # merchant 已有账号就统一校验（无账号的旧 owner-token 部署保持兼容）。
+    if not actor.startswith("admin") and conn.execute(
+        "select 1 from merchant_accounts where merchant_id = ? limit 1", (merchant_id,)
+    ).fetchone():
         from kiwi_catalog.services.listing_entitlements import require_publication_capacity
+
         require_publication_capacity(
             conn, merchant_id,
             existing_state=str(existing["publication_state"]) if existing else None,

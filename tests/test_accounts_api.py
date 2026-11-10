@@ -1641,9 +1641,6 @@ class AdminApplicationNotificationTest(unittest.TestCase):
                 "KIWI_CATALOG_OWNER_TOKEN_SECRET": OWNER_SECRET,
                 "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
                 "KIWI_CATALOG_ADMIN_NOTIFY_EMAIL": self.NOTIFY_TO,
-                "KIWI_CATALOG_SMTP_HOST": "smtp.example",
-                "KIWI_CATALOG_SMTP_USER": "ops@example",
-                "KIWI_CATALOG_SMTP_PASSWORD": "pw",
             },
             clear=False,
         )
@@ -1656,18 +1653,32 @@ class AdminApplicationNotificationTest(unittest.TestCase):
         self.addCleanup(registration_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
+    def _smtp_env(self):
+        """只在运营通知实际发送时提供 SMTP 配置：注册走 console 模式
+        （不能同时配置 SMTP，否则服务端按误配拒绝）。"""
+        return mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_SMTP_HOST": "smtp.example",
+                "KIWI_CATALOG_SMTP_USER": "ops@example",
+                "KIWI_CATALOG_SMTP_PASSWORD": "pw",
+            },
+            clear=False,
+        )
+
     def _register_and_apply(self) -> tuple[int, dict]:
         """注册（邮箱先行三步，自动登录）→ 提交接入申请，返回 (状态码, 响应)。"""
         status, registered, headers = register_via_api(self.app, **REGISTER_BODY)
         self.assertEqual(status, 200, registered)
         cookie = headers.get("set-cookie", "").split(";")[0]
-        status, applied, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
-            cookie=cookie,
-        )
+        with self._smtp_env():
+            status, applied, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/token-request",
+                json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
+                cookie=cookie,
+            )
         return status, applied
 
     def test_new_application_notifies_admin_inbox(self) -> None:
@@ -1736,13 +1747,14 @@ class AdminApplicationNotificationTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, logged_in)
         cookie = headers.get("set-cookie", "").split(";")[0]
-        status, applied, _ = _call_http(
-            self.app,
-            "POST",
-            "/v1/accounts/token-request",
-            json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
-            cookie=cookie,
-        )
+        with self._smtp_env():
+            status, applied, _ = _call_http(
+                self.app,
+                "POST",
+                "/v1/accounts/token-request",
+                json.dumps({"domain": "acme.example", "agent_name": "Acme 商贸"}).encode(),
+                cookie=cookie,
+            )
         return status, applied
 
 
@@ -1901,7 +1913,11 @@ class EnrollmentAuthorizationContractTest(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertNotIn("user_code", payload)
-        payload = self._authorize(cookie, "enr_seed_pending", {})
+        # 审查 P2：配对码默认 required；本用例验证显式 optional 的旧页面兼容。
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_ENROLLMENT_PAIRING_MODE": "optional"}, clear=False
+        ):
+            payload = self._authorize(cookie, "enr_seed_pending", {})
         self.assertEqual(payload.get("status"), "authorized")
         with db_session(self.db_path) as conn:
             row = conn.execute(

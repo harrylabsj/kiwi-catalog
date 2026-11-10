@@ -45,6 +45,62 @@ from kiwi_catalog.services.account_agents import _require_owned_agent
 
 _TTL_HOURS_ENV = "KIWI_CATALOG_BINDING_REQUEST_TTL_HOURS"
 _MAX_PENDING_ENV = "KIWI_CATALOG_BINDING_REQUEST_MAX_PENDING"
+_IP_BUDGET_ENV = "KIWI_CATALOG_FIRST_BIND_IP_PER_HOUR"
+_KEY_BUDGET_ENV = "KIWI_CATALOG_FIRST_BIND_KEY_PER_HOUR"
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name) or ""
+    try:
+        return max(1, int(raw)) if raw else default
+    except ValueError:
+        return default
+
+
+def first_bind_ip_budget() -> int:
+    """每个来源 IP 每小时允许的首绑请求数（默认 10）。"""
+    return _positive_int_env(_IP_BUDGET_ENV, 10)
+
+
+def first_bind_key_budget() -> int:
+    """每把绑定密钥（指纹）每小时允许的首绑请求数（默认 5）。"""
+    return _positive_int_env(_KEY_BUDGET_ENV, 5)
+
+
+def enforce_first_bind_budget(
+    conn: sqlite3.Connection, *, client_ip: str, key_thumbprint: str
+) -> None:
+    """未认证首绑的全局预算（审查 P1-13）。
+
+    单 agent 3 条 pending 的上限挡不住「换 agent / 换密钥」的工单噪音与
+    邮件轰炸；这里在落请求之前按来源 IP 与绑定密钥双桶限流（固定窗口）。
+    ``_client_ip`` 由传输层注入（可信 XFF / 直连对端），空值归入 ``unknown``
+    共享桶——与账号限流同口径，不允许客户端 body 自报。
+    """
+    from kiwi_catalog.services.rate_limit import (
+        SQLiteRateLimitBackend,
+        enforce_rate_limit,
+    )
+
+    backend = SQLiteRateLimitBackend(
+        conn, table="agent_catalog_write_rate_limits", key_column="actor_key"
+    )
+    ip = str(client_ip or "").strip() or "unknown"
+    enforce_rate_limit(
+        backend,
+        key=f"first-bind-ip:{ip}",
+        limit=first_bind_ip_budget(),
+        window_seconds=3600,
+        description="first-bind requests per source IP (hourly)",
+    )
+    if key_thumbprint:
+        enforce_rate_limit(
+            backend,
+            key=f"first-bind-key:{key_thumbprint}",
+            limit=first_bind_key_budget(),
+            window_seconds=3600,
+            description="first-bind requests per binding key (hourly)",
+        )
 
 
 def ttl_hours() -> int:

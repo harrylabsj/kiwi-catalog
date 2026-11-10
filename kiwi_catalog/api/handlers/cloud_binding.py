@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -156,7 +157,11 @@ def read_bound_account(db_path: str | Path, catalog_agent_id: str, payload: dict
         _check_enrollment_exp(signed)
         rows = conn.execute("select email from merchant_accounts where merchant_id=? and status='active' limit 2",
                             (str(binding["merchant_id"]),)).fetchall()
-        return {"email": str(rows[0]["email"]) if len(rows) == 1 else None, "__no_store__": True}
+        # 审查 C-12：运行时只需要“哪个账号”用于核对，不返回完整 PII。
+        email = str(rows[0]["email"]) if len(rows) == 1 else ""
+        local, sep, domain = email.partition("@")
+        masked = f"{local[:1]}***@{domain}" if sep and domain and local else None
+        return {"email": masked, "__no_store__": True}
 
 
 # ── A16：绑定拒绝/失败的自有固定诊断码 ─────────────────────────────────────
@@ -394,31 +399,35 @@ def _insert_active_binding(
     ).fetchone():
         raise ConflictError(f"binding_id already exists: {binding_id}")
     stamp = now_iso()
-    conn.execute(
-        "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
-        " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
-        " binding_version, service_epoch, status, expires_at, created_at, updated_at,"
-        " management_base_path, management_api_major, mcp_path)"
-        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-        (
-            binding_id,
-            agent_id,
-            str(agent["merchant_id"] or ""),
-            str(binding["runtime_origin"]),
-            str(binding["a2a_endpoint"]),
-            str(binding["key_id"]),
-            thumbprint,
-            json.dumps(key_jwk),
-            version,
-            int(binding["service_epoch"]),
-            str(binding.get("expires_at") or ""),
-            stamp,
-            stamp,
-            management["management_base_path"],
-            management["management_api_major"],
-            management["mcp_path"],
-        ),
-    )
+    try:
+        conn.execute(
+            "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+            " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+            " binding_version, service_epoch, status, expires_at, created_at, updated_at,"
+            " management_base_path, management_api_major, mcp_path)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+            (
+                binding_id,
+                agent_id,
+                str(agent["merchant_id"] or ""),
+                str(binding["runtime_origin"]),
+                str(binding["a2a_endpoint"]),
+                str(binding["key_id"]),
+                thumbprint,
+                json.dumps(key_jwk),
+                version,
+                int(binding["service_epoch"]),
+                str(binding.get("expires_at") or ""),
+                stamp,
+                stamp,
+                management["management_base_path"],
+                management["management_api_major"],
+                management["mcp_path"],
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        # 审查 P2：并发 max+1 撞唯一索引此前抛未类型化 500。映射为 409。
+        raise ConflictError("concurrent binding version allocation; retry") from exc
     if existing is not None:
         # 轮换：旧绑定立即失效（旧私钥不能再签发布/轮换请求）。
         conn.execute(
@@ -501,6 +510,13 @@ def create_runtime_binding(
                 # D1：落「待确认接入请求」（不写 active 绑定，不提前背书）
                 from kiwi_catalog.services import binding_requests as binding_requests_service
 
+                # 审查 P1-13：未认证首绑按来源 IP / 绑定密钥的每小时预算，
+                # 挡住「换 agent / 换密钥」的工单噪音与运营邮件轰炸。
+                binding_requests_service.enforce_first_bind_budget(
+                    conn,
+                    client_ip=str(payload.get("_client_ip") or ""),
+                    key_thumbprint=thumbprint,
+                )
                 # 随请求暂存访问配置（pending，CAS 版本）；确认时同事务激活。
                 staged = None
                 if access_config is not None:
@@ -579,10 +595,12 @@ def create_runtime_binding(
                 actor=actor,
             )
     if notify_request is not None:
-        # 邮件通知运营（D1）：旁路——必须在事务提交之后，发信失败不影响请求。
-        from kiwi_catalog.services import accounts as accounts_service
+        # 邮件通知运营（D1）：事务提交之后入旁路队列（审查 P1-13）——SMTP
+        # 不再占用请求线程（此前 15s 超时会阻塞每个首绑请求），同 agent+密钥
+        # 10 分钟内只发一封。
+        from kiwi_catalog.services import notification_outbox
 
-        accounts_service.notify_admin_binding_request(
+        notification_outbox.enqueue_admin_binding_request(
             merchant_id=str(notify_request["merchant_id"]),
             catalog_agent_id=agent_id,
             binding_request_id=str(notify_request["binding_request_id"]),

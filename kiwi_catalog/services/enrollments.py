@@ -36,23 +36,25 @@ SCOPES = ("runtime:bind", "card:publish", "heartbeat")
 PAIRING_MODE_ENV = "KIWI_CATALOG_ENROLLMENT_PAIRING_MODE"
 PAIRING_MODE_OPTIONAL = "optional"
 PAIRING_MODE_REQUIRED = "required"
-_REQUIRED_MODE_VALUES = frozenset({"required", "enforce", "strict", "1", "true", "yes", "on"})
+_OPTIONAL_MODE_VALUES = frozenset({"optional", "off", "0", "false", "no"})
 
 
 def pairing_required() -> bool:
     """配对码是否**必须**提供（后端分阶段启用开关）。
 
-    默认 ``optional``：请求里带了配对码就必须正确（错码一律拒），没带则沿用
-    「登录会话 + 同源 + 显式确认」——这是门户先行阶段对旧版授权页/旧浏览器
-    缓存的兼容路径。设为 ``required`` 后，缺少配对码的请求在所有栈上一律拒绝，
-    不再依赖前端是否禁用了确认按钮。
+    默认 ``required``（审查 P2）：缺少配对码的请求在所有栈上一律拒绝，不再
+    依赖前端是否禁用了确认按钮。过渡期需要旧版授权页/旧浏览器兼容的部署必须
+    **显式**设置 ``KIWI_CATALOG_ENROLLMENT_PAIRING_MODE=optional``。
 
-    未知取值一律按 ``optional`` 处理：默认值本来就是兼容态，拼错开关不应意外
-    把商家锁在门外；真正收紧必须显式写 ``required``（部署文档与 CHANGELOG
-    都要求按阶段切换）。
+    未知取值按 ``required`` 处理（fail-closed）：拼错开关不能意外放宽安全
+    边界。
     """
+    # 审查 P2：缺省翻转为 required——转发授权链接的钓鱼在无绑定商家上仍可
+    # 成功。确需过渡期兼容的部署必须显式设置 optional（部署文档/CHANGELOG）。
     raw = str(os.environ.get(PAIRING_MODE_ENV) or "").strip().lower()
-    return raw in _REQUIRED_MODE_VALUES
+    if raw == PAIRING_MODE_OPTIONAL:
+        return False
+    return raw not in _OPTIONAL_MODE_VALUES
 
 
 def validate_public_jwk(jwk: dict[str, Any]) -> str:

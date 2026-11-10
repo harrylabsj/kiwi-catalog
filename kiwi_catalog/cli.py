@@ -30,6 +30,7 @@ from kiwi_catalog.cli_agent_catalog_commands import (
     cmd_agent_catalog_claim,
     cmd_agent_catalog_doctor,
     cmd_agent_catalog_get,
+    cmd_agent_catalog_challenge,
     cmd_agent_catalog_refresh,
     cmd_agent_catalog_register,
     cmd_agent_catalog_reinstate,
@@ -95,6 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
     agent_catalog_verify.add_argument("--owner-token", default="", dest="owner_token")
     agent_catalog_verify.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_verify.set_defaults(func=cmd_agent_catalog_verify)
+    agent_catalog_challenge = agent_catalog_sub.add_parser(
+        "challenge", help="Show the domain-control challenge document (P1-12)"
+    )
+    agent_catalog_challenge.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
+    agent_catalog_challenge.add_argument(
+        "--rotate", action="store_true", help="Issue a new challenge token (invalidates the old one)"
+    )
+    agent_catalog_challenge.add_argument("--format", choices=["text", "json"], default="text")
+    agent_catalog_challenge.set_defaults(func=cmd_agent_catalog_challenge)
     agent_catalog_refresh = agent_catalog_sub.add_parser("refresh", help="Re-fetch profiles and re-run the full ladder (§10.3)")
     agent_catalog_refresh.add_argument("catalog_agent_id", help="Catalog agent id (e.g. cagt_...)")
     agent_catalog_refresh.add_argument("--admin-token", default="", dest="admin_token")

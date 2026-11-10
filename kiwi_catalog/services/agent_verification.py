@@ -49,6 +49,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self
 
@@ -109,6 +110,13 @@ from kiwi_catalog.discovery.verifier import (
 )
 from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
+from kiwi_catalog.services.domain_bindings import (
+    CHALLENGE_REQUIRED_SOURCE_TYPES,
+    binding_legacy_allowed,
+    ensure_domain_binding,
+    mark_domain_bound,
+    shared_domain_peer_count,
+)
 from kiwi_catalog.services.verification_audit_policy import (
     FunnelStep as _FunnelStep,
 )
@@ -208,7 +216,17 @@ def _has_active_binding(conn: sqlite3.Connection, catalog_agent_id: str, now_ts:
     if row is None:
         return False
     expires_at = str(row["expires_at"] or "")
-    return not expires_at or expires_at > now_ts
+    if not expires_at:
+        return True
+    # 审查 P3：裸字符串比较在 "Z" vs "+00:00" 表示下会 fail-open（'Z' 排序
+    # 大于 '+'）。按绝对时刻解析；无法解析视为未过期（fail-closed 方向：
+    # 无法证明已过期 → 仍按活动绑定处理，避免把已绑定商家错误降级）。
+    try:
+        from datetime import datetime as _dt
+
+        return _dt.fromisoformat(expires_at) > _dt.fromisoformat(now_ts)
+    except (TypeError, ValueError):
+        return True
 
 
 class VerificationService:
@@ -536,6 +554,10 @@ class VerificationService:
             return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
         self._apply_freshness(agent, FRESH)
         stage = self._stage_identity(catalog_agent_id, current, actor, profiles)
+        # 审查 C-5：granular 身份/商务入口在 domain 已通过的前提下刷新索引
+        # （profile-only 入口仍不索引，保持 P1-12 的域控制门）。
+        if stage.outcome == "passed":
+            self._index_profiles(catalog_agent_id, profiles.card, profiles.ucp, profiles.urls)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
         return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
@@ -550,6 +572,8 @@ class VerificationService:
             return self._granular_profile_failure(catalog_agent_id, previous, exc, actor)
         self._apply_freshness(agent, FRESH)
         stage = self._stage_commerce(catalog_agent_id, current, actor, profiles)
+        if stage.outcome == "passed":
+            self._index_profiles(catalog_agent_id, profiles.card, profiles.ucp, profiles.urls)
         failure_kind = None if stage.outcome == "passed" else stage.outcome
         return self._finalize(catalog_agent_id, previous, stage.target_status, (stage,), actor, failure_kind)
 
@@ -668,8 +692,11 @@ class VerificationService:
             self._write_snapshot(catalog_agent_id, "agent_card", card, fetched["agent_card"]),
             self._write_snapshot(catalog_agent_id, "ucp", ucp, fetched["ucp_profile"]),
         )
-        self._index_profiles(catalog_agent_id, card, ucp, urls)
-        # 审查 P1-5：快照/索引落库后立即提交，关闭写事务——后续 domain 阶段的
+        # 审查 P2（P1-12 延伸）：profile 索引（capabilities/skills/endpoints）
+        # 不得在 domain-control 通过前公开——攻击者把行指向受害者 profile 时
+        # 仍在 profile 阶段就能把对方能力发布到自己名下。索引改到
+        # `_stage_domain` 通过后进行。
+        # 审查 P1-5：快照落库后立即提交，关闭写事务——后续 domain 阶段的
         # well-known 抓取（10s 级网络 I/O）不再持有 SQLite 写锁，否则期间全体
         # 并发写入者会在 busy_timeout（5s）后抛 database is locked → 500。
         # 阶梯其余阶段各以短事务写入。幂等 claim 行已在 handler 层持久化，
@@ -773,8 +800,33 @@ class VerificationService:
                 "catalog agent has no canonical_domain; domain control cannot be verified",
                 {"method": "https_domain_control", "domain_control_method": self._policy.domain_control_method,
                  "canonical_domain": stored_domain})
-        return self._identity_verifier.verify_domain_control(stored_domain,
-            declared={"agent_card": profiles.urls["agent_card"], "ucp_profile": profiles.urls["ucp_profile"]})
+        # 审查 P1-12：domain-control 必须回指本 catalog_agent 行。绑定行在
+        # 网络 I/O 之前落盘并提交，抓取窗口不持有 SQLite 写锁（与 P1-5 同口径）。
+        source_type = str(agent.get("source_type") or "")
+        challenge_required = source_type in CHALLENGE_REQUIRED_SOURCE_TYPES
+        binding = ensure_domain_binding(
+            self._conn, catalog_agent_id, stored_domain, now=now_iso()
+        )
+        self._conn.commit()
+        allow_unbound = (not challenge_required) or binding_legacy_allowed(binding, stored_domain)
+        unbound_reason = "legacy" if binding_legacy_allowed(binding, stored_domain) else "source_trusted"
+        evidence = self._identity_verifier.verify_domain_control(
+            stored_domain,
+            declared={"agent_card": profiles.urls["agent_card"], "ucp_profile": profiles.urls["ucp_profile"]},
+            expected_catalog_agent_id=catalog_agent_id,
+            challenge=str(binding.get("challenge") or ""),
+            allow_unbound=allow_unbound,
+            unbound_reason=unbound_reason,
+        )
+        if evidence.passed and challenge_required and not allow_unbound:
+            mark_domain_bound(self._conn, catalog_agent_id, stored_domain, now=now_iso())
+            self._conn.commit()
+        peers = shared_domain_peer_count(self._conn, catalog_agent_id, stored_domain)
+        if peers:
+            evidence = replace(
+                evidence, details={**evidence.details, "shared_domain_agents": peers}
+            )
+        return evidence
 
     def _stage_domain(
         self,
@@ -797,6 +849,8 @@ class VerificationService:
         agent = require_catalog_agent(self._conn, catalog_agent_id)
         evidence = evidence if evidence is not None else self._domain_control_evidence(catalog_agent_id, profiles)
         if evidence.passed:
+            # 审查 P2：只有域控制通过后才把 profile 派生能力/技能/端点公开。
+            self._index_profiles(catalog_agent_id, profiles.card, profiles.ucp, profiles.urls)
             target = self._level_machine.transition(current, DOMAIN_VERIFIED)
             self._apply_level(agent, target)
             outcome = "passed"

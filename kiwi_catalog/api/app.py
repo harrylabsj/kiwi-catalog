@@ -146,6 +146,10 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     ASGI（同一 wrapper 与路由表）。  FastAPI 端点与 fallback 共用 handler，
     auth/idempotency header 经 payload_with_auth 合并进 payload。
     """
+    # 审查 C-13：误配的邮件模式在启动期即失败，而不是请求期 500。
+    from kiwi_catalog.services import accounts as accounts_service
+
+    accounts_service.assert_email_configuration()
     if FastAPI is None:
         return MarketplaceASGIApp(
             db_path,

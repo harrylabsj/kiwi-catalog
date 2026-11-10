@@ -141,13 +141,25 @@ class EnrollmentPairingCodeTest(EnrollmentFixture):
         self.assertEqual(rejected.status_code, 400, rejected.text)
         self.assertEqual(self._status_of(enrollment_id), "ready_for_authorization")
 
-    def test_optional_mode_keeps_old_authorization_pages_working(self) -> None:
-        """门户先行阶段：旧页面不传码时，后端仍按既有兼容路径放行。
-
-        未设置或拼错的开关值都按默认 ``optional`` 处理——拼错开关会把商家
-        锁在门外比暂时兼容更糟；真正收紧必须显式写 ``required``。
-        """
+    def test_default_and_unknown_modes_require_a_pairing_code(self) -> None:
+        """审查 P2：缺省/拼错的开关都按 required 处理（fail-closed）。"""
         for index, raw in enumerate(("", "legacy", "garbage")):
+            with self.subTest(mode=raw):
+                enrollment_id = f"enr_pairing_required_default_{index}"
+                self._insert_enrollment(
+                    status="ready_for_authorization", enrollment_id=enrollment_id
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {"KIWI_CATALOG_ENROLLMENT_PAIRING_MODE": raw},
+                    clear=False,
+                ):
+                    denied = self._authorize(enrollment_id, {})
+                self.assertEqual(denied.status_code, 409, denied.text)
+
+    def test_explicit_optional_mode_keeps_old_authorization_pages_working(self) -> None:
+        """过渡期部署显式设置 optional 时，旧页面不传码仍可放行。"""
+        for index, raw in enumerate(("optional", "off", "0")):
             with self.subTest(mode=raw):
                 enrollment_id = f"enr_pairing_legacy_page_{index}"
                 self._insert_enrollment(

@@ -248,8 +248,14 @@ def verify_binding_possession(
     if not isinstance(jws, str) or jws.count(".") != 2:
         raise PermissionDenied("missing or malformed possession proof")
     header_segment, payload_segment, signature_segment = jws.split(".")
-    header = json.loads(_b64url_decode(header_segment))
-    payload = json.loads(_b64url_decode(payload_segment))
+    # 审查 P2：畸形 base64/JSON/JWK 此前抛裸 ValueError → 匿名可达端点 500。
+    # 与姊妹函数同口径映射为 403。
+    try:
+        header = json.loads(_b64url_decode(header_segment))
+        payload = json.loads(_b64url_decode(payload_segment))
+        public_key = _public_key_from_jwk(public_jwk)
+    except (ValueError, TypeError) as exc:
+        raise PermissionDenied("malformed possession proof") from exc
     if not isinstance(header, dict) or not isinstance(payload, dict):
         raise PermissionDenied("malformed possession proof")
     if header.get("alg") not in ALLOWED_JWS_ALGS:
@@ -257,7 +263,6 @@ def verify_binding_possession(
     kid = header.get("kid")
     if not isinstance(kid, str) or kid == "":
         raise PermissionDenied("possession proof missing kid")
-    public_key = _public_key_from_jwk(public_jwk)
     try:
         public_key.verify(
             _b64url_decode(signature_segment), f"{header_segment}.{payload_segment}".encode("ascii")

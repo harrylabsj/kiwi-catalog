@@ -628,16 +628,17 @@ class AccessLogMiddlewareFastApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
 
     def test_xff_honored_from_trusted_proxy(self) -> None:
-        """FastAPI 栈与 fallback 同一 IP 语义：可信代理(回环)后采信 XFF 首跳。
+        """FastAPI 栈与 fallback 同一 IP 语义：可信代理后取最右客户端地址。
 
         生产在 Caddy 同机反代后,直连对端恒为 127.0.0.1——不解析 XFF 会让
-        ip_prefix 全部退化为 127.0.0.0(验收发现)。
+        ip_prefix 全部退化为 127.0.0.0(验收发现)。取最右合法地址，客户端
+        伪造左侧条目无法轮换限流桶（审查 P2）。
         """
         from fastapi.testclient import TestClient
 
         with TestClient(self.app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
-                "/v1/agents/search", headers={"x-forwarded-for": "203.0.113.7, 10.0.0.1"}
+                "/v1/agents/search", headers={"x-forwarded-for": "198.51.100.9, 203.0.113.7"}
             )
             self.assertEqual(resp.status_code, 200, resp.text)
         rows = self._rows(surface=access_log.SURFACE_BUYER_SEARCH)

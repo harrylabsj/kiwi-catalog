@@ -394,7 +394,7 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
 
             from kiwi_catalog.discovery.verifier import VerificationEvidence
 
-            def _passing_domain_control(_c: str, declared: dict | None = None) -> VerificationEvidence:
+            def _passing_domain_control(_c: str, declared: dict | None = None, **kwargs) -> VerificationEvidence:
                 return VerificationEvidence(
                     verification_type="domain_control",
                     result="passed",
@@ -407,6 +407,9 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
             conn.commit()
             service2 = VerificationService(conn)
             service2._load_profiles = lambda _cid: _FakeProfiles()  # type: ignore[method-assign]
+            # 审查 P2：index 现在在 domain 通过后才执行；fake profiles 不提供
+            # capabilities/skills，测试只关心三域持久化，索引用 no-op。
+            service2._index_profiles = lambda *a, **k: None  # type: ignore[method-assign]
             service2._identity_verifier.verify_domain_control = _passing_domain_control  # type: ignore[method-assign]
             service2._trust_evaluator.evaluate_agent_identity = (  # type: ignore[method-assign]
                 lambda _card, _ucp, _domain: VerificationEvidence(
@@ -454,7 +457,7 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
                     "ucp_profile": "https://acme.example/ucp.json"}
             snapshot_ids = (1, 2)
 
-        def _failing_domain_control(_canonical: str, declared: dict | None = None) -> VerificationEvidence:
+        def _failing_domain_control(_canonical: str, declared: dict | None = None, **kwargs) -> VerificationEvidence:
             return VerificationEvidence(
                 verification_type="domain_control",
                 result="failed",

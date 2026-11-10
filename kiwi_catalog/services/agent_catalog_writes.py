@@ -55,11 +55,51 @@ from kiwi_catalog.core.errors import ConflictError, PermissionDenied, Validation
 from kiwi_catalog.discovery._validation import canonical_domain_of, is_http_url, is_same_authority
 from kiwi_catalog.services.agent_catalog import get_catalog_agent_write_detail
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
+from kiwi_catalog.services.domain_bindings import (
+    CHALLENGE_REQUIRED_SOURCE_TYPES,
+    STATE_LEGACY,
+    drop_domain_binding,
+    ensure_domain_binding,
+    mark_domain_bound,
+    rotate_domain_binding,
+)
 
 # 行政处置终态：可被重新注册恢复（v0.3 §7.3——REJECTED / SUSPENDED 属
 # administrative_state；legacy 折叠值同义）。重注册 = 复活治理处置，必须
 # 由 admin 或既有绑定商户的 owner token 发起（审查 P1-4b），匿名不得触发。
 RE_REGISTERABLE_ADMIN = frozenset({"rejected", "suspended"})
+
+# 审查 P3：匿名注册可无限期占用域名（低成本 griefing）。未验证的匿名行超过
+# TTL 后可被新的匿名注册复用；已进入验证阶梯或绑定商家的行不受影响。
+_ANONYMOUS_CLAIM_TTL_DAYS_ENV = "KIWI_CATALOG_ANONYMOUS_CLAIM_TTL_DAYS"
+_DEFAULT_ANONYMOUS_CLAIM_TTL_DAYS = 7
+
+
+def _anonymous_claim_ttl_days() -> int:
+    import os
+
+    raw = os.environ.get(_ANONYMOUS_CLAIM_TTL_DAYS_ENV) or ""
+    try:
+        return max(1, int(raw)) if raw else _DEFAULT_ANONYMOUS_CLAIM_TTL_DAYS
+    except ValueError:
+        return _DEFAULT_ANONYMOUS_CLAIM_TTL_DAYS
+
+
+def _reclaimable_anonymous_row(row: Any, now_text: str) -> bool:
+    from datetime import datetime, timedelta
+
+    if str(row["merchant_id"] or "").strip():
+        return False
+    if str(row["verification_level"] or "") != "discovered":
+        return False
+    try:
+        created = datetime.fromisoformat(str(row["created_at"] or ""))
+        current = datetime.fromisoformat(now_text)
+    except (TypeError, ValueError):
+        return False
+    if (created.tzinfo is None) != (current.tzinfo is None):
+        return False
+    return created + timedelta(days=_anonymous_claim_ttl_days()) <= current
 
 
 def _ensure_merchant_shadow(conn: Any, merchant_id: str, display_name: str) -> None:
@@ -149,6 +189,8 @@ def _purge_domain_bound_claims(conn: Any, catalog_agent_id: str) -> None:
     conn.execute(
         "delete from agent_verifications where catalog_agent_id = ?", (catalog_agent_id,)
     )
+    # 审查 P1-12：域名变更 = 旧域名的 challenge 绑定作废（重新签发，见注册尾部）。
+    drop_domain_binding(conn, catalog_agent_id)
 
 
 def _purge_stale_profile_endpoints(conn: Any, catalog_agent_id: str, canonical: str) -> None:
@@ -215,6 +257,9 @@ def register_catalog_agent(
     # 审查 P1-01：换域名 = 信任边界重置——记录被更新 agent 的原 canonical_domain，
     # 域名变更时清除旧域名绑定的派生数据（见下方 _purge_*）。
     prior_domain: str | None = None
+    # 审查 P2：同域名重注册不得把已验证级别重置为 discovered（会掉搜索档、
+    # 逼迫整条管线重跑）。换域名时由 P1-01 清理路径回到 discovered。
+    prior_state: dict[str, str] = {}
 
     # 注册规则（2026-08-10 用户要求）：**一个域名可注册多个商家，一个商家
     # 只能有一个 agent**。
@@ -235,6 +280,11 @@ def register_catalog_agent(
         )
         if target is not None:
             prior_domain = str(target.get("canonical_domain") or "").strip() or None
+            prior_state = {
+                "verification_level": str(target.get("verification_level") or ""),
+                "freshness_state": str(target.get("freshness_state") or ""),
+                "administrative_state": str(target.get("administrative_state") or ""),
+            }
         catalog_agent_id = (
             str(target["catalog_agent_id"]) if target is not None else new_catalog_agent_id()
         )
@@ -252,14 +302,27 @@ def register_catalog_agent(
         ).fetchall()
         if any(str(r["merchant_id"] or "").strip() for r in rows):
             raise ConflictError(f"domain {canonical} is already registered by a merchant")
+        from kiwi_catalog.db.session import now_iso as _now_iso
+
         active_anon = [
             r for r in rows if str(r["administrative_state"]) not in RE_REGISTERABLE_ADMIN
         ]
-        if active_anon:
+        reclaimable = [r for r in active_anon if _reclaimable_anonymous_row(r, _now_iso())]
+        blocking = [r for r in active_anon if r not in reclaimable]
+        if blocking:
             raise ConflictError(f"domain {canonical} is already registered")
-        existing = max(rows, key=lambda r: str(r["created_at"])) if rows else None
+        # 优先复用可回收的匿名行，其次复用治理态行。
+        reusable = reclaimable or [
+            r for r in rows if str(r["administrative_state"]) in RE_REGISTERABLE_ADMIN
+        ]
+        existing = max(reusable, key=lambda r: str(r["created_at"])) if reusable else None
         if existing is not None:
             prior_domain = str(existing["canonical_domain"] or "").strip() or None
+            prior_state = {
+                "verification_level": str(existing["verification_level"] or ""),
+                "freshness_state": str(existing["freshness_state"] or ""),
+                "administrative_state": str(existing["administrative_state"] or ""),
+            }
         catalog_agent_id = (
             str(existing["catalog_agent_id"]) if existing is not None else new_catalog_agent_id()
         )
@@ -291,6 +354,20 @@ def register_catalog_agent(
         " where catalog_agent_id = ?",
         (catalog_agent_id,),
     )
+    # 审查 P2：域名未变且原治理态为 active 时保留原验证级别/新鲜度
+    # （re-register 不是重新验证）。被 suspend/rejected 的行复活必须重新验证，
+    # 不能借重注册立即恢复已验证徽章（审查 2026-11-10 P2-3）。
+    if (
+        prior_domain == canonical
+        and prior_state.get("administrative_state") == "active"
+        and prior_state.get("verification_level", "discovered") != "discovered"
+    ):
+        set_state_domains(
+            conn,
+            catalog_agent_id,
+            verification_level=prior_state["verification_level"],
+            freshness_state=prior_state.get("freshness_state") or "fresh",
+        )
     # 审查 P1-01：域名变更 → 清除旧域名绑定的声明/证据。先清 capabilities/
     # skills/snapshots/verifications（下方 public 字段块会重新写入本次注册
     # 提供的 fresh 值）；agent_card/ucp_profile 旧端点延迟到 endpoints 块
@@ -411,6 +488,10 @@ def register_catalog_agent(
     from kiwi_catalog.db.session import now_iso
     from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
 
+    # 审查 P1-12：签发/保留本行的 domain-control challenge。域名未变时保留
+    # 既有 token（重注册不打断已发布的 well-known 文件）；换域名时上面已清除
+    # 旧绑定，这里重新签发。
+    ensure_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
     sync_cloud_endpoints(conn, catalog_agent_id, now_iso())
     # §24 funnel: a successful registration is the discovery event.
     record_funnel("discovery")
@@ -435,6 +516,8 @@ def claim_catalog_agent(
     On success the agent is bound to *merchant_id* and a ``catalog_agent_claimed``
     audit event is written.  Returns the public detail.
     """
+    from kiwi_catalog.db.session import now_iso
+
     catalog_agent_id = str(catalog_agent_id or "").strip()
     merchant_id = str(merchant_id or "").strip()
     if not merchant_id:
@@ -456,18 +539,36 @@ def claim_catalog_agent(
         raise ValidationError(f"catalog agent {catalog_agent_id} has no canonical_domain to claim")
 
     source_type = str(agent.get("source_type") or "")
+    challenge_required = source_type in CHALLENGE_REQUIRED_SOURCE_TYPES
     claim_method = "hosted_identity"
     if source_type != "hosted":
         # §6.2: HTTPS domain-control challenge — proof of domain control, not
         # knowledge of the Agent Card URL.
         verifier = identity_verifier or _default_identity_verifier()
+        binding = ensure_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+        # 审查 2026-11-10 P2-2：legacy 行没有 challenge（challenge=''），
+        # 自助认领会永远失败。claim 时按需轮换签发新 challenge，要求 owner
+        # 发布后再验；admin 仍可显式 rotate。
+        if challenge_required and str(binding.get("state")) == STATE_LEGACY:
+            binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
         # 审查 P1-5：抓取前提交，关闭写事务——well-known 抓取（10s 级网络
         # I/O）期间不持有 SQLite 写锁（idempotency claim 行已持久化，失败时
         # handler 的 clear 独立生效；merchant 绑定写入由迁移 v7 唯一索引兜底）。
         conn.commit()
-        evidence = verifier.verify_domain_control(canonical, declared=_declared_profile_urls(conn, catalog_agent_id))
+        # claim 是“主张所有权”，不是重跑存量验证：legacy 免挑战只适用于
+        # 阶梯复验，不能让任意商家 token 直接认领历史未绑定行。
+        evidence = verifier.verify_domain_control(
+            canonical,
+            declared=_declared_profile_urls(conn, catalog_agent_id),
+            expected_catalog_agent_id=catalog_agent_id,
+            challenge=str(binding.get("challenge") or ""),
+            allow_unbound=not challenge_required,
+            unbound_reason="source_trusted",
+        )
         if not evidence.passed:
             raise PermissionDenied(f"claim denied: {evidence.reason}")
+        if challenge_required:
+            mark_domain_bound(conn, catalog_agent_id, canonical, now=now_iso())
         claim_method = "https_domain_control"
 
     current_merchant = str(agent.get("merchant_id") or "").strip()

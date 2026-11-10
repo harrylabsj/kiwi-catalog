@@ -801,6 +801,108 @@ def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dic
             raise
 
 
+def get_domain_challenge(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/agent-catalog/agents/{id}/domain-challenge（审查 P1-12）。
+
+    返回本 catalog_agent 的 domain-control challenge 及需要发布的 JSON 文档。
+    域名所有者把文档放到 ``https://{domain}/.well-known/kiwi-catalog-agent.json``
+    后，domain 阶段才会通过——仅仅返回 200 的 well-known 不再构成身份证明。
+
+    鉴权：admin / verification worker / owner merchant，或持有效 merchant
+    token 的认领方（claim 前 agent 可能尚未绑定商家）。challenge 不是认证
+    秘密：知道它也必须能控制域名才能完成绑定。
+    """
+    from kiwi_catalog.db.session import now_iso
+    from kiwi_catalog.services.domain_bindings import (
+        CHALLENGE_REQUIRED_SOURCE_TYPES,
+        STATE_LEGACY,
+        challenge_document,
+        challenge_url,
+        ensure_domain_binding,
+        rotate_domain_binding,
+    )
+
+    catalog_agent_id = str(catalog_agent_id).strip()
+    with db_session(db_path) as conn:
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        try:
+            _require_catalog_write_auth(conn, agent, payload)
+        except PermissionDenied:
+            # claim 前的 agent 无 owner：允许持有效 merchant token 的认领方读取。
+            _claim_identity(conn, agent, payload)
+        source_type = str(agent.get("source_type") or "")
+        if source_type not in CHALLENGE_REQUIRED_SOURCE_TYPES:
+            raise ValidationError(
+                "domain control challenge is only required for "
+                "self_registered/discovered catalog agents"
+            )
+        canonical = str(agent.get("canonical_domain") or "").strip()
+        if not canonical:
+            raise ValidationError("catalog agent has no canonical_domain")
+        binding = ensure_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+        # 审查 2026-11-10 P2-2：legacy 行没有可发布的 challenge。owner 主动
+        # 读取时按需轮换，返回可用的新文档（否则 CLI/UI 会给出永远失败的文档）。
+        if str(binding.get("state")) == STATE_LEGACY:
+            binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+    return {
+        "ok": True,
+        "catalog_agent_id": catalog_agent_id,
+        "canonical_domain": canonical,
+        "state": binding.get("state", ""),
+        "publish_url": challenge_url(canonical),
+        "document": challenge_document(
+            catalog_agent_id, canonical, str(binding.get("challenge") or "")
+        ),
+        "challenge_issued_at": binding.get("challenge_issued_at", ""),
+        "bound_at": binding.get("bound_at", ""),
+    }
+
+
+def rotate_domain_challenge(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """POST /v1/agent-catalog/agents/{id}/domain-challenge/rotate（admin only）。
+
+    旧 token 泄漏/域名易主时显式轮换：新 token 生效后，已发布旧文档的域名
+    在下一次验证时失败，直到重新发布。"""
+    from kiwi_catalog.db.session import now_iso
+    from kiwi_catalog.services.domain_bindings import (
+        CHALLENGE_REQUIRED_SOURCE_TYPES,
+        challenge_document,
+        challenge_url,
+        rotate_domain_binding,
+    )
+
+    catalog_agent_id = str(catalog_agent_id).strip()
+    with db_session(db_path) as conn:
+        api_auth.require_admin_token(payload, conn)
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        source_type = str(agent.get("source_type") or "")
+        if source_type not in CHALLENGE_REQUIRED_SOURCE_TYPES:
+            raise ValidationError(
+                "domain control challenge is only required for "
+                "self_registered/discovered catalog agents"
+            )
+        canonical = str(agent.get("canonical_domain") or "").strip()
+        if not canonical:
+            raise ValidationError("catalog agent has no canonical_domain")
+        binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+    return {
+        "ok": True,
+        "catalog_agent_id": catalog_agent_id,
+        "canonical_domain": canonical,
+        "state": binding.get("state", ""),
+        "publish_url": challenge_url(canonical),
+        "document": challenge_document(
+            catalog_agent_id, canonical, str(binding.get("challenge") or "")
+        ),
+        "challenge_issued_at": binding.get("challenge_issued_at", ""),
+        "rotated": True,
+    }
+
+
 def _moderation_action(
     db_path: str | Path,
     catalog_agent_id: str,

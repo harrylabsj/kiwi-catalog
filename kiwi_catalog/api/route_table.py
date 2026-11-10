@@ -117,6 +117,20 @@ RouteEntry(
             db_path, catalog_agent_id, payload
         ),
     ),
+    RouteEntry(
+        {"GET"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/domain-challenge",
+        lambda db_path, payload, query, catalog_agent_id: _get_domain_challenge(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+    RouteEntry(
+        {"POST"},
+        "/v1/agent-catalog/agents/{catalog_agent_id}/domain-challenge/rotate",
+        lambda db_path, payload, query, catalog_agent_id: _rotate_domain_challenge(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
 RouteEntry(
         {"POST"},
         "/v1/agent-catalog/agents/{catalog_agent_id}/suspend",
@@ -676,6 +690,19 @@ def _verify_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
 
 def _claim_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
     return agent_catalog_handlers.claim_catalog_agent(db_path, catalog_agent_id, payload or {})
+
+
+def _get_domain_challenge(db_path, catalog_agent_id, payload=None, query=None):
+    merged = dict(payload or {})
+    if query and query.get("merchant_id") and not merged.get("merchant_id"):
+        merged["merchant_id"] = query.get("merchant_id")
+    return agent_catalog_handlers.get_domain_challenge(db_path, catalog_agent_id, merged)
+
+
+def _rotate_domain_challenge(db_path, catalog_agent_id, payload=None, query=None):
+    return agent_catalog_handlers.rotate_domain_challenge(
+        db_path, catalog_agent_id, payload or {}
+    )
 
 
 def _suspend_catalog_agent(db_path, catalog_agent_id, payload=None, query=None):
