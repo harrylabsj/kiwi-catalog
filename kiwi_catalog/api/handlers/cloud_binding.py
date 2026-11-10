@@ -134,6 +134,31 @@ def read_public_inquiry_consent(
         return {"granted": granted, "policy_active": policy.enabled(conn, agent_id),
                 "terms_version": policy.TERMS_VERSION, "__no_store__": True}
 
+def read_bound_account(db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the account only to the current, authenticated runtime binding."""
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError("binding signature is required")
+    with db_session(db_path) as conn:
+        binding = _current_active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("active runtime binding not found")
+        signed = verify_runtime_request(conn, catalog_agent_id=agent_id, jws=jws, expected_fields={
+            "method": "GET", "path": f"/v1/agents/{agent_id}/bound-account",
+            "audience": "kiwi-catalog", "body_digest": canonical_digest({}),
+            "catalog_agent_id": agent_id, "binding_id": str(binding["binding_id"]),
+            "key_id": str(binding["key_id"]), "runtime_origin": str(binding["runtime_origin"]),
+            "service_epoch": int(binding["service_epoch"]),
+        })
+        _check_enrollment_exp(signed)
+        rows = conn.execute("select email from merchant_accounts where merchant_id=? and status='active' limit 2",
+                            (str(binding["merchant_id"]),)).fetchall()
+        return {"email": str(rows[0]["email"]) if len(rows) == 1 else None, "__no_store__": True}
+
+
 # ── A16：绑定拒绝/失败的自有固定诊断码 ─────────────────────────────────────
 # 只进服务端日志（code + stage + agent_id + 安全细节），不进响应体、不含
 # grant/JWS/密钥/远端原文。响应文案保持既有不变，Runtime 与 ZCode 诊断

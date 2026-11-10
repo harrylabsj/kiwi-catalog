@@ -196,6 +196,10 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"GET"}, "/v1/agents/{catalog_agent_id}/bound-account",
+        lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.read_bound_account(db_path, catalog_agent_id, payload),
+    ),
+RouteEntry(
         {"PUT"},
         "/v1/agents/{catalog_agent_id}/public-inquiry-consent",
         lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.update_public_inquiry_consent(

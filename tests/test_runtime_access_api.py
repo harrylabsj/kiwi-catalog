@@ -1179,6 +1179,28 @@ class RuntimeAccessApiTest(unittest.TestCase):
             _call_full(self._app_on_stack("fallback"), "POST", path, body, extra_headers=headers)
         self.assertEqual(limit.call_args.args[1]["_client_ip"], "")
 
+    def test_bound_account_requires_current_binding_signature_and_is_not_cached(self) -> None:
+        path = f"/v1/agents/{self.cagt}/bound-account"
+        def signed(pem: str) -> str:
+            return _jws(pem, RUNTIME_ORIGIN, {
+                "method": "GET", "path": path, "audience": "kiwi-catalog",
+                "body_digest": canonical_digest({}), "catalog_agent_id": self.cagt,
+                "binding_id": self.binding_id, "key_id": RUNTIME_ORIGIN,
+                "runtime_origin": RUNTIME_ORIGIN, "service_epoch": 7,
+            }, with_exp=True)
+        for stack in ("fastapi", "fallback"):
+            with self.subTest(stack=stack):
+                app = self._app_on_stack(stack)
+                self.assertGreaterEqual(_call(app, "GET", path)[0], 400)
+                wrong_pem, _ = _runtime_key()
+                self.assertGreaterEqual(_call(app, "GET", path, signature=signed(wrong_pem))[0], 400)
+                signature = signed(self.runtime_pem)
+                status, result, headers = _call_full(app, "GET", path, signature=signature)
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result, {"email": "owner@acme.example"})
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertGreaterEqual(_call(app, "GET", path, signature=signature)[0], 400)
+
     def test_public_inquiry_consent_requires_binding_signature_and_new_terms_on_both_stacks(self) -> None:
         path = f"/v1/agents/{self.cagt}/public-inquiry-consent"
 

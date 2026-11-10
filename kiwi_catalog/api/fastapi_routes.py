@@ -603,6 +603,12 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, catalog_agent_id, _cloud_payload({}, request)
         )
 
+    @app.get("/v1/agents/{catalog_agent_id}/bound-account")
+    def read_bound_account_route(catalog_agent_id: str, request: _FastAPIRequest) -> _JSONResponse:
+        result = cloud_binding_handlers.read_bound_account(db_path, catalog_agent_id, _cloud_payload({}, request))
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
     @app.put("/v1/agents/{catalog_agent_id}/public-inquiry-consent")
     def update_public_inquiry_consent_route(
         catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
