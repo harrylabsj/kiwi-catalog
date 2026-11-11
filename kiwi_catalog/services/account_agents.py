@@ -366,7 +366,7 @@ def get_my_agent_card(
         # 隔离的已签名内容不返回任何字段投影（清洗后配原 digest = 伪造摘要）；
         # 商家只看到 publication.republish_required 提示。已撤回或没有活动
         # 绑定的名片同理不再投影。
-        "card": _card_public_fields(card) if card_available else None,
+        "card": _card_public_fields(card) if card is not None and card_available else None,
         # 公开店铺页（外部、商家填写；无 published 资料/链接时为空串）。
         "public_shop_url": publications_service.latest_public_shop_url(
             conn,
