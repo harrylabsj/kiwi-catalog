@@ -42,6 +42,7 @@ from kiwi_catalog.api.handlers import merchant_publications as merchant_publicat
 from kiwi_catalog.api.handlers import merchants as merchants_handlers
 from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
+from kiwi_catalog.api.handlers import trade_platforms as trade_platforms_handlers
 from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
 
@@ -149,6 +150,13 @@ RouteEntry(
         {"GET"},
         "/v1/agents",
         lambda db_path, payload, query, **kw: _v1_list_agents(db_path, payload, query),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/marketplace-platforms",
+        lambda db_path, payload, query, **kw: trade_platforms_handlers.list_marketplace_platforms(
+            db_path, payload, query
+        ),
     ),
 RouteEntry(
         {"GET"},

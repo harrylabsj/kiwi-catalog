@@ -28,8 +28,9 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 53
+CURRENT_SCHEMA_VERSION = 54
 
 
 @dataclass(frozen=True)
@@ -1722,6 +1723,59 @@ def migration_053_buyer_source(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_054_trade_platform_rules(conn: sqlite3.Connection) -> None:
+    """运营可配置的交易平台规则：平台 ID/名称 ↔ 域名 ↔ 商品链接模板。
+
+    商家导入商品时只填平台 + 平台商品 ID，链接由服务端按模板生成；平台
+    允许范围不再硬编码为京东/淘宝/天猫，而是由运营后台维护。域名用于
+    校验模板 host，防止把链接生成到任意站点。
+    """
+    conn.execute(
+        """
+        create table if not exists trade_platform_rules (
+            id text primary key,
+            label text not null,
+            domain text not null,
+            url_template text not null,
+            enabled integer not null default 1,
+            sort_order integer not null default 0,
+            created_at text not null,
+            updated_at text not null
+        )
+        """
+    )
+    if conn.execute("select count(*) from trade_platform_rules").fetchone()[0] == 0:
+        now = datetime.now(UTC).isoformat()
+        conn.executemany(
+            "insert into trade_platform_rules"
+            " (id, label, domain, url_template, enabled, sort_order, created_at, updated_at)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("jd", "京东", "jd.com", "https://item.jd.com/{id}.html", 1, 10, now, now),
+                (
+                    "taobao",
+                    "淘宝",
+                    "taobao.com",
+                    "https://item.taobao.com/item.htm?id={id}",
+                    1,
+                    20,
+                    now,
+                    now,
+                ),
+                (
+                    "tmall",
+                    "天猫",
+                    "tmall.com",
+                    "https://detail.tmall.com/item.htm?id={id}",
+                    1,
+                    30,
+                    now,
+                    now,
+                ),
+            ],
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1776,6 +1830,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(51, "catalog_domain_bindings", migration_051_catalog_domain_bindings),
     Migration(52, "anonymous_domain_unique", migration_052_anonymous_domain_unique),
     Migration(53, "buyer_source", migration_053_buyer_source),
+    Migration(54, "trade_platform_rules", migration_054_trade_platform_rules),
 )
 
 

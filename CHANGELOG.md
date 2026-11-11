@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.20 — 2026-11-11
+
+- **交易平台规则（schema v54）**：新增 `trade_platform_rules`（平台 ID/名称 ↔
+  域名 ↔ 链接模板），默认种子 jd/taobao/tmall；新增公开
+  `GET /v1/marketplace-platforms`。商家导入只提交平台 + 平台商品 ID，链接由
+  模板生成；不接受商家上传完整链接。
+
 ## 0.5.19 — 2026-11-11
 
 - **买家来源归因（schema v53）**：`access_log` 与 `buyer_search_events` 新增

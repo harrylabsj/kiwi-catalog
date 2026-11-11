@@ -38,6 +38,7 @@ from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
 from kiwi_catalog.api.handlers import runtime_keepalive as runtime_keepalive_handlers
 from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
+from kiwi_catalog.api.handlers import trade_platforms as trade_platforms_handlers
 from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.extensions import run_fastapi_hooks
@@ -355,6 +356,10 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/health")
     def health() -> dict[str, Any]:
         return _health(db_path)
+
+    @app.get("/v1/marketplace-platforms")
+    def v1_marketplace_platforms() -> dict[str, Any]:
+        return trade_platforms_handlers.list_marketplace_platforms(db_path, {}, {})
 
     @app.get("/v1/agent-catalog/agents")
     def list_catalog_agents(request: _FastAPIRequest) -> dict[str, Any]:
