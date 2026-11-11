@@ -289,6 +289,74 @@ class FastApiDualStackTest(unittest.TestCase):
             self.assertEqual(revalidated.status_code, 304, revalidated.text)
             self.assertEqual(revalidated.text, "")
 
+    def _register_detail_agent(self, client, domain: str) -> str:
+        reg = client.post(
+            "/v1/agent-catalog/agents/register",
+            json={"domain": domain, "idempotency_key": f"detail-{domain}"},
+        )
+        self.assertEqual(reg.status_code, 200, reg.text)
+        return str(reg.json()["catalog_agent"]["catalog_agent_id"])
+
+    def test_get_agent_include_buyer_access_is_projected_with_no_store(self) -> None:
+        """回归：详情路由必须把 query 传给 ``_v1_get_agent(query=...)``。
+
+        线上验收：include=buyer_access 时 FastAPI 详情既没有 buyer_access 投影，
+        也没有 Cache-Control: no-store——query dict 被放到 payload 位置后丢弃。
+        """
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            agent_id = self._register_detail_agent(client, "detail-include.example")
+            resp = client.get(
+                f"/v1/agents/{agent_id}", params={"include": "buyer_access"}
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            payload = resp.json()
+            self.assertTrue(payload["ok"])
+            # __no_store__ 是传输层元数据，绝不能出现在 wire body。
+            self.assertNotIn("__no_store__", payload)
+            access = payload["agent"]["buyer_access"]
+            self.assertEqual(access["state"], "direct")
+            self.assertEqual(access["source"], "legacy_no_share_code")
+            self.assertEqual(access["revision"], 0)
+            self.assertEqual(access["platform_verification"], "unverified")
+            self.assertEqual(resp.headers.get("cache-control"), "no-store")
+            # no-store 响应不参与 etag/304 条件请求。
+            self.assertFalse(resp.headers.get("etag"))
+
+    def test_get_agent_default_shape_is_unchanged(self) -> None:
+        """缺省详情保持旧形状：无 buyer_access / no-store，且与 fallback 一致。"""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            agent_id = self._register_detail_agent(client, "detail-default.example")
+            resp = client.get(f"/v1/agents/{agent_id}")
+            self.assertEqual(resp.status_code, 200, resp.text)
+            payload = resp.json()
+            self.assertNotIn("buyer_access", payload["agent"])
+            self.assertNotIn("__no_store__", payload)
+            self.assertNotEqual(resp.headers.get("cache-control"), "no-store")
+            self.assertTrue(resp.headers.get("etag"), "缺省公开详情仍应带 etag")
+            status, fallback = app_module.handle_request(
+                self.db_file, "GET", f"/v1/agents/{agent_id}", query={}
+            )
+            self.assertEqual(status, 200, fallback)
+            self.assertEqual(payload, fallback)
+
+    def test_get_agent_unknown_include_is_rejected(self) -> None:
+        """未知 include 与 fallback 同口径 fail-closed 400（不能静默忽略）。"""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app) as client:
+            agent_id = self._register_detail_agent(client, "detail-unknown.example")
+            resp = client.get(
+                f"/v1/agents/{agent_id}", params={"include": "secret_stuff"}
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertEqual(
+                resp.json(),
+                {"ok": False, "error": "unsupported include field: secret_stuff"},
+            )
 
     def test_account_agents_routes_in_both_stacks(self) -> None:
         """P0 批次 B：接入记录 3 条 API + 「我的名片」页双栈注册（设计 §5.2）。

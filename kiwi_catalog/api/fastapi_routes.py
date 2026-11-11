@@ -512,7 +512,11 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_get_agent(catalog_agent_id: str, request: _FastAPIRequest) -> Any:
         return _public_record_response(
             _v1_get_agent(
-                db_path, catalog_agent_id, _query_params_from_request(request)
+                db_path,
+                catalog_agent_id,
+                # 必须显式 query=：第 3 个位置参数是 payload，传错会让
+                # include 等查询参数被静默丢弃（没有 buyer_access / no-store）。
+                query=_query_params_from_request(request),
             )
         )
 
