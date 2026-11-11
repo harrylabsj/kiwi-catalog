@@ -39,6 +39,7 @@ INQUIRY_TRANSPORT_KEYS = frozenset({
     "_referer",
     "_cookie",
     "_buyer_id",
+    "_buyer_source",
     "_client_ip",
     "_raw_inquiry_body_b64",
     "_inquiry_headers",

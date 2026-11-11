@@ -47,6 +47,7 @@ class BuyerSearchEventsServiceTest(unittest.TestCase):
         buyer_search_events.record_search_event(
             conn,
             search_type="listing",
+            buyer_source="workbuddy",
             query="保温杯",
             filters={"category": "kitchenware"},
             result_count=1,
@@ -63,6 +64,7 @@ class BuyerSearchEventsServiceTest(unittest.TestCase):
         self.assertEqual(events[0]["query"], "xyz")
         self.assertEqual(events[0]["result_count"], 0)
         self.assertEqual(events[1]["result_count"], 1)
+        self.assertEqual(events[1]["buyer_source"], "workbuddy")
         self.assertEqual(events[1]["filters"]["category"], "kitchenware")
         self.assertEqual(events[1]["result_summary"][0]["listing_id"], "lst_1")
         conn.close()
@@ -70,11 +72,23 @@ class BuyerSearchEventsServiceTest(unittest.TestCase):
     def test_bounded_retention(self) -> None:
         db = _make_db()
         conn = open_connection(db)
-        for i in range(buyer_search_events.MAX_RETAINED_EVENTS + 50):
+        # 触发一次裁剪：超过上限 + slack 才剪，避免每条 insert 都扫全表。
+        total = (
+            buyer_search_events.MAX_RETAINED_EVENTS
+            + buyer_search_events._PRUNE_SLACK
+            + buyer_search_events._PRUNE_EVERY_N
+            + 50
+        )
+        for i in range(total):
             buyer_search_events.record_search_event(conn, search_type="agent", query=f"q{i}")
         conn.commit()
         n = conn.execute("select count(*) from buyer_search_events").fetchone()[0]
-        self.assertLessEqual(n, buyer_search_events.MAX_RETAINED_EVENTS)
+        self.assertLessEqual(
+            n,
+            buyer_search_events.MAX_RETAINED_EVENTS
+            + buyer_search_events._PRUNE_SLACK
+            + buyer_search_events._PRUNE_EVERY_N,
+        )
         conn.close()
 
     def test_filters_and_summary_stored_as_json_dumps(self) -> None:

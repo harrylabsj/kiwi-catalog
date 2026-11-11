@@ -41,6 +41,7 @@ from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
 from kiwi_catalog.api.ip_trust import resolve_client_ip
 from kiwi_catalog.api.extensions import run_fastapi_hooks
+from kiwi_catalog.services.buyer_origin import derive_buyer_source
 from kiwi_catalog.api.route_table import (
     _activate_card_publication,
     _claim_catalog_agent,
@@ -342,6 +343,9 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         buyer_id = request.headers.get("x-buyer-id", "")
         if buyer_id:
             payload["_buyer_id"] = buyer_id
+        payload["_buyer_source"] = derive_buyer_source(
+            {str(key).lower(): str(value) for key, value in request.headers.items()}
+        )
         client = getattr(request, "client", None)
         payload["_client_ip"] = resolve_client_ip(
             request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None

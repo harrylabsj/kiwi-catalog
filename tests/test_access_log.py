@@ -437,6 +437,54 @@ class AccessLogServiceTest(unittest.TestCase):
         self.assertNotIn("sekrit", json.dumps(dict(row)))
         self.assertEqual(row["result_count"], 2)
 
+    def test_record_http_access_records_buyer_source(self) -> None:
+        """渠道来源：显式头优先，其次 X-Buyer-Id 前缀；只落归一化标签。"""
+        db = _make_db()
+        access_log.record_http_access(
+            db,
+            method="GET",
+            path="/v1/agents/search?q=tea",
+            query={"q": "tea"},
+            headers={"x-buyer-id": "workbuddy:abc", "user-agent": "test-agent"},
+            client_ip="203.0.113.42",
+            status=200,
+            latency_ms=5,
+            result_count=1,
+        )
+        conn = open_connection(db)
+        row = conn.execute("select * from access_log order by id desc limit 1").fetchone()
+        conn.close()
+        self.assertEqual(row["buyer_source"], "workbuddy")
+
+    def test_buyer_source_derivation_order(self) -> None:
+        from kiwi_catalog.services import buyer_origin
+
+        self.assertEqual(
+            buyer_origin.derive_buyer_source(
+                {"x-buyer-source": "OpenClaw/1.2", "x-buyer-id": "workbuddy:abc"}
+            ),
+            "openclaw",
+        )
+        self.assertEqual(
+            buyer_origin.derive_buyer_source({"x-buyer-id": "workbuddy:abc"}),
+            "workbuddy",
+        )
+        self.assertEqual(
+            buyer_origin.derive_buyer_source({"x-buyer-id": "buyer-agent:workbuddy"}),
+            "workbuddy",
+        )
+        self.assertEqual(
+            buyer_origin.derive_buyer_source(
+                {"referer": "https://kiwi.harrylabsj.com/buyers"}
+            ),
+            "web",
+        )
+        self.assertEqual(
+            buyer_origin.derive_buyer_source({"user-agent": "WorkBuddy/5.9.3"}),
+            "workbuddy",
+        )
+        self.assertEqual(buyer_origin.derive_buyer_source({}), "unknown")
+
 
 # ── 中间件：fallback 栈（MarketplaceASGIApp 直挂）───────────────────────────
 

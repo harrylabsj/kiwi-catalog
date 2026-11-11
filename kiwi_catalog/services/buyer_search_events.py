@@ -22,11 +22,39 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
 from kiwi_catalog.db.session import now_iso
 
-MAX_RETAINED_EVENTS = 5000
+#: 默认保留最近 2 万条（原 5000 条）。运营需要更长的逐条追溯窗口时，用 env
+#: ``KIWI_CATALOG_BUYER_SEARCH_EVENT_RETENTION`` 调大（上限 20 万，防误配把
+#: SQLite 撑爆）。日聚合/usage_metrics 不受影响。
+MAX_RETAINED_EVENTS = 20_000
+_MAX_RETAINED_EVENTS_CEILING = 200_000
+_RETENTION_ENV = "KIWI_CATALOG_BUYER_SEARCH_EVENT_RETENTION"
+#: 超出上限多少条才触发一次裁剪——避免每条 insert 都跑一次 count/delete。
+#: 裁剪后仍保留 max_retained_events() 条，只是允许短暂多出 *_PRUNE_SLACK 条。
+_PRUNE_SLACK = 500
+#: 每 N 条插入才检查一次（按 lastrowid 取模，无状态）；否则每次 insert 都
+#: count 全表，在 2 万条量级会明显拖慢搜索。
+_PRUNE_EVERY_N = 200
+
+
+def max_retained_events() -> int:
+    """当前保留条数：env 覆盖 → 默认 20000 → 上限 200000。"""
+    raw = str(os.environ.get(_RETENTION_ENV) or "").strip()
+    if not raw:
+        return MAX_RETAINED_EVENTS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return MAX_RETAINED_EVENTS
+    if value <= 0:
+        return MAX_RETAINED_EVENTS
+    return min(value, _MAX_RETAINED_EVENTS_CEILING)
+
+
 SUMMARY_CAP = 10
 _QUERY_CAP = 500
 _FILTERS_CAP = 2000
@@ -77,6 +105,7 @@ def record_search_event(
     conn: sqlite3.Connection,
     *,
     search_type: str,
+    buyer_source: str = "",
     query: str = "",
     filters: dict | None = None,
     result_count: int = 0,
@@ -88,26 +117,33 @@ def record_search_event(
     （listing: listing_id/title；agent: catalog_agent_id/display_name），
     运营端据此看买家实际看到了什么。
     """
-    conn.execute(
+    rowid = conn.execute(
         "insert into buyer_search_events"
-        " (search_type, query, filters_json, result_count, result_summary_json, created_at)"
-        " values (?, ?, ?, ?, ?, ?)",
+        " (search_type, buyer_source, query, filters_json, result_count,"
+        "  result_summary_json, created_at)"
+        " values (?, ?, ?, ?, ?, ?, ?)",
         (
             str(search_type or "")[:32],
+            str(buyer_source or "")[:64],
             str(query or "")[:_QUERY_CAP],
             _bounded_json(filters or {}, _FILTERS_CAP),
             int(result_count or 0),
             _bounded_json((result_summary or [])[:SUMMARY_CAP], _SUMMARY_CAP),
             now_iso(),
         ),
-    )
-    # 有界保留：超上限删最旧（event_id 自增单调，limit 子查询在 5000 量级可接受）。
-    conn.execute(
-        "delete from buyer_search_events where event_id not in ("
-        " select event_id from buyer_search_events order by event_id desc limit ?"
-        ")",
-        (MAX_RETAINED_EVENTS,),
-    )
+    ).lastrowid
+    # 有界保留：每 _PRUNE_EVERY_N 条检查一次，且超过上限 + slack 才裁。
+    if rowid and rowid % _PRUNE_EVERY_N == 0:
+        limit = max_retained_events()
+        row = conn.execute("select count(*) from buyer_search_events").fetchone()
+        if row is not None and int(row[0] or 0) > limit + _PRUNE_SLACK:
+            conn.execute(
+                "delete from buyer_search_events where event_id <= ("
+                " select event_id from buyer_search_events"
+                " order by event_id desc limit 1 offset ?"
+                ")",
+                (limit,),
+            )
 
 
 def _serialize_event_rows(rows) -> list[dict]:
@@ -122,7 +158,7 @@ def _serialize_event_rows(rows) -> list[dict]:
 
 
 _EVENT_COLUMNS = (
-    "select event_id, search_type, query, filters_json, result_count,"
+    "select event_id, search_type, buyer_source, query, filters_json, result_count,"
     " result_summary_json, created_at from buyer_search_events"
 )
 

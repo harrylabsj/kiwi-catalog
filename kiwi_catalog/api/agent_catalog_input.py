@@ -64,6 +64,7 @@ _REGISTER_TRANSPORT_FIELDS = {
     "_origin",
     "_referer",
     "_buyer_id",
+    "_buyer_source",
     "_client_ip",
 }
 

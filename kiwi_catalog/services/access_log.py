@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.db.session import db_session, now_iso
+from kiwi_catalog.services.buyer_origin import derive_buyer_source
 
 # ── surface 词表（五分类；运营端以此为单一来源）──────────────────────────────
 SURFACE_BUYER_SEARCH = "buyer_search"
@@ -371,6 +372,7 @@ def record_access(
     path: str,
     surface: str,
     actor_kind: str,
+    buyer_source: str = "",
     actor_key: str = "",
     ip_prefix: str = "",
     user_agent: str = "",
@@ -389,14 +391,16 @@ def record_access(
     try:
         rowid = conn.execute(
             "insert into access_log"
-            " (occurred_at, method, path, surface, actor_kind, actor_key, ip_prefix,"
-            "  user_agent, query_summary, target_id, status, result_count, latency_ms)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (occurred_at, method, path, surface, buyer_source, actor_kind,"
+            "  actor_key, ip_prefix, user_agent, query_summary, target_id, status,"
+            "  result_count, latency_ms)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 occurred_at or now_iso(),
                 str(method or "")[:_METHOD_CAP],
                 str(path or "")[:_PATH_CAP],
                 str(surface or ""),
+                str(buyer_source or "")[:64],
                 str(actor_kind or ""),
                 str(actor_key or ""),
                 str(ip_prefix or ""),
@@ -443,6 +447,11 @@ def record_http_access(
         actor_key = _actor_key(headers)
         ip_prefix = _ip_prefix(client_ip or "")
         user_agent = str(headers.get("user-agent") or "")
+        buyer_source = (
+            derive_buyer_source(headers)
+            if surface in (SURFACE_BUYER_SEARCH, SURFACE_BUYER_DETAIL)
+            else ""
+        )
         query_summary = build_query_summary(surface, query)
         target_id = extract_target_id(path)
         with db_session(db_path) as conn:
@@ -452,6 +461,7 @@ def record_http_access(
                 path=path,
                 surface=surface,
                 actor_kind=actor_kind,
+                buyer_source=buyer_source,
                 actor_key=actor_key,
                 ip_prefix=ip_prefix,
                 user_agent=user_agent,
@@ -481,9 +491,9 @@ def list_access_log(
     limit = max(1, min(int(limit or 100), 500))
     cutoff = (datetime.now(UTC) - timedelta(days=days)).replace(microsecond=0).isoformat()
     sql = (
-        "select id, occurred_at, method, path, surface, actor_kind, actor_key,"
-        " ip_prefix, user_agent, query_summary, target_id, status, result_count,"
-        " latency_ms from access_log where occurred_at >= ?"
+        "select id, occurred_at, method, path, surface, buyer_source, actor_kind,"
+        " actor_key, ip_prefix, user_agent, query_summary, target_id, status,"
+        " result_count, latency_ms from access_log where occurred_at >= ?"
     )
     params: list[Any] = [cutoff]
     surface = str(surface or "").strip()

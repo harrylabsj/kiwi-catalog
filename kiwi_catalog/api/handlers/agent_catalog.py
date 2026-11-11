@@ -75,7 +75,13 @@ from kiwi_catalog.core.errors import (
 )
 from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
-from kiwi_catalog.services import agent_catalog_writes, buyer_search_events, buyer_stats, usage_metrics
+from kiwi_catalog.services import (
+    agent_catalog_writes,
+    buyer_origin,
+    buyer_search_events,
+    buyer_stats,
+    usage_metrics,
+)
 from kiwi_catalog.services.runtime_access import active_public_projections
 from kiwi_catalog.services.agent_catalog import (
     search_catalog_agents as _search_catalog_agents_service,
@@ -172,12 +178,16 @@ _AGENT_SEARCH_FILTER_KEYS = (
 
 
 def _record_agent_search_event(
-    conn: Any, query: dict[str, Any], results: list[dict[str, Any]]
+    conn: Any,
+    query: dict[str, Any],
+    results: list[dict[str, Any]],
+    buyer_source: str = "",
 ) -> None:
     """买家搜 agent 埋点（运营数据源）：query/filters + 返回摘要（前 N 条）。"""
     buyer_search_events.record_search_event(
         conn,
         search_type="agent",
+        buyer_source=buyer_source,
         query=str(query.get("q") or ""),
         filters={
             k: query[k] for k in _AGENT_SEARCH_FILTER_KEYS if str(query.get(k) or "").strip()
@@ -227,7 +237,12 @@ def search_agent_catalog(
             cursor=str(query.get("cursor") or "").strip(),
         )
         result["ok"] = True
-        _record_agent_search_event(conn, query, result.get("results") or [])
+        _record_agent_search_event(
+            conn,
+            query,
+            result.get("results") or [],
+            buyer_origin.buyer_source_from_payload(auth_payload),
+        )
         return result
 
 

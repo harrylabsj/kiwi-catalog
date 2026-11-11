@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.19 — 2026-11-11
+
+- **买家来源归因（schema v53）**：`access_log` 与 `buyer_search_events` 新增
+  `buyer_source`。来源按 `X-Buyer-Source` → `X-Buyer-Id` 渠道前缀 →
+  `Origin`/`Referer` host → `User-Agent` 的优先级派生并归一化（最长 64
+  字符）；只落渠道标签，不落完整 Referer/原始身份/地理位置。存量行为空串，
+  读侧显示 `unknown`。
+- **买家搜索事件保留可配**：默认保留从 5000 条提高到 20000 条，可用
+  `KIWI_CATALOG_BUYER_SEARCH_EVENT_RETENTION` 调整（上限 20 万）；裁剪改为
+  每 200 条插入检查一次、且超过上限 + 500 条才执行，避免每条 insert 扫全表。
+- **部署约束（breaking）**：schema v53 在旧包中无法打开；升级后不能回滚到
+  旧包。
+
 ## 0.5.18 — 2026-11-10
 
 - **门户取消连接**：新增 `POST /v1/accounts/agents/{cagt}/disconnect`（商家会话；body 带 `binding_id`）。与运行时签名面的 revoke 同一结果：绑定置 revoked、无其他活动绑定时下线 a2a/agent_card 端点行、写 `runtime_binding_revoked` 审计（actor `merchant:<id>`、channel `portal`）；重复解除幂等，非本商家或未知绑定一律 404。依赖该绑定的代管/开放询价/保活/访问配置随即 fail-closed，不删历史行。

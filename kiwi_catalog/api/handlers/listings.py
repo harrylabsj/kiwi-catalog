@@ -47,7 +47,7 @@ from kiwi_catalog.listings.serialization import (
     merchant_projection,
 )
 from kiwi_catalog.listings.service import owner_agent_merchant_id
-from kiwi_catalog.services import buyer_search_events, buyer_stats, usage_metrics
+from kiwi_catalog.services import buyer_origin, buyer_search_events, buyer_stats, usage_metrics
 
 PUBLISH_ENDPOINT = "/v1/listings/publish"
 WITHDRAW_ENDPOINT = "/v1/listings/{id}/withdraw"
@@ -245,12 +245,16 @@ _LISTING_SEARCH_FILTER_KEYS = (
 
 
 def _record_listing_search_event(
-    conn: Any, query: dict[str, Any], results: list[dict[str, Any]]
+    conn: Any,
+    query: dict[str, Any],
+    results: list[dict[str, Any]],
+    buyer_source: str = "",
 ) -> None:
     """买家搜 listing 埋点（运营数据源）：query/filters + 返回摘要（前 N 条）。"""
     buyer_search_events.record_search_event(
         conn,
         search_type="listing",
+        buyer_source=buyer_source,
         query=str(query.get("q") or ""),
         filters={
             k: query[k] for k in _LISTING_SEARCH_FILTER_KEYS if str(query.get(k) or "").strip()
@@ -310,7 +314,12 @@ def v1_search_listings(
                     agent_projection(dict(agent_row) if agent_row is not None else None),
                 )
             )
-        _record_listing_search_event(conn, normalized, results)
+        _record_listing_search_event(
+            conn,
+            normalized,
+            results,
+            buyer_origin.buyer_source_from_payload(auth_payload),
+        )
         return {
             "ok": True,
             "results": results,

@@ -426,6 +426,7 @@ create unique index if not exists idx_commerce_listings_publisher_key_unique
 create table if not exists buyer_search_events (
         event_id integer primary key autoincrement,
         search_type text not null,
+        buyer_source text not null default '',
         query text not null default '',
         filters_json text not null default '{}',
         result_count integer not null default 0,
@@ -505,6 +506,7 @@ create table if not exists access_log (
         method text not null,
         path text not null,
         surface text not null,
+        buyer_source text not null default '',
         actor_kind text not null,
         actor_key text not null,
         ip_prefix text not null,

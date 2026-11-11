@@ -28,6 +28,7 @@ from urllib.parse import parse_qs
 from kiwi_catalog.a2a import card_store
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.services.buyer_origin import derive_buyer_source
 from kiwi_catalog.api.limits import (
     INQUIRY_TRANSPORT_KEYS,
     JSON_DEPTH_ERROR,
@@ -224,7 +225,7 @@ class MarketplaceASGIApp:
             # 剥除，这里补齐 cookie / 买家标识 / 客户端 IP），之后只注入由 HTTP 头
             # 与真实对端派生的可信值。否则客户端可用 body 冒充 IP 选限流桶、
             # 冒充买家标识或会话 cookie。
-            for key in ("_cookie", "_buyer_id", "_client_ip"):
+            for key in ("_cookie", "_buyer_id", "_buyer_source", "_client_ip"):
                 payload.pop(key, None)
             payload = api_auth.payload_with_auth(
                 payload,
@@ -243,6 +244,8 @@ class MarketplaceASGIApp:
             buyer_id = headers.get("x-buyer-id", "")
             if buyer_id:
                 payload["_buyer_id"] = buyer_id
+            # 渠道来源（运营归因，schema v53）：只落归一化标签，原始头不出传输层。
+            payload["_buyer_source"] = derive_buyer_source(headers)
             # 客户端 IP（公开读与账号/设备限流的 per-IP 分桶，审查 P3-06 / C-M2）：
             # 仅可信代理（默认回环）时采信 XFF；直连对端非可信代理则忽略 XFF，
             # 用直连对端——直连客户端伪造 XFF 无法轮换 IP 绕过限流。

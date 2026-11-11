@@ -29,7 +29,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-CURRENT_SCHEMA_VERSION = 52
+CURRENT_SCHEMA_VERSION = 53
 
 
 @dataclass(frozen=True)
@@ -1694,6 +1694,34 @@ create unique index if not exists idx_catalog_agents_anonymous_domain
     )
 
 
+def migration_053_buyer_source(conn: sqlite3.Connection) -> None:
+    """买家渠道来源（运营归因）：记录 ``workbuddy`` / ``web`` / ``openclaw`` 等。
+
+    只落归一化后的渠道标签（最长 64 字符），不落完整 Referer、不落原始
+    买家身份、不做地理定位。存量行保持空串（读侧展示为 ``unknown``）。
+    与 ``merchant_accounts.registration_source`` 同一「只记入口、不推断」口径；
+    派生逻辑见 services/buyer_origin.py。
+    """
+    if not _column_exists(conn, "buyer_search_events", "buyer_source"):
+        conn.execute(
+            "alter table buyer_search_events"
+            " add column buyer_source text not null default ''"
+        )
+    if not _column_exists(conn, "access_log", "buyer_source"):
+        conn.execute(
+            "alter table access_log"
+            " add column buyer_source text not null default ''"
+        )
+    conn.execute(
+        "create index if not exists idx_buyer_search_events_source"
+        " on buyer_search_events(buyer_source, created_at desc)"
+    )
+    conn.execute(
+        "create index if not exists idx_access_log_source"
+        " on access_log(buyer_source, occurred_at)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1747,6 +1775,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(50, "account_registration_source", migration_050_account_registration_source),
     Migration(51, "catalog_domain_bindings", migration_051_catalog_domain_bindings),
     Migration(52, "anonymous_domain_unique", migration_052_anonymous_domain_unique),
+    Migration(53, "buyer_source", migration_053_buyer_source),
 )
 
 
