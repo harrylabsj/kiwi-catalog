@@ -41,6 +41,15 @@ class FastApiDualStackTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"KIWI_CATALOG_ENABLE_LEGACY_LISTINGS": "on"})
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 注册会 enqueue 真实域名验证（in-process worker 线程会访问网络并
+        # 异步写回 freshness=STALE）。本类只断言双栈路由形状，桩掉入队，
+        # 避免 worker 写回落在两次读之间造成时序性 flake（2026-11-11 CI）。
+        enqueue_patcher = mock.patch(
+            "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
+            return_value=mock.Mock(task_id="test-task"),
+        )
+        enqueue_patcher.start()
+        self.addCleanup(enqueue_patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.db_file = Path(self.tmp.name) / "catalog.sqlite"
         self.app = app_module.create_catalog_app(self.db_file)
