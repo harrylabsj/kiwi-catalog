@@ -620,6 +620,7 @@ class AccountAgentsApiTest(unittest.TestCase):
             self.app, "POST", path, body, cookie=f"kiwi_session={session}"
         )
         self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["status"], "revoked")
         self.assertTrue(payload["changed"])
         # 重复解除幂等
@@ -627,6 +628,7 @@ class AccountAgentsApiTest(unittest.TestCase):
             self.app, "POST", path, body, cookie=f"kiwi_session={session}"
         )
         self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["status"], "revoked")
         self.assertFalse(payload["changed"])
         conn = sqlite3.connect(self.db_path)

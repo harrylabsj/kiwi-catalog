@@ -866,9 +866,12 @@ def disconnect_binding(
                 window_seconds=900,
                 description=f"binding disconnect ({limit}/15min per account)",
             )
-        return account_agents_service.disconnect_my_binding(
+        result = account_agents_service.disconnect_my_binding(
             conn, account, catalog_agent_id, str(payload.get("binding_id") or "")
         )
+        # 与其它账号写端点一致：成功响应带 ok=True。门户脚本按 r.ok 判断，
+        # 缺这个字段会把已经成功的撤销显示成「操作失败」。
+        return {"ok": True, **result}
     finally:
         _ctx.__exit__(None, None, None)
 
