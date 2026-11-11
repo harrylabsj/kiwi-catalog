@@ -9,7 +9,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest import mock
 
 from kiwi_catalog.a2a.binding_claims import read_runtime_binding
@@ -81,6 +81,21 @@ class CursorStrictnessTest(unittest.TestCase):
             agent_cursor_predicate("cagt_bare_legacy_id")
 
 
+class _FixedDatetime:
+    _real_datetime = datetime
+    fixed_now = datetime(2026, 8, 6, 10, 0, 30, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.fixed_now if tz is None else cls.fixed_now.astimezone(tz)
+
+    @classmethod
+    def fromtimestamp(cls, timestamp, tz=None):
+        if tz is None:
+            return cls._real_datetime.fromtimestamp(timestamp)
+        return cls._real_datetime.fromtimestamp(timestamp, tz)
+
+
 class TrustedIpRateLimitTest(unittest.TestCase):
     """2-30：payload 伪造 _client_ip 不能跨桶打穿 per-IP 限流（FastAPI 栈）。"""
 
@@ -98,7 +113,7 @@ class TrustedIpRateLimitTest(unittest.TestCase):
                 "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             },
             clear=False,
-        ):
+        ), mock.patch("kiwi_catalog.services.rate_limit.datetime", _FixedDatetime):
             app = create_catalog_app(db_path)
             codes = []
             for i in range(21):
