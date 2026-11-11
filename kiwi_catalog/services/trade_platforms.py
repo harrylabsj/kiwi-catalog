@@ -117,7 +117,9 @@ def _clean_template(value: Any, domain: str) -> str:
         raise ValidationError("链接模板不能包含控制字符")
     placeholders = set(_PLACEHOLDER_RE.findall(text))
     if placeholders != {"{id}"}:
-        raise ValidationError("链接模板必须包含且只包含 {id} 占位符")
+        raise ValidationError(
+            "链接模板必须包含且只包含 {id} 占位符（例：https://item.jd.com/{id}.html）"
+        )
     parts = urlsplit(text)
     if parts.scheme != "https":
         raise ValidationError("链接模板必须以 https:// 开头")
