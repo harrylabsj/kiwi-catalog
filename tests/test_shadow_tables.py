@@ -193,6 +193,11 @@ class AuditShadowTableTest(unittest.TestCase):
         for migration in MIGRATIONS:
             migration.apply(conn)
         _set_schema_user_version(conn, len(MIGRATIONS))
+        # buyer_access_routes 是回滚安全的 additive 表：不提升 user_version，
+        # 存量库由服务层 ensure_schema 幂等补建（与 fresh SCHEMA 收敛）。
+        from kiwi_catalog.services.buyer_access import ensure_schema
+
+        ensure_schema(conn)
         conn.commit()
         conn.close()
 

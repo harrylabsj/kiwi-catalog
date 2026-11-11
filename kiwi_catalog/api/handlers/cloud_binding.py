@@ -57,6 +57,7 @@ from kiwi_catalog.core.errors import (
 )
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
+from kiwi_catalog.services import buyer_access as buyer_access_service
 from kiwi_catalog.services import runtime_access as runtime_access_service
 
 _LOG = logging.getLogger(__name__)
@@ -1139,6 +1140,145 @@ def read_runtime_access(
                 if latest is not None
                 else None
             ),
+        }
+
+
+def read_buyer_access(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """GET /v1/agents/{id}/buyer-access —— 商家侧权威读（签名，脱敏）。
+
+    只返回商家自己的接入方式/版本/公开状态；不含分享码、绑定密钥或任何凭据。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    with db_session(db_path) as conn:
+        agent = conn.execute(
+            "select administrative_state from catalog_agents where catalog_agent_id = ?",
+            (agent_id,),
+        ).fetchone()
+        if agent is None:
+            raise NotFoundError("catalog agent not found")
+        binding = buyer_access_service.active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("no active runtime binding for this agent")
+        signed = verify_runtime_request(
+            conn,
+            catalog_agent_id=agent_id,
+            jws=jws,
+            expected_fields={
+                "method": "GET",
+                "path": f"/v1/agents/{agent_id}/buyer-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest({}),
+                "catalog_agent_id": agent_id,
+                "binding_id": str(binding["binding_id"]),
+                "key_id": str(binding["key_id"]),
+                "runtime_origin": str(binding["runtime_origin"]),
+                "service_epoch": int(binding["service_epoch"]),
+            },
+        )
+        _check_enrollment_exp(signed)
+        if str(agent["administrative_state"]) != "active":
+            _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id,
+                  "catalog agent is not active")
+        return buyer_access_service.owner_state(conn, agent_id)
+
+
+def update_buyer_access(
+    db_path: str | Path, catalog_agent_id: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """PUT /v1/agents/{id}/buyer-access —— 商家显式设置买家路由方式。
+
+    授权：当前 active binding 私钥签名，覆盖 method、path、body_digest、agent、
+    binding/key/origin/service_epoch，加 exp（≤2min）和一次性 nonce。写入的是
+    **非凭据**模式（auto/share_code/no_share_code），绝不触碰 runtime_access、
+    代管密文或已保存分享码。CAS 使用单调 revision；并发/重放不会静默覆盖。
+    """
+    agent_id = str(catalog_agent_id or "").strip()
+    jws = str(payload.get("_binding_jws") or "").strip()
+    if not jws:
+        raise ValidationError(f"missing request signature header ({SIGNATURE_HEADER})")
+    body = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    # 严格形状：任何未知字段都拒绝，避免把凭据/自报"已加白"混进路由状态。
+    if set(body) != {"binding", "mode", "expected_revision"}:
+        raise ValidationError("binding, mode and expected_revision are required")
+    binding_ref = body.get("binding")
+    if (
+        not isinstance(binding_ref, dict)
+        or set(binding_ref) != {"binding_id"}
+        or not isinstance(binding_ref.get("binding_id"), str)
+        or not binding_ref["binding_id"].strip()
+    ):
+        raise ValidationError("binding.binding_id is required")
+    mode = body.get("mode")
+    if not buyer_access_service.is_mode(mode):
+        raise ValidationError("mode must be one of auto, share_code, no_share_code")
+    expected_revision = body.get("expected_revision")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise ValidationError("expected_revision must be a non-negative integer")
+    from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+    with db_session(db_path) as conn:
+        agent = conn.execute(
+            "select * from catalog_agents where catalog_agent_id = ?", (agent_id,)
+        ).fetchone()
+        if agent is None:
+            raise NotFoundError("catalog agent not found")
+        binding = buyer_access_service.active_binding(conn, agent_id)
+        if binding is None:
+            raise NotFoundError("no active runtime binding for this agent")
+        if str(agent["administrative_state"]) != "active":
+            _deny(BIND_DIAG_BOUND_INACTIVE, "validate_state", agent_id,
+                  "catalog agent is not active")
+        signed = verify_runtime_request(
+            conn,
+            catalog_agent_id=agent_id,
+            jws=jws,
+            expected_fields={
+                "method": "PUT",
+                "path": f"/v1/agents/{agent_id}/buyer-access",
+                "audience": "kiwi-catalog",
+                "body_digest": canonical_digest(body),
+                "catalog_agent_id": agent_id,
+                "binding_id": str(binding["binding_id"]),
+                "key_id": str(binding["key_id"]),
+                "runtime_origin": str(binding["runtime_origin"]),
+                "service_epoch": int(binding["service_epoch"]),
+            },
+        )
+        _check_enrollment_exp(signed)
+        # 事务内重查：签名校验与写入之间若发生轮换/撤销，旧 binding 不得写入。
+        current = buyer_access_service.active_binding(conn, agent_id)
+        if current is None or str(current["binding_id"]) != str(binding_ref["binding_id"]):
+            raise ConflictError("runtime binding changed during buyer-access update")
+        row = buyer_access_service.update_mode(
+            conn,
+            catalog_agent_id=agent_id,
+            mode=mode,
+            expected_revision=expected_revision,
+            binding_id=str(current["binding_id"]),
+            merchant_id=str(current["merchant_id"] or ""),
+        )
+        append_catalog_audit(
+            conn,
+            catalog_agent_id=agent_id,
+            actor=f"runtime:{current['binding_id']}",
+            event="buyer_access_mode_changed",
+            details={"mode": str(row["mode"]), "revision": int(row["revision"])},
+        )
+        owner = buyer_access_service.owner_state(conn, agent_id)
+        return {
+            "ok": True,
+            "mode": str(row["mode"]),
+            "revision": int(row["revision"]),
+            "updated_at": str(row["updated_at"]),
+            "public_state": str(owner["public_state"]),
+            "__no_store__": True,
         }
 
 

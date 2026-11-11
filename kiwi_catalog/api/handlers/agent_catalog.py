@@ -77,6 +77,7 @@ from kiwi_catalog.core.tokens import token_matches
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import (
     agent_catalog_writes,
+    buyer_access,
     buyer_origin,
     buyer_search_events,
     buyer_stats,
@@ -1061,6 +1062,22 @@ def reinstate_catalog_agent(
 # ── /v1/agents（v0.3 新 API：三正交状态域 record）─────────────────────────
 
 
+def _include_buyer_access(query: dict[str, Any]) -> bool:
+    """只认显式 `include=buyer_access`；未知 include 值 fail-closed 400。
+
+    旧客户端不发送 include，因此响应形状与 additionalProperties:false 契约
+    完全不变。
+    """
+    raw = str((query or {}).get("include") or "").strip()
+    if raw == "":
+        return False
+    values = [value.strip() for value in raw.split(",") if value.strip()]
+    unknown = [value for value in values if value != "buyer_access"]
+    if unknown:
+        raise ValidationError(f"unsupported include field: {unknown[0]}")
+    return "buyer_access" in values
+
+
 def _record_row(
     row: dict[str, Any],
     conn: Any,
@@ -1068,6 +1085,7 @@ def _record_row(
     eps_map: dict[str, list[dict[str, Any]]] | None = None,
     skills_map: dict[str, list[dict[str, Any]]] | None = None,
     runtime_access_map: dict[str, dict[str, Any]] | None = None,
+    buyer_access_projection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Serialize a catalog agent row → CatalogAgentRecord（含 skills）。"""
     cagt_id = str(row.get("catalog_agent_id", ""))
@@ -1100,27 +1118,53 @@ def _record_row(
         endpoints=eps,
         skills=skills,
         runtime_access=runtime_access_map.get(cagt_id),
+        buyer_access=buyer_access_projection,
     )
 
 
-def _record_rows(rows: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+def _record_rows(
+    rows: list[dict[str, Any]],
+    conn: Any,
+    *,
+    include_buyer_access: bool = False,
+) -> list[dict[str, Any]]:
     """批量序列化 record（审查 P3：N+1 → 每类一次 IN 查询）。"""
     ids = [str(r.get("catalog_agent_id", "")) for r in rows]
     caps_map = _list_capabilities_by_agent(conn, ids)
     eps_map = _list_endpoints_by_agent(conn, ids)
     skills_map = _list_skills_by_agent(conn, ids)
     runtime_access_map = active_public_projections(conn, ids)
-    return [_record_row(row, conn, caps_map, eps_map, skills_map, runtime_access_map) for row in rows]
+    buyer_access_map = (
+        buyer_access.public_projections(conn, rows, runtime_access_map)
+        if include_buyer_access
+        else {}
+    )
+    return [
+        _record_row(
+            row,
+            conn,
+            caps_map,
+            eps_map,
+            skills_map,
+            runtime_access_map,
+            buyer_access_map.get(str(row.get("catalog_agent_id", ""))),
+        )
+        for row in rows
+    ]
 
 
 def v1_list_agents(db_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
     """GET /v1/agents — paginated list（record 形状）。"""
     limit = result_limit(query.get("limit"), default=20)
     cursor = str(query.get("cursor") or "").strip()
+    include_buyer_access = _include_buyer_access(query)
     with db_session(db_path) as conn:
         rows, next_cursor = _list_catalog_agents(conn, limit=limit, cursor=cursor)
-        results = _record_rows(rows, conn)
-        return {"ok": True, "results": results, "next_cursor": next_cursor}
+        results = _record_rows(rows, conn, include_buyer_access=include_buyer_access)
+        response = {"ok": True, "results": results, "next_cursor": next_cursor}
+        if include_buyer_access:
+            response["__no_store__"] = True
+        return response
 
 
 def v1_search_agents(
@@ -1138,6 +1182,7 @@ def v1_search_agents(
     hosting_mode = agent_catalog_writes.normalize_hosting_mode(
         str(query.get("hosting_mode") or "")
     )
+    include_buyer_access = _include_buyer_access(query)
     with db_session(db_path) as conn:
         from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
         enforce_public_read_limit(conn, auth_payload, surface="agent search")
@@ -1160,18 +1205,46 @@ def v1_search_agents(
             limit=limit,
             cursor=str(query.get("cursor") or "").strip(),
         )
-        results = _record_rows(rows, conn)
+        results = _record_rows(rows, conn, include_buyer_access=include_buyer_access)
         _record_agent_search_event(conn, query, results)
-        return {"ok": True, "results": results, "next_cursor": next_cursor}
+        response = {"ok": True, "results": results, "next_cursor": next_cursor}
+        if include_buyer_access:
+            response["__no_store__"] = True
+        return response
 
 
-def v1_get_agent(db_path: str | Path, catalog_agent_id: str) -> dict[str, Any]:
-    """GET /v1/agents/{catalog_agent_id} — detail（record 形状）。"""
+def v1_get_agent(
+    db_path: str | Path,
+    catalog_agent_id: str,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """GET /v1/agents/{catalog_agent_id} — detail（record 形状）。
+
+    ``include=buyer_access`` 时附带非凭据买家路由投影；缺省不改变旧形状。
+    """
+    include_buyer_access = _include_buyer_access(query or {})
     with db_session(db_path) as conn:
         row = get_catalog_agent_with_merchant(conn, str(catalog_agent_id).strip())
         if row is None:
             raise NotFoundError(f"Unknown catalog agent: {catalog_agent_id}")
-        return {"ok": True, "agent": _record_row(row, conn)}
+        runtime_access_map = active_public_projections(conn, [str(row.get("catalog_agent_id", ""))])
+        projection = (
+            buyer_access.public_projections(conn, [row], runtime_access_map).get(
+                str(row.get("catalog_agent_id", ""))
+            )
+            if include_buyer_access
+            else None
+        )
+        record = _record_row(
+            row,
+            conn,
+            runtime_access_map=runtime_access_map,
+            buyer_access_projection=projection,
+        )
+        response = {"ok": True, "agent": record}
+        if include_buyer_access:
+            response["__no_store__"] = True
+        return response
 
 
 def v1_register_agent(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:

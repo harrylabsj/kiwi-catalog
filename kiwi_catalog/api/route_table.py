@@ -167,7 +167,7 @@ RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}",
         lambda db_path, payload, query, catalog_agent_id: _v1_get_agent(
-            db_path, catalog_agent_id=catalog_agent_id
+            db_path, catalog_agent_id=catalog_agent_id, query=query
         ),
     ),
 RouteEntry(
@@ -214,6 +214,20 @@ RouteEntry(
         {"GET"},
         "/v1/agents/{catalog_agent_id}/runtime-access",
         lambda db_path, payload, query, catalog_agent_id: _read_runtime_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"PUT"},
+        "/v1/agents/{catalog_agent_id}/buyer-access",
+        lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.update_buyer_access(
+            db_path, catalog_agent_id, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/agents/{catalog_agent_id}/buyer-access",
+        lambda db_path, payload, query, catalog_agent_id: cloud_binding_handlers.read_buyer_access(
             db_path, catalog_agent_id, payload
         ),
     ),
@@ -811,7 +825,7 @@ def _v1_search_agents(db_path, payload, query):
 
 
 def _v1_get_agent(db_path, catalog_agent_id, payload=None, query=None):
-    return agent_catalog_handlers.v1_get_agent(db_path, catalog_agent_id)
+    return agent_catalog_handlers.v1_get_agent(db_path, catalog_agent_id, query or {})
 
 
 def _v1_register_agent(db_path, payload):

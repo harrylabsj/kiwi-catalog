@@ -489,19 +489,32 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path, catalog_agent_id, api_auth.payload_with_auth(payload, authorization, idempotency_key)
         )
 
+    def _public_record_response(result: dict[str, Any]) -> Any:
+        """include=buyer_access 的公开 record 不参与 HTTP 缓存（撤销及时生效）。"""
+        no_store = bool(result.pop("__no_store__", False))
+        return _JSONResponse(result, headers={"cache-control": "no-store"}) if no_store else result
+
     @app.get("/v1/agents")
-    def v1_list_agents(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_list_agents(db_path, {}, _query_params_from_request(request))
+    def v1_list_agents(request: _FastAPIRequest) -> Any:
+        return _public_record_response(
+            _v1_list_agents(db_path, {}, _query_params_from_request(request))
+        )
 
     @app.get("/v1/agents/search")
-    def v1_search_agents(request: _FastAPIRequest) -> dict[str, Any]:
-        return _v1_search_agents(
-            db_path, _buyer_payload(request), _query_params_from_request(request)
+    def v1_search_agents(request: _FastAPIRequest) -> Any:
+        return _public_record_response(
+            _v1_search_agents(
+                db_path, _buyer_payload(request), _query_params_from_request(request)
+            )
         )
 
     @app.get("/v1/agents/{catalog_agent_id}")
-    def v1_get_agent(catalog_agent_id: str) -> dict[str, Any]:
-        return _v1_get_agent(db_path, catalog_agent_id)
+    def v1_get_agent(catalog_agent_id: str, request: _FastAPIRequest) -> Any:
+        return _public_record_response(
+            _v1_get_agent(
+                db_path, catalog_agent_id, _query_params_from_request(request)
+            )
+        )
 
     @app.post("/v1/agents/register")
     def v1_register_agent(
@@ -647,6 +660,26 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return cloud_binding_handlers.read_runtime_access(
             db_path, catalog_agent_id, _cloud_payload({}, request)
         )
+
+    @app.put("/v1/agents/{catalog_agent_id}/buyer-access")
+    def update_buyer_access_route(
+        catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = cloud_binding_handlers.update_buyer_access(
+            db_path, catalog_agent_id, _cloud_payload(payload, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
+
+    @app.get("/v1/agents/{catalog_agent_id}/buyer-access")
+    def read_buyer_access_route(
+        catalog_agent_id: str, request: _FastAPIRequest
+    ) -> _JSONResponse:
+        result = cloud_binding_handlers.read_buyer_access(
+            db_path, catalog_agent_id, _cloud_payload({}, request)
+        )
+        result.pop("__no_store__", None)
+        return _JSONResponse(result, headers={"cache-control": "no-store"})
 
     @app.get("/v1/agents/{catalog_agent_id}/bound-account")
     def read_bound_account_route(catalog_agent_id: str, request: _FastAPIRequest) -> _JSONResponse:

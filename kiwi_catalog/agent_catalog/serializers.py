@@ -293,6 +293,7 @@ def catalog_agent_record(
     endpoints: list[dict[str, Any]] | None = None,
     skills: list[dict[str, Any]] | None = None,
     runtime_access: dict[str, Any] | None = None,
+    buyer_access: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """CatalogAgentRecord —— /v1/agents wire 形状（v0.3 §6/§7）。
 
@@ -369,5 +370,21 @@ def catalog_agent_record(
                 "adapter_version",
                 "auth_mode",
             )
+        }
+    if buyer_access is not None:
+        # 非凭据路由投影：显式白名单，只允许协议字段；任何存储/密钥字段都
+        # 无法经这里进入公开记录。该字段只在调用方显式 include 时出现，旧
+        # 客户端（additionalProperties:false）不受影响。
+        allowed = (
+            "schema_version",
+            "state",
+            "source",
+            "mode",
+            "revision",
+            "updated_at",
+            "platform_verification",
+        )
+        record["buyer_access"] = {
+            field: buyer_access[field] for field in allowed if field in buyer_access
         }
     return record

@@ -914,6 +914,25 @@ create table if not exists catalog_domain_bindings (
 create index if not exists idx_catalog_domain_bindings_domain
         on catalog_domain_bindings(canonical_domain, state)
     """,
+    # additive（不提升 schema 版本）— 商家接入方式 → 买家路由的公开非凭据
+    # 投影。只存模式与版本；不存分享码/链接/密文。旧版本 Catalog 可继续打开
+    # 同一库，新版本在存量库上由 buyer_access.ensure_schema 幂等补建。
+    """
+create table if not exists buyer_access_routes (
+        catalog_agent_id text primary key,
+        mode text not null check(mode in ('auto','share_code','no_share_code')),
+        revision integer not null check(revision >= 1),
+        binding_id text not null,
+        merchant_id text not null default '',
+        created_at text not null,
+        updated_at text not null
+    ) without rowid
+    """,
+    """
+create index if not exists idx_buyer_access_routes_binding
+        on buyer_access_routes(binding_id)
+    """,
+
 ]
 
 

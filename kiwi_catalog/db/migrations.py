@@ -1872,6 +1872,12 @@ def run_migrations(conn: sqlite3.Connection) -> None:
                 continue
             migration.apply(conn)
             _set_schema_user_version(conn, migration.version)
+        # additive 表：不提升 user_version（旧版本仍可打开同一库），但迁移
+        # 路径与 fresh SCHEMA 必须收敛到同一表集合。跑在迁移 SAVEPOINT 内，
+        # 失败随链回滚；已存在时是 no-op。
+        from kiwi_catalog.services.buyer_access import ensure_schema
+
+        ensure_schema(conn)
         conn.execute("RELEASE SAVEPOINT kiwi_migrations")
     except BaseException:
         # review 3-55（A326）：apply 异常只回滚自身 SAVEPOINT 范围——caller
