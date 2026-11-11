@@ -375,8 +375,14 @@ def get_my_agent_card(
         ),
         # 目录托管的公开商家主页：无外部 shop_url 也能打开的稳定页面；
         # 没有可公开内容时为空串（页面本身会 404，不给假链接）。
-        "public_home_url": publications_service.public_merchant_home_url_for(
-            conn, str(row.get("merchant_id") or "")
+        # 没有活动绑定时不给链接：旧应用留下的 ACTIVE 商品不应继续被门户
+        # 当作「当前对外展示内容」的入口。
+        "public_home_url": (
+            publications_service.public_merchant_home_url_for(
+                conn, str(row.get("merchant_id") or "")
+            )
+            if has_active_binding
+            else ""
         ),
         # 访问门禁（None = 未启用/应用已断开）。已是公开投影，绝不包含分享码/密文。
         "runtime_access": (

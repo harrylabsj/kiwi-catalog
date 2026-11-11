@@ -618,9 +618,27 @@ class AccountAgentsApiTest(unittest.TestCase):
                 " values (?, 1, 'ACTIVE', 'etag-1', ?)",
                 (cagt, now),
             )
+            # 旧应用留下的公开商品：断开后不应再给门户「公开主页」入口。
+            conn.execute(
+                "insert into commerce_listings"
+                " (listing_id, listing_type, owner_agent_id, merchant_id, title, category,"
+                " listing_digest, publication_state, published_at, updated_at, fresh_until, created_at)"
+                " values ('lst-disconnect-1', 'product', ?, ?, '测试商品', '测试', ?,"
+                " 'ACTIVE', ?, ?, ?, ?)",
+                (cagt, merchant_id, "sha256:" + "b" * 64, now, now, now, now),
+            )
             conn.commit()
         finally:
             conn.close()
+        # 连接期间仍有公开主页入口；断开后该入口必须消失（商品行仍为 ACTIVE）。
+        status, before, _ = _call_http(
+            self.app,
+            "GET",
+            f"/v1/accounts/agents/{cagt}/card",
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, before)
+        self.assertTrue(before["public_home_url"])
         path = f"/v1/accounts/agents/{cagt}/disconnect"
         body = json.dumps({"binding_id": "bind-1"}).encode()
         # 无会话 → 403（与 /v1/accounts/me 同一会话约定）
@@ -719,6 +737,7 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.assertEqual(payload["publication"]["state"], "WITHDRAWN")
         self.assertIsNone(payload["card"])
         self.assertIsNone(payload["runtime_access"])
+        self.assertEqual(payload["public_home_url"], "")
 
     def test_disconnect_without_binding_returns_404(self) -> None:
         """从未绑定过的商家：解除返回 404，不创建任何绑定/端点行。"""
