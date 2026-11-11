@@ -592,6 +592,32 @@ class AccountAgentsApiTest(unittest.TestCase):
                 " values (?, 'a2a', 'https://acme.app.workbuddy.host/a2a', 'a2a', '', 1, 'active')",
                 (cagt,),
             )
+            # 已发布的公开名片：解除连接后必须一并撤下（稳定读 410，门户不再投影）。
+            card = {
+                "name": "Acme Agent",
+                "description": "公开介绍",
+                "version": "1.0.0",
+                "url": "https://acme.app.workbuddy.host",
+                "supportedInterfaces": [
+                    {
+                        "url": "https://acme.app.workbuddy.host/a2a",
+                        "protocolBinding": "JSONRPC",
+                        "protocolVersion": "1.0",
+                    }
+                ],
+            }
+            conn.execute(
+                "insert into agent_card_versions"
+                " (catalog_agent_id, card_revision, wire_profile, canonical_bytes,"
+                " digest, created_by, created_at) values (?, 1, 'a2a-1.0', ?, ?, 'runtime', ?)",
+                (cagt, json.dumps(card, ensure_ascii=False, sort_keys=True), "sha256:" + "a" * 64, now),
+            )
+            conn.execute(
+                "insert into card_publications"
+                " (catalog_agent_id, active_revision, publication_state, etag, updated_at)"
+                " values (?, 1, 'ACTIVE', 'etag-1', ?)",
+                (cagt, now),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -647,14 +673,52 @@ class AccountAgentsApiTest(unittest.TestCase):
                 ).fetchone()[0],
                 0,
             )
+            self.assertEqual(
+                conn.execute(
+                    "select publication_state from card_publications"
+                    " where catalog_agent_id = ?",
+                    (cagt,),
+                ).fetchone()[0],
+                "WITHDRAWN",
+            )
+            self.assertEqual(
+                conn.execute(
+                    "select count(*) from agent_endpoints"
+                    " where catalog_agent_id = ? and kind = 'agent_card'",
+                    (cagt,),
+                ).fetchone()[0],
+                0,
+            )
             actor, event = conn.execute(
                 "select actor, event from audit_events"
                 " where event = 'runtime_binding_revoked' order by id desc limit 1"
             ).fetchone()
             self.assertEqual(actor, f"merchant:{merchant_id}")
             self.assertEqual(event, "runtime_binding_revoked")
+            withdrawn_audit = conn.execute(
+                "select actor, details_json from audit_events"
+                " where event = 'card_publication_withdrawn' order by id desc limit 1"
+            ).fetchone()
+            self.assertIsNotNone(withdrawn_audit)
+            self.assertEqual(withdrawn_audit[0], f"merchant:{merchant_id}")
+            self.assertEqual(json.loads(withdrawn_audit[1])["reason"], "binding_disconnected")
         finally:
             conn.close()
+        # 公开稳定读地址随撤下返回 410，门户也不再投影旧应用的卡片内容。
+        status, _body, _headers = _call_http(
+            self.app, "GET", f"/v1/agents/{cagt}/agent-card.json"
+        )
+        self.assertEqual(status, 410)
+        status, payload, _ = _call_http(
+            self.app,
+            "GET",
+            f"/v1/accounts/agents/{cagt}/card",
+            cookie=f"kiwi_session={session}",
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["publication"]["state"], "WITHDRAWN")
+        self.assertIsNone(payload["card"])
+        self.assertIsNone(payload["runtime_access"])
 
     def test_disconnect_without_binding_returns_404(self) -> None:
         """从未绑定过的商家：解除返回 404，不创建任何绑定/端点行。"""

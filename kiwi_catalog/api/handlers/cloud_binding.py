@@ -902,15 +902,35 @@ def revoke_runtime_binding(
                 },
             )
             actor = "runtime"
+        now = now_iso()
         conn.execute(
             "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
-            (now_iso(), target),
+            (now, target),
         )
         # §4.5：撤销后同步端点行——无其他活动绑定时 a2a 与 agent_card 行一并
         # 删除（不再可被发现）；admin 撤销同路（同一函数）。
+        from kiwi_catalog.a2a.card_store import withdraw_publication_on_binding_revoke
         from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
 
-        sync_cloud_endpoints(conn, agent_id, now_iso())
+        # 与门户「取消连接」同一结果：该应用发布的名片一并撤下，稳定读 410。
+        withdrawn = withdraw_publication_on_binding_revoke(
+            conn,
+            catalog_agent_id=agent_id,
+            actor=actor,
+            now=now,
+        )
+        if withdrawn is not None:
+            append_catalog_audit(
+                conn,
+                catalog_agent_id=agent_id,
+                actor=actor,
+                event="card_publication_withdrawn",
+                details={
+                    "active_revision": withdrawn["active_revision"],
+                    "reason": "binding_revoked",
+                },
+            )
+        sync_cloud_endpoints(conn, agent_id, now)
         append_catalog_audit(
             conn,
             catalog_agent_id=agent_id,

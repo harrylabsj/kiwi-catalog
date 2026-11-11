@@ -8,6 +8,11 @@
 - **Agent 详情丢失查询参数**：`GET /v1/agents/{id}` 的 FastAPI 路由把
   query 误传到 payload 位置参数，`include` 等参数被静默丢弃，详情响应
   缺少 buyer_access / no-store；已改为显式 `query=` 传参并补回归测试。
+- **断开后继续展示旧应用名片**：门户取消连接 / 运行时 revoke 现在把该应用
+  已发布的公开名片置为 `WITHDRAWN`（稳定读 410，写
+  `card_publication_withdrawn` 审计）；门户详情在撤回或无活动绑定时不再
+  投影 `card` / `runtime_access`，避免「已取消连接」后仍展示旧应用的名称、
+  介绍和服务地址。
 
 ## 0.5.20 — 2026-11-11
 

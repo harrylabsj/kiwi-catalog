@@ -328,6 +328,19 @@ def get_my_agent_card(
 
     active_access = runtime_access_service.active_runtime_access(conn, agent_id)
     binding = _latest_binding(conn, agent_id)
+    has_active_binding = conn.execute(
+        "select 1 from runtime_bindings where catalog_agent_id = ? and status = 'active' limit 1",
+        (agent_id,),
+    ).fetchone() is not None
+    withdrawn = str(publication.get("state") or "") == "WITHDRAWN"
+    # 已撤回/已断开的名片不再投影给门户：卡片内容属于商家应用，解除连接后
+    # 不能继续当作当前对外展示内容。公开稳定读地址对 WITHDRAWN 同样 410。
+    card_available = (
+        card is not None
+        and not publication["quarantined"]
+        and not withdrawn
+        and has_active_binding
+    )
     # 服务地址/卡片地址/目录基址都不是「公开店铺页」：读侧精确比较并拒绝。
     blocked_shop_urls = tuple(
         value
@@ -351,12 +364,9 @@ def get_my_agent_card(
         "publication": publication,
         "binding": binding,
         # 隔离的已签名内容不返回任何字段投影（清洗后配原 digest = 伪造摘要）；
-        # 商家只看到 publication.republish_required 提示。
-        "card": (
-            None
-            if publication["quarantined"]
-            else (_card_public_fields(card) if card is not None else None)
-        ),
+        # 商家只看到 publication.republish_required 提示。已撤回或没有活动
+        # 绑定的名片同理不再投影。
+        "card": _card_public_fields(card) if card_available else None,
         # 公开店铺页（外部、商家填写；无 published 资料/链接时为空串）。
         "public_shop_url": publications_service.latest_public_shop_url(
             conn,
@@ -368,8 +378,12 @@ def get_my_agent_card(
         "public_home_url": publications_service.public_merchant_home_url_for(
             conn, str(row.get("merchant_id") or "")
         ),
-        # 访问门禁（None = 未启用）。已是公开投影，绝不包含分享码/密文。
-        "runtime_access": runtime_access_service.public_projection(active_access),
+        # 访问门禁（None = 未启用/应用已断开）。已是公开投影，绝不包含分享码/密文。
+        "runtime_access": (
+            runtime_access_service.public_projection(active_access)
+            if has_active_binding and not withdrawn
+            else None
+        ),
         # 待确认接入请求（D1：运行时首绑 → 商家在门户确认/拒绝）
         "pending_bindings": _pending_binding_items(conn, agent_id),
     }
@@ -460,14 +474,16 @@ def disconnect_my_binding(
     """门户「取消连接」（会话）：撤销本商家的当前绑定。
 
     与运行时签名面 `cloud_binding.revoke_runtime_binding` 同一结果：绑定置
-    revoked、按当前库状态同步端点行（无其他活动绑定时 a2a / agent_card 行被
-    删除）、写 catalog 审计（actor = `merchant:<merchant_id>`，事件
-    `runtime_binding_revoked`，details.channel = `portal`）。重复解除幂等
+    revoked、该应用已发布的名片撤下（ACTIVE/PAUSED → WITHDRAWN，稳定读 410）、
+    按当前库状态同步端点行（无其他活动绑定时 a2a / agent_card 行被删除）、
+    写 catalog 审计（actor = `merchant:<merchant_id>`，事件
+    `runtime_binding_revoked` / `card_publication_withdrawn`）。重复解除幂等
     （`changed:false`），不存在的绑定或非本商家 agent 一律 404。
 
     不在这里删依赖行：目录代管、开放询价、保活、访问配置的判定都要求活动
     绑定，撤销后自然 fail-closed；保留行作为历史，便于商家重新连接后核对。
     """
+    from kiwi_catalog.a2a.card_store import withdraw_publication_on_binding_revoke
     from kiwi_catalog.services.agent_endpoints import sync_cloud_endpoints
 
     row = _require_owned_agent(conn, account, catalog_agent_id)
@@ -490,6 +506,25 @@ def disconnect_my_binding(
         "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",
         (now, target),
     )
+    # 解除连接 = 该应用发布的名片不再对外展示。撤下（而非删除）保留历史，
+    # 稳定读地址随 WITHDRAWN 返回 410；重新连接后由运行时重新发布。
+    withdrawn = withdraw_publication_on_binding_revoke(
+        conn,
+        catalog_agent_id=agent_id,
+        actor=f"merchant:{merchant_id}",
+        now=now,
+    )
+    if withdrawn is not None:
+        append_catalog_audit(
+            conn,
+            agent_id,
+            f"merchant:{merchant_id}",
+            "card_publication_withdrawn",
+            {
+                "active_revision": withdrawn["active_revision"],
+                "reason": "binding_disconnected",
+            },
+        )
     sync_cloud_endpoints(conn, agent_id, now)
     append_catalog_audit(
         conn,

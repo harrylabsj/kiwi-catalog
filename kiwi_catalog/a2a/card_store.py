@@ -433,6 +433,36 @@ def set_publication_state(
     }
 
 
+def withdraw_publication_on_binding_revoke(
+    conn: sqlite3.Connection,
+    *,
+    catalog_agent_id: str,
+    actor: str,
+    now: str,
+) -> dict[str, Any] | None:
+    """绑定撤销时撤下仍在展示的公开名片（ACTIVE/PAUSED → WITHDRAWN）。
+
+    解除连接后，商家应用发布的名片不再对外展示：稳定读地址随 WITHDRAWN
+    返回 410，门户也不再投影卡片内容。版本与发布行保留为历史；重新连接后
+    由商家应用重新发布即可恢复。无发布记录或已撤回时返回 None。
+    """
+    current = conn.execute(
+        "select active_revision, publication_state from card_publications"
+        " where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    ).fetchone()
+    if current is None or str(current["publication_state"]) == "WITHDRAWN":
+        return None
+    return set_publication_state(
+        conn,
+        catalog_agent_id=catalog_agent_id,
+        state="WITHDRAWN",
+        expected_revision=int(current["active_revision"]),
+        actor=actor,
+        now=now,
+    )
+
+
 def read_active_card(conn: sqlite3.Connection, catalog_agent_id: str) -> tuple[dict[str, Any], str, str]:
     """读活动名片：返回 (card, etag, publication_state)。
 
