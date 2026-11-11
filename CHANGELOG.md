@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.21 — 2026-11-11
+
+- **门户取消连接响应信封**：`POST /v1/accounts/agents/{cagt}/disconnect`
+  的 200 响应补齐 `ok: true`；此前页面按 `r.ok` 判断会把已成功的撤销
+  显示成「操作失败」。首次解除与重复幂等两条路径均覆盖断言。
+- **Agent 详情丢失查询参数**：`GET /v1/agents/{id}` 的 FastAPI 路由把
+  query 误传到 payload 位置参数，`include` 等参数被静默丢弃，详情响应
+  缺少 buyer_access / no-store；已改为显式 `query=` 传参并补回归测试。
+
 ## 0.5.20 — 2026-11-11
 
 - **交易平台规则（schema v54）**：新增 `trade_platform_rules`（平台 ID/名称 ↔
