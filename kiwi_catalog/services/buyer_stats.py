@@ -314,6 +314,10 @@ def top_keywords_from_access_log(
     search_type，按 (day, search_type, keyword) 聚合：searches +1、
     result_count==0 时 zero_results +1；再跨 search_type 合并排行。
 
+    只统计有效搜索结果：非 200 响应与 ``result_count IS NULL`` 的行跳过。
+    NULL 表示结果数未知（例如历史上 no-store 响应没有读 body），把它当成
+    0 会把「未知」误记为「零结果」，让每个关键词都出现在未命中排行里。
+
     归一化后为空（filter-only 搜索 / 空 q）的行跳过——与旧表
     ``record_buyer_keyword`` 的空关键词跳过语义一致。
     """
@@ -323,7 +327,8 @@ def top_keywords_from_access_log(
     limit = max(1, min(int(limit or 20), 100))
     start = _dt.datetime.now(_dt.UTC).date() - _dt.timedelta(days=days - 1)
     rows = conn.execute(
-        "select substr(occurred_at, 1, 10) as day, path, query_summary, result_count"
+        "select substr(occurred_at, 1, 10) as day, path, query_summary,"
+        " result_count, status"
         " from access_log"
         " where surface = 'buyer_search' and occurred_at >= ?",
         (start.isoformat(),),
@@ -334,6 +339,10 @@ def top_keywords_from_access_log(
         search_type = _search_type_from_path(row["path"])
         if search_type is None:
             continue
+        if int(row["status"] or 0) != 200:
+            continue  # 失败请求不是有效的搜索结果
+        if row["result_count"] is None:
+            continue  # 结果数未知 → 不猜成零结果
         try:
             summary = json.loads(str(row["query_summary"] or "") or "{}")
         except (TypeError, ValueError):
@@ -341,7 +350,7 @@ def top_keywords_from_access_log(
         keyword = _normalize_keyword(summary.get("q") if isinstance(summary, dict) else "")
         if not keyword:
             continue  # filter-only / 空 q → 跳过（与旧表语义一致）
-        zero_hit = 1 if int(row["result_count"] or 0) == 0 else 0
+        zero_hit = 1 if int(row["result_count"]) == 0 else 0
         bucket = agg.setdefault((keyword, search_type), [0, 0])
         bucket[0] += 1
         bucket[1] += zero_hit

@@ -383,6 +383,37 @@ class FastApiDualStackTest(unittest.TestCase):
             self.assertEqual(status, 200, fallback)
             self.assertEqual(payload, fallback)
 
+    def test_no_store_search_still_records_result_count(self) -> None:
+        """include=buyer_access 的 no-store 搜索仍要落 result_count。
+
+        回归：中间件只对非 no-store 的 GET 200 读 body，导致这类搜索在
+        access_log 里 result_count=NULL，关键词统计把「未知」误记为「零结果」，
+        并且响应本身仍不得带 etag（no-store 语义不变）。
+        """
+        from fastapi.testclient import TestClient
+
+        from kiwi_catalog.db.session import open_connection
+
+        with TestClient(self.app) as client:
+            self._register_detail_agent(client, "no-store-search.example")
+            resp = client.get(
+                "/v1/agents/search",
+                params={"q": "detail-include", "include": "buyer_access"},
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertEqual(resp.headers.get("cache-control"), "no-store")
+            self.assertFalse(resp.headers.get("etag"))
+            expected = len(resp.json()["results"])
+        with open_connection(self.db_file) as conn:
+            row = conn.execute(
+                "select result_count from access_log"
+                " where surface = 'buyer_search' and path = '/v1/agents/search'"
+                " order by rowid desc limit 1"
+            ).fetchone()
+        self.assertIsNotNone(row, "搜索请求必须落 access_log")
+        self.assertIsNotNone(row["result_count"], "no-store 搜索也必须记录结果数")
+        self.assertEqual(int(row["result_count"]), expected)
+
     def test_get_agent_unknown_include_is_rejected(self) -> None:
         """未知 include 与 fallback 同口径 fail-closed 400（不能静默忽略）。"""
         from fastapi.testclient import TestClient

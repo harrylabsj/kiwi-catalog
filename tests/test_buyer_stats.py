@@ -238,6 +238,39 @@ class BuyerStatsServiceTest(unittest.TestCase):
         self.assertEqual([r["keyword"] for r in derived], ["only real"])
         conn.close()
 
+    def test_keyword_derived_ignores_unknown_and_failed_searches(self) -> None:
+        """result_count=NULL / 非 200 不计入关键词排行，更不能算零结果。
+
+        回归：no-store 搜索响应曾不落 result_count（NULL），派生排行把
+        NULL 当 0，导致「结果未知」被误记为「零结果」。
+        """
+        from kiwi_catalog.services import access_log as access_log_service
+
+        db = _make_db()
+        for path, q, rc, status in [
+            ("/v1/agents/search", "solid", 0, 200),  # 真实未命中
+            ("/v1/agents/search", "solid", 2, 200),  # 命中
+            ("/v1/agents/search", "unknown rc", None, 200),  # 结果未知 → 跳过
+            ("/v1/listings/search", "boom", 0, 500),  # 失败请求 → 跳过
+        ]:
+            access_log_service.record_http_access(
+                db,
+                method="GET",
+                path=path,
+                query={"q": q},
+                headers={"user-agent": "test"},
+                client_ip="203.0.113.7",
+                status=status,
+                latency_ms=1,
+                result_count=rc,
+            )
+        conn = open_connection(db)
+        derived = buyer_stats.top_keywords_from_access_log(conn, days=14)
+        self.assertEqual([r["keyword"] for r in derived], ["solid"])
+        self.assertEqual(derived[0]["searches"], 2)
+        self.assertEqual(derived[0]["zero_results"], 1)
+        conn.close()
+
     def test_keyword_source_env_switch(self) -> None:
         """env KIWI_CATALOG_KEYWORD_SOURCE 控制数据源：默认 access_log，可回退旧表。"""
         self.assertEqual(buyer_stats.keyword_source(), buyer_stats._KEYWORD_SOURCE_ACCESS_LOG)

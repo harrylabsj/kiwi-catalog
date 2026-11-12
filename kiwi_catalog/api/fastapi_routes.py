@@ -276,11 +276,27 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
             # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）；
             # no-store 路由（受控凭据分发）不参与缓存与条件请求。
-            if (
-                request.method == "GET"
-                and response.status_code == 200
-                and "no-store" not in response.headers.get("cache-control", "").lower()
-            ):
+            if request.method == "GET" and response.status_code == 200:
+                if "no-store" in response.headers.get("cache-control", "").lower():
+                    # no-store 的搜索响应（include=buyer_access 等）仍需读 body
+                    # 提取 result_count：否则 access_log 里结果数为 NULL，关键词
+                    # 统计会把「结果未知」误判成「零结果」。只读 body，不发 etag、
+                    # 不参与 304——与 fallback 栈始终捕获响应体取数的语义对齐。
+                    if (
+                        access_log_service.classify_surface(
+                            request.method, request.url.path
+                        )
+                        == access_log_service.SURFACE_BUYER_SEARCH
+                    ):
+                        body = b"".join([chunk async for chunk in response.body_iterator])
+                        final_result_count = access_log_service.result_count_from_body(body)
+                        return Response(
+                            content=body,
+                            status_code=200,
+                            headers=dict(response.headers),
+                            media_type=response.media_type,
+                        )
+                    return response
                 body = b"".join([chunk async for chunk in response.body_iterator])
                 etag = compute_etag(body)
                 headers = dict(response.headers)
