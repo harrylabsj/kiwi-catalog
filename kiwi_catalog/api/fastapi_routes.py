@@ -358,8 +358,54 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _health(db_path)
 
     @app.get("/v1/marketplace-platforms")
-    def v1_marketplace_platforms() -> dict[str, Any]:
-        return trade_platforms_handlers.list_marketplace_platforms(db_path, {}, {})
+    def v1_marketplace_platforms(request: _FastAPIRequest) -> dict[str, Any]:
+        return trade_platforms_handlers.list_marketplace_platforms(
+            db_path, _buyer_payload(request), {}
+        )
+
+    @app.get("/v1/marketplace-platforms/admin")
+    def v1_marketplace_platforms_admin(request: _FastAPIRequest) -> dict[str, Any]:
+        return trade_platforms_handlers.list_marketplace_platforms_for_admin(
+            db_path,
+            api_auth.payload_with_auth(
+                {}, request.headers.get("authorization", ""), ""
+            ),
+            {},
+        )
+
+    @app.post("/v1/marketplace-platforms")
+    def v1_create_marketplace_platform(
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return trade_platforms_handlers.create_marketplace_platform(
+            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+        )
+
+    @app.put("/v1/marketplace-platforms/{platform_id}")
+    def v1_update_marketplace_platform(
+        platform_id: str,
+        payload: dict[str, Any],
+        authorization: str = AUTHORIZATION_HEADER,
+        idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
+    ) -> dict[str, Any]:
+        return trade_platforms_handlers.update_marketplace_platform(
+            db_path,
+            platform_id,
+            api_auth.payload_with_auth(payload, authorization, idempotency_key),
+        )
+
+    @app.delete("/v1/marketplace-platforms/{platform_id}")
+    def v1_delete_marketplace_platform(
+        platform_id: str,
+        authorization: str = AUTHORIZATION_HEADER,
+    ) -> dict[str, Any]:
+        return trade_platforms_handlers.delete_marketplace_platform(
+            db_path,
+            platform_id,
+            api_auth.payload_with_auth({}, authorization, ""),
+        )
 
     @app.get("/v1/agent-catalog/agents")
     def list_catalog_agents(request: _FastAPIRequest) -> dict[str, Any]:

@@ -159,6 +159,40 @@ RouteEntry(
         ),
     ),
 RouteEntry(
+        {"POST"},
+        "/v1/marketplace-platforms",
+        lambda db_path, payload, query, **kw: trade_platforms_handlers.create_marketplace_platform(
+            db_path, payload
+        ),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/marketplace-platforms/admin",
+        lambda db_path, payload, query, **kw: (
+            trade_platforms_handlers.list_marketplace_platforms_for_admin(
+                db_path, payload, query
+            )
+        ),
+    ),
+RouteEntry(
+        {"PUT"},
+        "/v1/marketplace-platforms/{platform_id}",
+        lambda db_path, payload, query, platform_id: (
+            trade_platforms_handlers.update_marketplace_platform(
+                db_path, platform_id, payload
+            )
+        ),
+    ),
+RouteEntry(
+        {"DELETE"},
+        "/v1/marketplace-platforms/{platform_id}",
+        lambda db_path, payload, query, platform_id: (
+            trade_platforms_handlers.delete_marketplace_platform(
+                db_path, platform_id, payload
+            )
+        ),
+    ),
+RouteEntry(
         {"GET"},
         "/v1/agents/search",
         lambda db_path, payload, query, **kw: _v1_search_agents(db_path, payload, query),

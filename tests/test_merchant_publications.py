@@ -157,6 +157,32 @@ class MerchantPublicationsApiTest(unittest.TestCase):
         self.cookie_b = _register_and_login(self.app, "b@rival.example", "Rival 商行")
         self.merchant_a = _merchant_id(self.app, self.cookie_a)
         self.merchant_b = _merchant_id(self.app, self.cookie_b)
+        # 公开主页/主页链接现在要求商家有活动绑定：测试商家默认各绑定一个
+        # Runtime；需要验证断开语义的用例再单独 revoke。
+        self._add_active_binding(self.merchant_a, "cagt_bind_a")
+        self._add_active_binding(self.merchant_b, "cagt_bind_b")
+
+    def _add_active_binding(self, merchant_id: str, agent_id: str) -> None:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            now = "2026-01-01T00:00:00+00:00"
+            conn.execute(
+                "insert into catalog_agents (catalog_agent_id, merchant_id, display_name,"
+                " source_type, hosting_mode, first_seen_at, last_seen_at, created_at, updated_at)"
+                " values (?, ?, '测试接入', 'self_registered', 'direct', ?, ?, ?, ?)",
+                (agent_id, merchant_id, now, now, now, now),
+            )
+            conn.execute(
+                "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+                " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+                " binding_version, service_epoch, status, created_at, updated_at)"
+                " values (?, ?, ?, 'https://bind.example', 'https://bind.example/a2a',"
+                " 'key-1', 'thumb-1', '{}', 1, 1, 'active', ?, ?)",
+                (f"bind-{agent_id}", agent_id, merchant_id, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _create(self, cookie: str, body: dict) -> tuple[int, dict]:
         status, payload, _ = _call_http(
@@ -512,6 +538,32 @@ class MerchantPublicationsApiTest(unittest.TestCase):
         status, _page, _ = _call_http(self.app, "GET", "/m/mkt_missing")
         self.assertEqual(status, 404)
 
+    def test_public_home_link_requires_active_binding(self) -> None:
+        """断开后公开投影与公开主页都不再给入口。"""
+        status, payload = self._create(self.cookie_a, _publish_body("绑定门禁商品"))
+        self.assertEqual(status, 200, payload)
+        publication_id = payload["publication"]["publication_id"]
+        self.assertTrue(payload["publication"]["public_home_url"])
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                "update runtime_bindings set status = 'revoked' where merchant_id = ?",
+                (self.merchant_a,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, detail = self._get(publication_id)
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(detail["publication"]["public_home_url"], "")
+        status, search = self._search("q=绑定门禁")
+        self.assertEqual(status, 200, search)
+        self.assertTrue(all(item["public_home_url"] == "" for item in search["results"]))
+        status, _page, _ = _call_http(self.app, "GET", f"/m/{self.merchant_a}")
+        self.assertEqual(status, 404)
+
     def test_public_merchant_home_shows_active_listings(self) -> None:
         """只有已发布 Listing 的商家也能打开主页；私有字段不进入页面。"""
         status, _ = self._create(self.cookie_a, _publish_body("占位商品"))
@@ -682,7 +734,8 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
-        self.app = create_catalog_app(os.path.join(self.tmp, "catalog.sqlite"))
+        self.db_path = os.path.join(self.tmp, "catalog.sqlite")
+        self.app = create_catalog_app(self.db_path)
 
     def test_routes_registered_and_functional(self) -> None:
         from fastapi.testclient import TestClient
@@ -735,6 +788,29 @@ class MerchantPublicationsFastApiTest(unittest.TestCase):
             self.assertEqual(resp.status_code, 200, resp.text)
             publication_id = resp.json()["publication"]["publication_id"]
             merchant_id = resp.json()["publication"]["merchant_id"]
+            # 公开主页要求活动绑定；这里补一个最小绑定夹具。
+            now = "2026-01-01T00:00:00+00:00"
+            agent_id = f"cagt-fa-{merchant_id}"
+            conn = sqlite3.connect(self.db_path)
+            try:
+                conn.execute(
+                    "insert or ignore into catalog_agents (catalog_agent_id, merchant_id,"
+                    " display_name, source_type, hosting_mode, first_seen_at, last_seen_at,"
+                    " created_at, updated_at) values (?, ?, 'FastAPI 商贸',"
+                    " 'self_registered', 'direct', ?, ?, ?, ?)",
+                    (agent_id, merchant_id, now, now, now, now),
+                )
+                conn.execute(
+                    "insert or ignore into runtime_bindings (binding_id, catalog_agent_id,"
+                    " merchant_id, runtime_origin, a2a_endpoint, key_id, key_thumbprint,"
+                    " key_jwk_json, binding_version, service_epoch, status, created_at,"
+                    " updated_at) values (?, ?, ?, 'https://fa.example',"
+                    " 'https://fa.example/a2a', 'key-1', 'thumb-1', '{}', 1, 1, 'active', ?, ?)",
+                    (f"bind-fa-{merchant_id}", agent_id, merchant_id, now, now),
+                )
+                conn.commit()
+            finally:
+                conn.close()
             resp = client.get("/v1/merchant-publications/search", params={"q": "双栈商品"})
             self.assertEqual(resp.status_code, 200, resp.text)
             self.assertEqual(len(resp.json()["results"]), 1)

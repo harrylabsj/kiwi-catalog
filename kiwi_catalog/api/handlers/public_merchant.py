@@ -303,6 +303,10 @@ def public_merchant_home(
         from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
 
         enforce_public_read_limit(conn, payload, surface="merchant home")
+        # 解除连接后旧应用留下的内容不再对外展示：没有活动绑定时主页整体
+        # 404，不再通过直链暴露旧商品/旧名片。
+        if not publications_service.merchant_has_active_binding(conn, merchant_id):
+            raise NotFoundError(f"Unknown merchant page: {merchant_id}")
         now = now_iso()
         # 多取一条判断是否还有下一页；展示仍严格限制在 50 件/页。
         publications = publications_service.list_public_publications(

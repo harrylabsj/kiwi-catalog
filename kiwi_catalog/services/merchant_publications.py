@@ -35,6 +35,7 @@ import re
 import secrets
 import sqlite3
 import urllib.parse
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -528,6 +529,38 @@ def public_merchant_home_url(merchant_id: str) -> str:
     return f"{public_page_base_url()}{_PUBLIC_MERCHANT_PATH}{urllib.parse.quote(str(merchant_id), safe='')}"
 
 
+def merchant_has_active_binding(conn: sqlite3.Connection, merchant_id: str) -> bool:
+    """商家名下是否有活动的 Runtime 绑定。
+
+    解除连接后旧应用留下的公开内容不再对外展示：门户与公开面都用这个
+    口径决定是否给出主页链接 / 是否让主页可达。
+    """
+    merchant_id = str(merchant_id or "").strip()
+    if not merchant_id:
+        return False
+    row = conn.execute(
+        "select 1 from runtime_bindings where merchant_id = ? and status = 'active' limit 1",
+        (merchant_id,),
+    ).fetchone()
+    return row is not None
+
+
+def merchants_with_active_binding(
+    conn: sqlite3.Connection, merchant_ids: Iterable[str]
+) -> set[str]:
+    """批量版 ``merchant_has_active_binding``：避免公开列表逐行查询。"""
+    ids = sorted({str(item or "").strip() for item in merchant_ids if str(item or "").strip()})
+    if not ids:
+        return set()
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "select distinct merchant_id from runtime_bindings"
+        f" where status = 'active' and merchant_id in ({placeholders})",
+        tuple(ids),
+    ).fetchall()
+    return {str(row["merchant_id"]) for row in rows}
+
+
 def has_public_content(
     conn: sqlite3.Connection, merchant_id: str, *, now: str | None = None
 ) -> bool:
@@ -926,12 +959,17 @@ def record_public_view(conn: sqlite3.Connection, publication_id: str) -> None:
 # ── 公开投影（public-only 白名单）────────────────────────────────────────
 
 
-def public_projection(publication: dict[str, Any]) -> dict[str, Any]:
+def public_projection(
+    publication: dict[str, Any], *, allow_home_url: bool = True
+) -> dict[str, Any]:
     """公开搜索/详情投影：仅公开字段；恒带 inquiry_available=false。
 
     绝不包含注册账户的电话/邮箱（本表本就不存）；不生成 Agent Card / A2A
     端点 / 实时报价标记。``shop_url`` 与公开文本里的链接都经过读侧兜底：
     历史行或手工写库留下的 WorkBuddy/分享码 URL 不会进入本投影。
+
+    ``allow_home_url=False`` 用于商家已无活动绑定的公开面：旧内容不再对外
+    暴露主页入口。内部发布事件 payload 保留历史快照语义（默认 True）。
     """
     faq = [
         {
@@ -942,8 +980,10 @@ def public_projection(publication: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item, dict)
     ]
     expires_at = str(publication.get("expires_at") or "")
-    home_visible = str(publication.get("status") or "") == "published" and (
-        not expires_at or expires_at > now_iso()
+    home_visible = (
+        allow_home_url
+        and str(publication.get("status") or "") == "published"
+        and (not expires_at or expires_at > now_iso())
     )
     return {
         "publication_id": publication["publication_id"],

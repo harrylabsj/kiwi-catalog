@@ -85,6 +85,17 @@ class PublicCardQuarantineTest(unittest.TestCase):
                 display_name="隔离测试商家",
                 canonical_domain="quarantine.example",
             )
+            # 公开主页现在要求商家有活动绑定；隔离测试只关心内容清洗。
+            now = "2026-10-01T00:00:00+00:00"
+            conn.execute(
+                "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+                " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+                " binding_version, service_epoch, status, created_at, updated_at)"
+                " values (?, ?, ?, 'https://runtime.quarantine.example',"
+                " 'https://runtime.quarantine.example/a2a', 'key-1', 'thumb-1', '{}',"
+                " 1, 1, 'active', ?, ?)",
+                (f"bind-{self.agent_id}", self.agent_id, MERCHANT_ID, now, now),
+            )
 
     def _card(self, description: str) -> dict:
         return {

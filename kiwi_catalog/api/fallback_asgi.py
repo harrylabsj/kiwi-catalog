@@ -406,7 +406,9 @@ class MarketplaceASGIApp:
             )
             await send({"type": "http.response.body", "body": b""})
             return
-        identity_headers = [] if no_store else [(b"etag", etag.encode("ascii"))]
+        # ETag 是成功表示的指纹：错误体（404/410 等）不下发，与上方 cache-control
+        # 及 FastAPI 栈的 status == 200 门禁一致（错误不可缓存）。
+        identity_headers = [] if no_store or status != 200 else [(b"etag", etag.encode("ascii"))]
         await send(
             {
                 "type": "http.response.start",

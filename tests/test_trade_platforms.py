@@ -16,12 +16,20 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from kiwi_catalog.api.handlers.trade_platforms import list_marketplace_platforms
-from kiwi_catalog.core.errors import ConflictError, NotFoundError, ValidationError
+from kiwi_catalog.api.handlers.trade_platforms import (
+    create_marketplace_platform,
+    delete_marketplace_platform,
+    list_marketplace_platforms,
+    list_marketplace_platforms_for_admin,
+    update_marketplace_platform,
+)
+from kiwi_catalog.core.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
 from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services import trade_platforms
@@ -115,6 +123,11 @@ class TradePlatformRulesTest(unittest.TestCase):
                 trade_platforms.build_product_url(
                     "jd", bad_id, "https://item.jd.com/{id}.html", "jd.com"
                 )
+        # 即使模板已入库，代入后仍要再次校验可信域名。
+        with self.assertRaises(ValidationError):
+            trade_platforms.build_product_url(
+                "jd", "123", "https://evil.example/{id}", "jd.com"
+            )
 
     def test_public_handler_hides_operator_fields(self) -> None:
         result = list_marketplace_platforms(self.db, {}, {})
@@ -124,6 +137,51 @@ class TradePlatformRulesTest(unittest.TestCase):
             set(result["platforms"][0]),
             {"id", "label", "domain", "url_template", "sort_order"},
         )
+
+    def test_admin_write_requires_token_and_roundtrips(self) -> None:
+        payload = {
+            "id": "pinduoduo",
+            "label": "拼多多",
+            "domain": "yangkeduo.com",
+            "url_template": "https://mobile.yangkeduo.com/goods.html?goods_id={id}",
+        }
+        # 未配置/未携带 admin token 一律 fail-closed。
+        with self.assertRaises(AuthError):
+            create_marketplace_platform(self.db, dict(payload))
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_ADMIN_TOKEN": "admin-secret"}, clear=False
+        ):
+            with self.assertRaises(AuthError):
+                create_marketplace_platform(
+                    self.db, {**payload, "_auth_token": "wrong"}
+                )
+            created = create_marketplace_platform(
+                self.db, {**payload, "_auth_token": "admin-secret"}
+            )
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["platform"]["id"], "pinduoduo")
+
+            admin_rows = list_marketplace_platforms_for_admin(
+                self.db, {"_auth_token": "admin-secret"}, {}
+            )
+            self.assertIn("pinduoduo", [row["id"] for row in admin_rows["platforms"]])
+
+            updated = update_marketplace_platform(
+                self.db,
+                "pinduoduo",
+                {"_auth_token": "admin-secret", "enabled": False},
+            )
+            self.assertFalse(updated["platform"]["enabled"])
+            public = list_marketplace_platforms(self.db, {}, {})
+            self.assertNotIn(
+                "pinduoduo", [row["id"] for row in public["platforms"]]
+            )
+
+            deleted = delete_marketplace_platform(
+                self.db, "pinduoduo", {"_auth_token": "admin-secret"}
+            )
+            self.assertEqual(deleted["deleted"], "pinduoduo")
+            self.assertIsNone(trade_platforms.get_platform(self.conn, "pinduoduo"))
 
 
 if __name__ == "__main__":

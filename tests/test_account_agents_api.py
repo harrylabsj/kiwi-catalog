@@ -535,8 +535,8 @@ class AccountAgentsApiTest(unittest.TestCase):
                     conn.close()
                 payload = read_card()
                 self.assertEqual(payload["public_shop_url"], "")
-                # 外部链接被拒不妨碍目录托管的公开主页（只展示公开资料）。
-                self.assertTrue(payload["public_home_url"])
+                # 该用例没有活动绑定：公开主页链接与外部 shop_url 一样不投影。
+                self.assertEqual(payload["public_home_url"], "")
                 self.assertNotIn(raw, json.dumps(payload))
 
         # 精确等于服务地址/卡片地址的 URL 由 blocked_urls 拒绝；同主机的普通
@@ -738,6 +738,12 @@ class AccountAgentsApiTest(unittest.TestCase):
         self.assertIsNone(payload["card"])
         self.assertIsNone(payload["runtime_access"])
         self.assertEqual(payload["public_home_url"], "")
+        # 门户列表同样不再给出公开主页入口（详情与列表口径一致）。
+        status, listing, _ = _call_http(
+            self.app, "GET", "/v1/accounts/agents", cookie=f"kiwi_session={session}"
+        )
+        self.assertEqual(status, 200, listing)
+        self.assertEqual(listing["results"][0]["public_home_url"], "")
 
     def test_disconnect_without_binding_returns_404(self) -> None:
         """从未绑定过的商家：解除返回 404，不创建任何绑定/端点行。"""

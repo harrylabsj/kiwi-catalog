@@ -198,10 +198,14 @@ def _agent_list_item(
 
     catalog_agent_id = str(row["catalog_agent_id"])
     publication = _publication_summary(conn, catalog_agent_id)
+    merchant_id = str(row.get("merchant_id") or "")
+    has_active_binding = publications_service.merchant_has_active_binding(conn, merchant_id)
     return {
         "catalog_agent_id": catalog_agent_id,
-        "public_home_url": publications_service.public_merchant_home_url_for(
-            conn, str(row.get("merchant_id") or "")
+        "public_home_url": (
+            publications_service.public_merchant_home_url_for(conn, merchant_id)
+            if has_active_binding
+            else ""
         ),
         "display_name": str(row.get("display_name") or ""),
         "hosting_mode": str(row.get("hosting_mode") or ""),
@@ -332,6 +336,10 @@ def get_my_agent_card(
         "select 1 from runtime_bindings where catalog_agent_id = ? and status = 'active' limit 1",
         (agent_id,),
     ).fetchone() is not None
+    # 公开主页是商家级页面：链接门禁按商家名下是否有活动绑定判断。
+    has_public_binding = publications_service.merchant_has_active_binding(
+        conn, str(row.get("merchant_id") or "")
+    )
     withdrawn = str(publication.get("state") or "") == "WITHDRAWN"
     # 已撤回/已断开的名片不再投影给门户：卡片内容属于商家应用，解除连接后
     # 不能继续当作当前对外展示内容。公开稳定读地址对 WITHDRAWN 同样 410。
@@ -381,7 +389,7 @@ def get_my_agent_card(
             publications_service.public_merchant_home_url_for(
                 conn, str(row.get("merchant_id") or "")
             )
-            if has_active_binding
+            if has_public_binding
             else ""
         ),
         # 访问门禁（None = 未启用/应用已断开）。已是公开投影，绝不包含分享码/密文。

@@ -126,6 +126,23 @@ class FastApiDualStackTest(unittest.TestCase):
 
         merchant_id = "mkt_fastapi_home_1"
         with db_session(self.db_file) as conn:
+            now = "2026-01-01T00:00:00+00:00"
+            conn.execute(
+                "insert into catalog_agents (catalog_agent_id, merchant_id, display_name,"
+                " source_type, hosting_mode, first_seen_at, last_seen_at, created_at, updated_at)"
+                " values ('cagt_fastapi_home', ?, 'FastAPI 主页商家', 'self_registered',"
+                " 'direct', ?, ?, ?, ?)",
+                (merchant_id, now, now, now, now),
+            )
+            conn.execute(
+                "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
+                " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
+                " binding_version, service_epoch, status, created_at, updated_at)"
+                " values ('bind-fastapi-home', 'cagt_fastapi_home', ?,"
+                " 'https://home.example', 'https://home.example/a2a', 'key-1', 'thumb-1',"
+                " '{}', 1, 1, 'active', ?, ?)",
+                (merchant_id, now, now),
+            )
             conn.execute(
                 "insert into merchant_publications (publication_id, merchant_id, status,"
                 " source_kind, merchant_display_name, shop_platform, shop_url, title,"
@@ -137,6 +154,17 @@ class FastApiDualStackTest(unittest.TestCase):
                 " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
                 (merchant_id,),
             )
+            # 无活动绑定的商家：即使有 published 行，主页也必须 404。
+            conn.execute(
+                "insert into merchant_publications (publication_id, merchant_id, status,"
+                " source_kind, merchant_display_name, shop_platform, shop_url, title,"
+                " category, summary, faq_json, published_at, expires_at, version,"
+                " created_at, updated_at)"
+                " values ('mpub_fastapi_unbound', 'mkt_fastapi_unbound', 'published',"
+                " 'merchant_declared', '无绑定商家', '', '', '旧商品', '', '',"
+                " '[]', '2026-01-01T00:00:00+00:00', '', 1,"
+                " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            )
         with TestClient(self.app) as client:
             resp = client.get(f"/m/{merchant_id}")
             self.assertEqual(resp.status_code, 200, resp.text)
@@ -147,6 +175,9 @@ class FastApiDualStackTest(unittest.TestCase):
             alias = client.get(f"/merchants/{merchant_id}")
             self.assertEqual(alias.status_code, 200, alias.text)
             self.assertIn("FastAPI 主页商品", alias.text)
+            # 无活动绑定 → 直链也 404，旧内容不再对外展示。
+            unbound = client.get("/m/mkt_fastapi_unbound")
+            self.assertEqual(unbound.status_code, 404, unbound.text)
 
     def test_listings_routes_in_both_stacks(self) -> None:
         """6 条 listing 路由双栈覆盖（v0.4）；/v1/listings/search 不被 {listing_id} 吞掉。"""

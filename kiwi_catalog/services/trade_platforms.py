@@ -23,7 +23,9 @@
 - ``url_template``：https 链接模板，必须包含且只包含 ``{id}`` 占位符
 - ``enabled`` / ``sort_order``：运营开关与排序
 
-商家上传完整链接的路径已关闭；这里生成的链接是唯一入口。
+商家上传完整链接的路径已关闭；链接仍由 kiwi 客户端按公开规则生成。
+``build_product_url`` 是同一规则的服务端实现，保留给运营校验与后续服务端
+导入接口使用，不要在两处引入不同的校验口径。
 """
 
 from __future__ import annotations
@@ -118,7 +120,7 @@ def _clean_template(value: Any, domain: str) -> str:
     placeholders = set(_PLACEHOLDER_RE.findall(text))
     if placeholders != {"{id}"}:
         raise ValidationError(
-            "链接模板必须包含且只包含 {id} 占位符（例：https://item.jd.com/{id}.html）"
+            "链接模板必须包含且只包含 {id} 占位符（例：https://shop.example.com/item/{id}）"
         )
     parts = urlsplit(text)
     if parts.scheme != "https":

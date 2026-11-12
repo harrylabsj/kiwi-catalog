@@ -930,7 +930,10 @@ def revoke_runtime_binding(
                     "reason": "binding_revoked",
                 },
             )
-        sync_cloud_endpoints(conn, agent_id, now)
+        else:
+            # 撤卡路径由 set_publication_state 内部同步端点；没有可撤名片时
+            # 才需要在这里补一次（调用幂等，但不必重复执行）。
+            sync_cloud_endpoints(conn, agent_id, now)
         append_catalog_audit(
             conn,
             catalog_agent_id=agent_id,

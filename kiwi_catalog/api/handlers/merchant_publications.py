@@ -198,7 +198,12 @@ def create_publication(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         )
         return {
             "ok": True,
-            "publication": publications_service.public_projection(row),
+            "publication": publications_service.public_projection(
+                row,
+                allow_home_url=publications_service.merchant_has_active_binding(
+                    conn, merchant_id
+                ),
+            ),
             "created": created,
             "idempotent": idempotent,
             "message": (
@@ -223,9 +228,18 @@ def search_publications(
             rows, next_cursor = publications_service.search_publications(conn, query or {})
         except publications_service.SearchQueryError as exc:
             raise ValidationError(str(exc)) from exc
+        allowed_merchants = publications_service.merchants_with_active_binding(
+            conn, (str(row["merchant_id"]) for row in rows)
+        )
         return {
             "ok": True,
-            "results": [publications_service.public_projection(row) for row in rows],
+            "results": [
+                publications_service.public_projection(
+                    row,
+                    allow_home_url=str(row["merchant_id"]) in allowed_merchants,
+                )
+                for row in rows
+            ],
             "next_cursor": next_cursor,
         }
 
@@ -259,7 +273,15 @@ def get_publication(
             owner_merchant = str((account or {}).get("merchant_id") or "")
             if owner_merchant != str(row["merchant_id"]):
                 publications_service.record_public_view(conn, publication_id)
-        return {"ok": True, "publication": publications_service.public_projection(row)}
+        return {
+            "ok": True,
+            "publication": publications_service.public_projection(
+                row,
+                allow_home_url=publications_service.merchant_has_active_binding(
+                    conn, str(row["merchant_id"])
+                ),
+            ),
+        }
 
 
 def publication_stats(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -325,4 +347,12 @@ def withdraw_publication(
             "merchant_publication_withdrawn",
             {"merchant_id": merchant_id, "publication_id": row["publication_id"]},
         )
-        return {"ok": True, "publication": publications_service.public_projection(row)}
+        return {
+            "ok": True,
+            "publication": publications_service.public_projection(
+                row,
+                allow_home_url=publications_service.merchant_has_active_binding(
+                    conn, merchant_id
+                ),
+            ),
+        }

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.22 — 2026-11-12
+
+- **断开连接后的公开面收口**：无活动绑定时，门户列表、公开搜索/详情投影与
+  公开主页统一不再给出主页入口；`GET /m/{merchant_id}` 直接 404，旧应用
+  留下的 ACTIVE 商品不再能通过直链继续展示。内部发布事件 payload 保留
+  历史快照语义。
+- **交易平台运营写入**：新增 admin-only `GET /v1/marketplace-platforms/admin`、
+  `POST /v1/marketplace-platforms`、`PUT/DELETE /v1/marketplace-platforms/{id}`；
+  公开读取补 per-IP 限流。链接仍由 kiwi 客户端按公开规则生成。
+- **文案与冗余清理**：链接模板错误示例改为通用域名；绑定 revoke 路径不再
+  重复同步端点（撤卡路径已由 `set_publication_state` 完成）；修正 0.5.21
+  CHANGELOG 中关于管理端的夸大表述。
+- **错误响应不再下发 ETag**：fallback 栈此前对 404/410 等错误体也计算并
+  下发 ETag，与「错误不可缓存」及 FastAPI 栈的 200 门禁不一致；现已对齐，
+  仅成功表示携带 ETag。
+- 包含 0.5.21 之后的修复：撤卡传播、门户 disconnect 信封、FastAPI query
+  传参、mypy narrowing、测试 flake 修复，以及交易平台错误示例文案。
+
 ## 0.5.21 — 2026-11-11
 
 - **门户取消连接响应信封**：`POST /v1/accounts/agents/{cagt}/disconnect`
@@ -14,8 +32,9 @@
   投影 `card` / `runtime_access`，避免「已取消连接」后仍展示旧应用的名称、
   介绍和服务地址。
 - **断开后的残留入口**：无活动绑定时门户详情不再返回 `public_home_url`；
-  旧应用留下的 ACTIVE 商品不再被当作当前「公开主页」入口。管理端同时隐藏
-  保活授权区域，不再展示旧应用的授权入口。
+  旧应用留下的 ACTIVE 商品不再被当作当前「公开主页」入口。管理端依赖同一
+  无活动绑定的 fail-closed 判断，不再展示旧应用的保活授权入口（管理端代码
+  未改）。
 
 ## 0.5.20 — 2026-11-11
 
