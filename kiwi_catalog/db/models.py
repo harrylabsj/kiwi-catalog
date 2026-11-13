@@ -804,8 +804,9 @@ create index if not exists idx_runtime_binding_requests_expires
     # v40 — 商品名额与凭据解耦；迁移对存量账号回填免费方案。
     """
 create table if not exists listing_plans (
-        plan_code text primary key, active_limit integer not null check(active_limit >= 0),
-        updated_at text not null
+        plan_code text primary key, label text not null default '',
+        active_limit integer not null check(active_limit >= 0),
+        sort_order integer not null default 0, updated_at text not null
     )
     """,
     """

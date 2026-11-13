@@ -25,12 +25,13 @@ Extraction date: 2026-08-06.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 54
+CURRENT_SCHEMA_VERSION = 55
 
 
 @dataclass(frozen=True)
@@ -1362,7 +1363,11 @@ def migration_040_listing_entitlements(conn: sqlite3.Connection) -> None:
     conn.execute("update commerce_listings set governance_hold=1 where publication_state='SUSPENDED'")
     from kiwi_catalog.db.session import now_iso
     now = now_iso()
-    conn.execute("insert or ignore into listing_plans values ('free', 20, ?)", (now,))
+    conn.execute(
+        "insert or ignore into listing_plans (plan_code, active_limit, updated_at)"
+        " values ('free', 20, ?)",
+        (now,),
+    )
     # Preserve already-public inventory during migration without granting extra
     # capacity to accounts with no publications. Every exception is auditable.
     conn.execute("""insert or ignore into merchant_listing_entitlements
@@ -1776,6 +1781,195 @@ def migration_054_trade_platform_rules(conn: sqlite3.Connection) -> None:
         )
 
 
+def migration_055_listing_plan_tiers(conn: sqlite3.Connection) -> None:
+    """Rename free to lite, seed the five tiers, and lower the untouched lite default to 5."""
+    from kiwi_catalog.db.session import now_iso
+
+    now = now_iso()
+    if not _column_exists(conn, "listing_plans", "label"):
+        conn.execute("alter table listing_plans add column label text not null default ''")
+    if not _column_exists(conn, "listing_plans", "sort_order"):
+        conn.execute(
+            "alter table listing_plans add column sort_order integer not null default 0"
+        )
+    conn.execute(
+        "create index if not exists idx_commerce_listings_merchant_state"
+        " on commerce_listings(merchant_id, publication_state)"
+    )
+
+    # Rename the legacy free plan to lite (same row, same limit; v55 may lower
+    # the untouched default below). If both rows exist, move entitlements first.
+    lite = conn.execute(
+        "select 1 from listing_plans where plan_code='lite'"
+    ).fetchone()
+    free = conn.execute(
+        "select 1 from listing_plans where plan_code='free'"
+    ).fetchone()
+    if lite is None and free is not None:
+        conn.execute(
+            "update listing_plans set plan_code='lite', label='Lite', sort_order=10"
+            " where plan_code='free'"
+        )
+        conn.execute(
+            "update merchant_listing_entitlements set plan_code='lite'"
+            " where plan_code='free'"
+        )
+    elif lite is not None and free is not None:
+        conn.execute(
+            "update merchant_listing_entitlements set plan_code='lite'"
+            " where plan_code='free'"
+        )
+        conn.execute("delete from listing_plans where plan_code='free'")
+
+    tiers = (
+        ("lite", "Lite", 5, 10),
+        ("plus", "Plus", 20, 20),
+        ("pro", "Pro", 50, 30),
+        ("max", "Max", 100, 40),
+        ("ultra", "Ultra", 500, 50),
+    )
+    for code, label, limit, sort_order in tiers:
+        conn.execute(
+            "insert or ignore into listing_plans"
+            " (plan_code, label, active_limit, sort_order, updated_at)"
+            " values (?, ?, ?, ?, ?)",
+            (code, label, limit, sort_order, now),
+        )
+        conn.execute(
+            "update listing_plans set label=?, sort_order=?"
+            " where plan_code=? and label=''",
+            (label, sort_order, code),
+        )
+
+    custom = conn.execute(
+        "select 1 from listing_entitlement_audit"
+        " where action='plan_limit_changed' and actor <> 'migration'"
+        " and json_extract(detail_json, '$.plan_code') in ('free','lite') limit 1"
+    ).fetchone()
+    if custom is None:
+        changed = conn.execute(
+            "update listing_plans set active_limit=5, updated_at=?"
+            " where plan_code='lite' and active_limit=20",
+            (now,),
+        ).rowcount
+        if changed:
+            conn.execute(
+                "insert into listing_entitlement_audit"
+                " (merchant_id,actor,action,detail_json,created_at)"
+                " values ('','migration','plan_limit_changed',?,?)",
+                (
+                    json.dumps(
+                        {"plan_code": "lite", "old_limit": 20, "new_limit": 5},
+                        sort_keys=True,
+                    ),
+                    now,
+                ),
+            )
+    else:
+        lite_limit = conn.execute(
+            "select active_limit from listing_plans where plan_code='lite'"
+        ).fetchone()
+        conn.execute(
+            "insert into listing_entitlement_audit"
+            " (merchant_id,actor,action,detail_json,created_at)"
+            " values ('','migration','lite_default_preserved_custom',?,?)",
+            (
+                json.dumps(
+                    {
+                        "plan_code": "lite",
+                        "limit": int(lite_limit[0]) if lite_limit is not None else None,
+                    },
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+    # v40 granted some merchants a limit_override to preserve their pre-plan
+    # inventory. The new lite tier is intentionally 5, so clear only overrides
+    # that came from that migration and were never re-set by an operator.
+    grandfather_overrides = conn.execute(
+        """
+        select e.merchant_id, e.limit_override
+        from merchant_listing_entitlements e
+        where e.plan_code='lite' and e.limit_override is not null
+          and exists (select 1 from listing_entitlement_audit a
+                      where a.merchant_id=e.merchant_id
+                        and a.action='grandfather_existing_listings')
+          and not exists (
+              select 1 from listing_entitlement_audit b
+              where b.merchant_id=e.merchant_id
+                and b.action='merchant_entitlement_changed'
+                and b.id > (select min(a2.id) from listing_entitlement_audit a2
+                            where a2.merchant_id=e.merchant_id
+                              and a2.action='grandfather_existing_listings')
+          )
+        """
+    ).fetchall()
+    for merchant_id, old_override in grandfather_overrides:
+        conn.execute(
+            "update merchant_listing_entitlements"
+            " set limit_override=null, updated_at=? where merchant_id=?",
+            (now, merchant_id),
+        )
+        conn.execute(
+            "insert into listing_entitlement_audit"
+            " (merchant_id,actor,action,detail_json,created_at)"
+            " values (?, 'migration', 'grandfather_override_cleared', ?, ?)",
+            (
+                merchant_id,
+                json.dumps(
+                    {"plan_code": "lite", "old_override": int(old_override)},
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+    # Keep the existing ACTIVE rows, but make the reduction visible to ops.
+    affected = conn.execute(
+        """
+        select e.merchant_id, count(cl.listing_id) as used
+        from merchant_listing_entitlements e
+        join commerce_listings cl
+          on cl.merchant_id=e.merchant_id and cl.publication_state='ACTIVE'
+        where e.plan_code='lite'
+        group by e.merchant_id
+        having used > 5
+        """
+    ).fetchall()
+    for merchant_id, used in affected:
+        conn.execute(
+            "insert into listing_entitlement_audit"
+            " (merchant_id,actor,action,detail_json,created_at)"
+            " values (?, 'migration', 'lite_capacity_reduced', ?, ?)",
+            (
+                merchant_id,
+                json.dumps(
+                    {"active_used": int(used), "new_default": 5}, sort_keys=True
+                ),
+                now,
+            ),
+        )
+    if affected:
+        conn.execute(
+            "insert into listing_entitlement_audit"
+            " (merchant_id,actor,action,detail_json,created_at)"
+            " values ('','migration','lite_default_lowered',?,?)",
+            (
+                json.dumps(
+                    {
+                        "old_limit": 20,
+                        "new_limit": 5,
+                        "affected_merchants": len(affected),
+                    },
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -1831,6 +2025,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(52, "anonymous_domain_unique", migration_052_anonymous_domain_unique),
     Migration(53, "buyer_source", migration_053_buyer_source),
     Migration(54, "trade_platform_rules", migration_054_trade_platform_rules),
+    Migration(55, "listing_plan_tiers", migration_055_listing_plan_tiers),
 )
 
 

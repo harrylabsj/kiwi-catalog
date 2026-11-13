@@ -116,6 +116,7 @@ def service_status(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
                 "used": quota["active_used"],
                 "total": quota["active_limit"],
                 "plan": quota["plan_code"],
+                "plan_label": quota["plan_label"],
             }
         except PermissionDenied:
             # No entitlement means no grant; still expose already-active usage
@@ -124,7 +125,12 @@ def service_status(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
                 "select count(*) from commerce_listings where merchant_id=? and publication_state='ACTIVE'",
                 (merchant_id,),
             ).fetchone()[0]
-            listings = {"used": int(used), "total": 0, "plan": None}
+            listings = {
+                "used": int(used),
+                "total": 0,
+                "plan": None,
+                "plan_label": None,
+            }
 
         enrollment_status = _onboarding_status(enrollment, publication)
         awaiting = enrollment is not None and enrollment_status == "awaiting_merchant_confirmation"

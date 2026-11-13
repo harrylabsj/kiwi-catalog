@@ -1,6 +1,6 @@
 # Listings 商品名额（schema 40–41）
 
-商家注册时获得免费方案，默认同时占用 20 个公开 Listings 名额。免费方案的额度保存在 `listing_plans`，可由本地管理员命令调整；单个商家的 `limit_override` 可覆盖方案额度。此处的 token 仅用于其他旧接口的身份认证，不再决定已连接 Runtime 的 Listings 权限。
+商家注册时获得 lite 方案，默认同时占用 **5** 个公开 Listings 名额。运营可把商家调整为 plus / pro / max / ultra（分别 20 / 50 / 100 / 500）。方案额度保存在 `listing_plans`，单个商家的 `limit_override` 可覆盖方案额度（运营例外）。此处的 token 仅用于其他旧接口的身份认证，不再决定已连接 Runtime 的 Listings 权限。
 
 发布流程：商家验证邮箱；Runtime 完成 enrollment、活动绑定和名片发布；Runtime 对每次 publish、自查和撤回请求签名。Catalog 校验当前绑定与 enrollment。Publish 在 `BEGIN IMMEDIATE` 事务中检查商家账号、方案状态、治理状态、已占用名额和稳定商品键，然后写入。`product` 与 `capability` 共用额度；`ACTIVE`（包含暂时 `STALE`）占名额，`WITHDRAWN` 与 `SUSPENDED` 不占名额。修改同一 `ACTIVE` 行不额外占名额；重新上架须重新检查。
 
@@ -9,10 +9,10 @@
 配置命令（本地管理员信任边界，修改写入审计表）：
 
 ```sh
-kiwi-catalog --db catalog.sqlite catalog merchant listing-plan-limit free 20
+kiwi-catalog --db catalog.sqlite catalog merchant listing-plan-limit lite 5
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --active-limit 20
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --use-plan
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --status suspended
 ```
 
-Schema 40 为已有账号回填免费权益；若商家原有 `ACTIVE` 行超过默认 20 个，则记录等于现有占用的临时覆盖额度和审计事件。Schema 41 把尚未被管理员修改的旧免费默认值 10 提升到 20；已自定义的方案额度和商家覆盖额度保持不变。降额不会立即下架现有条目，但会阻止新增及重新上架。生产迁移前需备份数据库并单独审查迁移清单；本地实现不执行生产迁移或支付扣款。
+Schema 40 为已有账号回填免费权益；Schema 41 曾把旧免费默认值 10 提升到 20。Schema 55 建立五档（lite 5 / plus 20 / pro 50 / max 100 / ultra 500，并把旧 free 改名为 lite），只在 lite 未被管理员自定义时把 20 降到 5；已有超过 5 个 ACTIVE 的 lite 商家保留存量、不能新增或重新上架，直到下架到 5 个以内。v40 为存量商家写入的临时 grandfather override 在 v55 中清除；运营后来手动设置的 override 保留。降额不会立即下架现有条目。生产迁移前需备份数据库并单独审查迁移清单；本地实现不执行生产迁移或支付扣款。

@@ -226,7 +226,7 @@ class AccountsApiTest(unittest.TestCase):
     # ── 注册 ───────────────────────────────────────────────────────────────
 
     def test_register_creates_account_no_application_yet(self) -> None:
-        """注册即商家：分配 merchant_id、影子行和 20 个免费商品名额。"""
+        """注册即商家：分配 merchant_id、影子行和 5 个免费商品名额。"""
         session = self._register()
         status, payload, _ = _call_http(
             self.app, "GET", "/v1/accounts/me", cookie=f"kiwi_session={session}"
@@ -235,7 +235,7 @@ class AccountsApiTest(unittest.TestCase):
         self.assertEqual(payload["email"], "ops@acme.example")
         self.assertIsNone(payload["application"])  # 未申请令牌，无工单
         self.assertIsNone(payload["token"])
-        self.assertEqual(payload["listing_capacity"]["active_limit"], 20)
+        self.assertEqual(payload["listing_capacity"]["active_limit"], 5)
         self.assertEqual(payload["listing_capacity"]["active_used"], 0)
         # 注册完成即分配平台 merchant_id（与审批签发同一格式 mkt_<slug>_<rand>）
         self.assertRegex(payload["merchant_id"], r"^mkt_[a-z0-9-]+_.+")

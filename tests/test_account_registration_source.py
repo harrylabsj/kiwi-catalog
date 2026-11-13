@@ -145,7 +145,7 @@ class RegistrationSourceTest(unittest.TestCase):
         init_db(conn)
         columns = {str(row[1]) for row in conn.execute("pragma table_info(merchant_accounts)")}
         self.assertIn("registration_source", columns)
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 54)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 55)
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
                 "insert into merchant_accounts"

@@ -16,26 +16,76 @@ from kiwi_catalog.core.errors import NotFoundError, PermissionDenied, Validation
 from kiwi_catalog.db.session import now_iso
 
 
-def ensure_free_entitlement(conn: sqlite3.Connection, merchant_id: str) -> None:
+def ensure_default_entitlement(conn: sqlite3.Connection, merchant_id: str) -> None:
     now = now_iso()
-    conn.execute("insert or ignore into listing_plans values ('free', 20, ?)", (now,))
+    conn.execute(
+        "insert or ignore into listing_plans"
+        " (plan_code,label,active_limit,sort_order,updated_at)"
+        " values ('lite','Lite',5,10,?)",
+        (now,),
+    )
     conn.execute("""insert or ignore into merchant_listing_entitlements
         (merchant_id,plan_code,status,limit_override,updated_at)
-        values (?,'free','active',null,?)""", (merchant_id, now))
+        values (?,'lite','active',null,?)""", (merchant_id, now))
+
+
+def list_plans(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "select plan_code,label,active_limit,sort_order,updated_at"
+        " from listing_plans order by sort_order,plan_code"
+    ).fetchall()
+    return [
+        {
+            "plan_code": str(row["plan_code"]),
+            "label": str(row["label"]),
+            "active_limit": int(row["active_limit"]),
+            "sort_order": int(row["sort_order"]),
+            "updated_at": str(row["updated_at"]),
+        }
+        for row in rows
+    ]
+
+
+def capacity_or_none(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any] | None:
+    """Capacity view for a merchant; None when no entitlement row exists.
+
+    Publishing uses the strict :func:`capacity`; admin/reporting surfaces use
+    this variant so legacy merchants without an entitlement do not turn a list
+    endpoint into a 500.
+    """
+    row = conn.execute(
+        """select e.plan_code,e.status,e.limit_override,p.active_limit,p.label
+        from merchant_listing_entitlements e join listing_plans p
+        on p.plan_code=e.plan_code where e.merchant_id=?""",
+        (merchant_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    used = conn.execute(
+        """select count(*) from commerce_listings
+        where merchant_id=? and publication_state='ACTIVE'""",
+        (merchant_id,),
+    ).fetchone()[0]
+    limit = row["limit_override"] if row["limit_override"] is not None else row["active_limit"]
+    return {
+        "plan_code": row["plan_code"],
+        "plan_label": row["label"],
+        "status": row["status"],
+        "active_limit": int(limit),
+        "active_used": int(used),
+        "active_remaining": max(0, int(limit) - int(used)),
+        "limit_override": (
+            int(row["limit_override"]) if row["limit_override"] is not None else None
+        ),
+        "limit_source": "override" if row["limit_override"] is not None else "plan",
+    }
 
 
 def capacity(conn: sqlite3.Connection, merchant_id: str) -> dict[str, Any]:
-    row = conn.execute("""select e.plan_code,e.status,e.limit_override,p.active_limit
-        from merchant_listing_entitlements e join listing_plans p
-        on p.plan_code=e.plan_code where e.merchant_id=?""", (merchant_id,)).fetchone()
-    if row is None:
+    current = capacity_or_none(conn, merchant_id)
+    if current is None:
         raise PermissionDenied("LISTINGS_ENTITLEMENT_REQUIRED: merchant has no listing plan")
-    used = conn.execute("""select count(*) from commerce_listings
-        where merchant_id=? and publication_state='ACTIVE'""", (merchant_id,)).fetchone()[0]
-    limit = row["limit_override"] if row["limit_override"] is not None else row["active_limit"]
-    return {"plan_code": row["plan_code"], "status": row["status"],
-            "active_limit": int(limit), "active_used": int(used),
-            "active_remaining": max(0, int(limit) - int(used))}
+    return current
 
 
 def require_publication_capacity(
@@ -79,7 +129,7 @@ def set_merchant_entitlement(
         raise ValidationError("listing limit override must be nonnegative")
     if conn.execute("select 1 from merchants where id=?", (merchant_id,)).fetchone() is None:
         raise NotFoundError("unknown merchant")
-    ensure_free_entitlement(conn, merchant_id)
+    ensure_default_entitlement(conn, merchant_id)
     if plan_code is not None:
         if conn.execute("select 1 from listing_plans where plan_code=?", (plan_code,)).fetchone() is None:
             raise NotFoundError("unknown listing plan")
@@ -96,6 +146,40 @@ def set_merchant_entitlement(
                  (now_iso(), merchant_id))
     result = capacity(conn, merchant_id)
     _audit(conn, merchant_id, actor, "merchant_entitlement_changed", result)
+    return result
+
+
+def set_merchant_plan(
+    conn: sqlite3.Connection,
+    merchant_id: str,
+    plan_code: str,
+    *,
+    actor: str,
+    limit_override: int | None = None,
+    clear_override: bool = True,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Assign an operator-managed plan, clearing any stale override by default."""
+    if conn.execute(
+        "select 1 from listing_plans where plan_code=?", (plan_code,)
+    ).fetchone() is None:
+        raise NotFoundError("unknown listing plan")
+    previous = capacity_or_none(conn, merchant_id)
+    result = set_merchant_entitlement(
+        conn,
+        merchant_id,
+        actor=actor,
+        plan_code=plan_code,
+        limit_override=limit_override,
+        clear_override=clear_override,
+    )
+    _audit(
+        conn,
+        merchant_id,
+        actor,
+        "merchant_plan_changed",
+        {"previous": previous, "current": result, "reason": reason},
+    )
     return result
 
 

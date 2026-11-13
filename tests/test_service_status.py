@@ -14,7 +14,7 @@ from unittest import mock
 from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.services import connector_identity
-from kiwi_catalog.services.listing_entitlements import ensure_free_entitlement
+from kiwi_catalog.services.listing_entitlements import ensure_default_entitlement
 
 
 def _call(app, authorization=""):
@@ -70,7 +70,7 @@ class ServiceStatusApiTest(unittest.TestCase):
         _register_and_login(self.app, email, name)
         with db_session(self.db_path) as conn:
             conn.execute("update merchant_accounts set merchant_id=? where email=?", (merchant_id, email))
-            ensure_free_entitlement(conn, merchant_id)
+            ensure_default_entitlement(conn, merchant_id)
             acct = conn.execute("select account_id from merchant_accounts where email=?", (email,)).fetchone()
             issued = connector_identity.issue_merchant_token(
                 conn,
@@ -190,7 +190,7 @@ class ServiceStatusApiTest(unittest.TestCase):
         self.assertEqual(a["card"]["origin"], "https://runtime.example")
         self.assertEqual(a["onboarding"]["status"], "published")
         self.assertEqual(a["presence"]["state"], "fresh")
-        self.assertEqual(a["listings"], {"used": 1, "total": 20, "plan": "free"})
+        self.assertEqual(a["listings"], {"used": 1, "total": 5, "plan": "lite", "plan_label": "Lite"})
         self.assertEqual(b["presence"]["state"], "stale")
         self.assertNotIn("mkt_b", json.dumps(a))
 

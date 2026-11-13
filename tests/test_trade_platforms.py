@@ -44,7 +44,7 @@ class TradePlatformRulesTest(unittest.TestCase):
         self.conn.close()
 
     def test_schema_v54_and_defaults(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 54)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 55)
         rows = trade_platforms.list_platforms(self.conn)
         self.assertEqual([row["id"] for row in rows], ["jd", "taobao", "tmall"])
         self.assertTrue(all(row["enabled"] for row in rows))

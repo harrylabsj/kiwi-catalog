@@ -8,7 +8,7 @@
 
 商家在 kiwi-catalog 上的自助接入面：注册商家账号（**商家名称、电话必填**，
 邮箱 + 密码，微信选填）→ 邮箱验证 → 登录。**注册即成为商家**——分配平台
-merchant_id 并创建影子 `merchants` 行，同时自动获得 **free 方案，默认 20 个
+merchant_id 并创建影子 `merchants` 行，同时自动获得 **lite 方案，默认 5 个
 同时占用的 Listings 名额**，admin dashboard **无需审批即可见**。邮箱验证后，
 商家可完成一次 Runtime 连接确认；名片上线后，Runtime 用活动绑定签名发布、
 自查和撤回商品。无需另行申请 Listings 资格，也无需复制 owner token。
@@ -37,7 +37,7 @@ owner token 双路径（`api/auth.py`）：
 | `merchant_application_limits` | 注册/登录/申请/公开资料发布/买家关注限流（per-email / per-actor / per-merchant / per-buyer 15min 窗口） |
 | `registration_verifications` | 邮箱先行注册的**预验证**记录（v42）：一邮箱一行。账号还不存在时验证码无处依附（v15 的 `verification_code_hash` 寄生在 `merchant_accounts` 行上），所以单独建表；验码通过后码作废、改发 15 分钟的一次性 `ticket_hash`，建号成功即删行。过期行由 `register/code` 顺手惰性清理 |
 | `merchant_tokens` | 签发 token（`token_encrypted` Fernet 加密存储，active/revoked；注册种入空 hash 的 revoked 占位行） |
-| `listing_plans` | 方案额度；free 初始为 20，可由管理员修改 |
+| `listing_plans` | 方案额度；lite/plus/pro/max/ultra 初始为 5/20/50/100/500，运营可给商家分配 |
 | `merchant_listing_entitlements` | 商家方案、资格状态和可选的单商家额度覆盖 |
 | `listing_entitlement_audit` | 方案／商家额度调整与迁移回填审计 |
 | `usage_metrics` | 令牌使用量（rotated/revoked 等） |
@@ -51,7 +51,7 @@ owner token 双路径（`api/auth.py`）：
   落库 + 15 分钟过期）、v25（联系方式微信：merchant_accounts 加 `wechat`）、
   v29（商家公开资料 merchant_publications，M0）、v30（买家订阅：
   merchant_public_events + buyer_follows + merchant_publications.view_count，
-  M4）；v40（商品名额与治理暂停保护）、v41（未自定义的免费默认额度从 10 调整到 20）、
+  M4）；v40（商品名额与治理暂停保护）、v41（未自定义的免费默认额度从 10 调整到 20）、v55（五档套餐；旧 free 改名 lite，默认降到 5）、
   v42（邮箱先行注册的预验证表 `registration_verifications`）；
   源码当前 `CURRENT_SCHEMA_VERSION = 47`；线上部署前以实际 `PRAGMA user_version` 和迁移链核对为准，不能假定与源码一致。
 - Fernet 密钥派生：`sha256("kiwi-token-fernet:" + KIWI_CATALOG_OWNER_TOKEN_SECRET)`
@@ -65,7 +65,7 @@ owner token 双路径（`api/auth.py`）：
 | --- | --- |
 | `POST /v1/accounts/register/code` | **邮箱先行第一步**：为尚未注册的邮箱签发 6 位验证码（15 分钟）。邮箱已注册 → 409（明确提示，接受枚举代价换取 UX 清晰）。响应回显 `verification_code`（console 模式） |
 | `POST /v1/accounts/register/verify` | **第二步**：校验验证码 → 返回一次性 `verification_ticket`（15 分钟、单次使用）。失败一律同形 403，不区分"没发过码/码错/码过期" |
-| `POST /v1/accounts/register` | **第三步**：凭 `verification_ticket` 建号（**商家名称、电话必填** + 邮箱 + 密码 + 微信选填；可选 `source` 注册入口）→ 分配 merchant_id、影子 `merchants` 行和 free 商品方案（默认 20 个名额）→ **建号即 `email_verified=1`** 并自动登录（`__cookies__`）。ticket 缺失/过期 → 403；邮箱已注册 → 409 |
+| `POST /v1/accounts/register` | **第三步**：凭 `verification_ticket` 建号（**商家名称、电话必填** + 邮箱 + 密码 + 微信选填；可选 `source` 注册入口）→ 分配 merchant_id、影子 `merchants` 行和 lite 商品方案（默认 5 个名额）→ **建号即 `email_verified=1`** 并自动登录（`__cookies__`）。ticket 缺失/过期 → 403；邮箱已注册 → 409 |
 | `POST /v1/accounts/login` | 校验 + 签发会话（`__cookies__` 透传）；邮箱未验证 → 403 |
 | `POST /v1/accounts/verify-email` | 验证码核验（通过后才可登录）。**legacy**：邮箱先行改造后不再有新账号处于未验证态，本端点只服务 2026-10-13 之前的存量账号 |
 | `POST /v1/accounts/resend-code` | 重发验证码。**legacy**：同上，且是存量未验证账号唯一的取码途径 |

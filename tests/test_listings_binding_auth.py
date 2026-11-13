@@ -110,7 +110,7 @@ class ListingsBindingAuthTest(unittest.TestCase):
             )
             conn.execute(
                 "insert into merchant_listing_entitlements (merchant_id,plan_code,status,updated_at)"
-                " values (?,'free','active',?)", (self.merchant_id, now),
+                " values (?,'lite','active',?)", (self.merchant_id, now),
             )
             upsert_catalog_agent(
                 conn, self.agent_id, merchant_id=self.merchant_id,
