@@ -10,9 +10,13 @@
 
 ```sh
 kiwi-catalog --db catalog.sqlite catalog merchant listing-plan-limit lite 5
+kiwi-catalog --db catalog.sqlite catalog merchant listing-plan mkt_example plus --reason "商家申请扩容"
+kiwi-catalog --db catalog.sqlite catalog merchant listing-plan mkt_example plus --limit-override 25
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --active-limit 20
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --use-plan
 kiwi-catalog --db catalog.sqlite catalog merchant listing-limit mkt_example --status suspended
 ```
+
+`listing-plan` 与 `listing-plan-limit` 不同：前者把**单个商家**整体调到某套餐（默认清除遗留的 `limit_override`，除非显式给 `--limit-override`；`0` 表示禁止新增上架），后者改**套餐本身**的额度。`listing-plan` 一次变更会写两条审计：`merchant_entitlement_changed` 与 `merchant_plan_changed`（后者含 `previous`/`current` 和 `--reason`）。
 
 Schema 40 为已有账号回填免费权益；Schema 41 曾把旧免费默认值 10 提升到 20。Schema 55 建立五档（lite 5 / plus 20 / pro 50 / max 100 / ultra 500，并把旧 free 改名为 lite），只在 lite 未被管理员自定义时把 20 降到 5；已有超过 5 个 ACTIVE 的 lite 商家保留存量、不能新增或重新上架，直到下架到 5 个以内。v40 为存量商家写入的临时 grandfather override 在 v55 中清除；运营后来手动设置的 override 保留。降额不会立即下架现有条目。生产迁移前需备份数据库并单独审查迁移清单；本地实现不执行生产迁移或支付扣款。

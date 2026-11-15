@@ -89,7 +89,10 @@ class CatalogMerchantCliTest(unittest.TestCase):
         catalog = subparsers.choices["catalog"]
         merchant = catalog._actions[-1].choices["merchant"]
         merchant_cmds = list(merchant._actions[-1].choices.keys())
-        self.assertEqual(sorted(merchant_cmds), ["applications", "listing-limit", "listing-plan-limit", "status", "token"])
+        self.assertEqual(
+            sorted(merchant_cmds),
+            ["applications", "listing-limit", "listing-plan", "listing-plan-limit", "status", "token"],
+        )
 
     def test_listing_limits_are_configurable_and_audited(self) -> None:
         changed = json.loads(self._run("catalog", "merchant", "listing-plan-limit", "lite", "7", "--format", "json"))
@@ -106,6 +109,62 @@ class CatalogMerchantCliTest(unittest.TestCase):
                 ).fetchone()[0],
                 2,
             )
+
+    def test_listing_plan_assigns_plan_and_audits(self) -> None:
+        issued = self._approve_first()
+        merchant_id = issued["merchant_id"]
+        # 商家注册即 lite；先给一个 override，再升级 plus 应默认清掉。
+        self._run("catalog", "merchant", "listing-limit", merchant_id, "--active-limit", "3", "--format", "json")
+        result = json.loads(self._run(
+            "catalog", "merchant", "listing-plan", merchant_id, "plus", "--reason", "商家申请扩容", "--format", "json",
+        ))
+        self.assertEqual(result["plan_code"], "plus")
+        self.assertEqual(result["plan_label"], "Plus")
+        self.assertEqual(result["active_limit"], 20)
+        self.assertIsNone(result["limit_override"])
+        self.assertEqual(result["limit_source"], "plan")
+        with db_session(self.db) as conn:
+            actions = [
+                row[0]
+                for row in conn.execute(
+                    "select action from listing_entitlement_audit"
+                    " where merchant_id=? and actor <> 'migration' order by id",
+                    (merchant_id,),
+                )
+            ]
+        # set_merchant_entitlement 的变更审计 + set_merchant_plan 的套餐审计。
+        self.assertIn("merchant_entitlement_changed", actions)
+        self.assertIn("merchant_plan_changed", actions)
+        with db_session(self.db) as conn:
+            detail = json.loads(
+                conn.execute(
+                    "select detail_json from listing_entitlement_audit"
+                    " where merchant_id=? and action='merchant_plan_changed'"
+                    " order by id desc limit 1",
+                    (merchant_id,),
+                ).fetchone()[0]
+            )
+        self.assertEqual(detail["reason"], "商家申请扩容")
+        self.assertEqual(detail["previous"]["plan_code"], "lite")
+        self.assertEqual(detail["current"]["plan_code"], "plus")
+
+        # 显式 --limit-override 保留单人覆盖（默认才会清除）；负数由参数解析拒绝。
+        kept = json.loads(self._run(
+            "catalog", "merchant", "listing-plan", merchant_id, "pro",
+            "--limit-override", "7", "--format", "json",
+        ))
+        self.assertEqual(kept["plan_code"], "pro")
+        self.assertEqual(kept["active_limit"], 7)
+        self.assertEqual(kept["limit_source"], "override")
+        rejected = self._run(
+            "catalog", "merchant", "listing-plan", merchant_id, "pro",
+            "--limit-override", "-1", expect_fail=True,
+        )
+        self.assertIn("must be non-negative", rejected)
+
+        # 未知套餐报错，不静默。
+        out = self._run("catalog", "merchant", "listing-plan", merchant_id, "gold", expect_fail=True)
+        self.assertIn("unknown listing plan", out)
 
     # ── applications list ──────────────────────────────────────────────────
 
