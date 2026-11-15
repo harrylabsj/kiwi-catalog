@@ -52,6 +52,26 @@ def cmd_listing_merchant_limit(args: argparse.Namespace) -> None:
     emit({"ok": True, "merchant_id": args.merchant_id, **result}, args.format)
 
 
+def cmd_listing_merchant_plan(args: argparse.Namespace) -> None:
+    """catalog agent-catalog merchant listing-plan <merchant_id> <plan_code>
+
+    把商家整体调到某个套餐（lite/plus/pro/max/ultra），默认清除遗留的
+    limit_override（除非显式给 --limit-override）；变更写 merchant_plan_changed
+    审计，与文档「运营升级套餐」口径一致。
+    """
+    with db_session(db_path_from_args(args)) as conn:
+        result = listing_entitlements.set_merchant_plan(
+            conn,
+            args.merchant_id,
+            args.plan_code,
+            actor="cli-declared:local-admin",
+            limit_override=args.limit_override,
+            clear_override=args.limit_override is None,
+            reason=args.reason,
+        )
+    emit({"ok": True, "merchant_id": args.merchant_id, **result}, args.format)
+
+
 def cmd_merchant_applications_list(args: argparse.Namespace) -> None:
     """catalog merchant applications list [--status pending]"""
     with db_session(db_path_from_args(args)) as conn:
