@@ -168,7 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     listing_plan_assign.add_argument("plan_code")
     listing_plan_assign.add_argument(
         "--limit-override", type=non_negative_int, default=None,
-        help="Optional per-merchant slot override; default clears any stale override",
+        help=(
+            "Optional per-merchant slot override (0 = no new listings); "
+            "omit to clear any existing override and use the plan quota"
+        ),
     )
     listing_plan_assign.add_argument("--reason", default="", help="Free-text reason recorded in the audit trail")
     listing_plan_assign.add_argument("--format", choices=["text", "json"], default="text")

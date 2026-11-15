@@ -53,7 +53,7 @@ def cmd_listing_merchant_limit(args: argparse.Namespace) -> None:
 
 
 def cmd_listing_merchant_plan(args: argparse.Namespace) -> None:
-    """catalog agent-catalog merchant listing-plan <merchant_id> <plan_code>
+    """catalog merchant listing-plan <merchant_id> <plan_code>
 
     把商家整体调到某个套餐（lite/plus/pro/max/ultra），默认清除遗留的
     limit_override（除非显式给 --limit-override）；变更写 merchant_plan_changed
