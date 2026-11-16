@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-catalog"
-version = "0.5.24"
+version = "0.5.25"
 description = "Standalone Agent Catalog service (published from shopping-cli extraction plan, phase 2)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,5 +43,5 @@ kiwi-catalog = "kiwi_catalog.cli:main"
 include = ["kiwi_catalog*"]
 
 [tool.setuptools.package-data]
-kiwi_catalog = ["py.typed"]
+kiwi_catalog = ["py.typed", "templates/*.toml"]
 "kiwi_catalog.contracts" = ["*.json"]

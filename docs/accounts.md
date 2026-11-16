@@ -115,6 +115,18 @@ POST /v1/accounts/register         {email, password, merchant_name, phone, wecha
 - 存量账号停留在 `unknown`，不做推断性回填；运营后台按「账号来源优先、
   hosted 投影兜底 workbuddy」展示。
 
+### 3.1.3 欢迎信模板（配置文件）
+
+商家首次验证邮箱后发送的欢迎信由 TOML 配置驱动，不需要改代码：
+
+- 包内默认：`kiwi_catalog/templates/welcome_email.toml`；
+- 生产覆盖：`KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE=/path/to/welcome_email.toml`
+  指向外部文件（例如 `/etc/kiwi-catalog/welcome_email.toml`）；
+- 字段：`subject`（主题）与 `body`（正文），正文支持 `{merchant_name}` 和
+  `{account_email}` 占位符；
+- 每次发信时读取文件，改完下一封即生效；文件缺失/非法只跳过欢迎信并记
+  warning，不影响注册结果。
+
 ### 3.2 `/v1/merchants/*`（token 分发，owner/admin）
 
 | 路由 | 语义 |

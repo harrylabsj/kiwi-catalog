@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.25 — 2026-11-16
+
+- **欢迎信改为配置文件**：主题/正文读取
+  `KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE` 指向的 TOML（缺省为包内
+  `templates/welcome_email.toml`），支持 `{merchant_name}` / `{account_email}`
+  占位符；每次发信时读取，改文案无需改代码或重启。配置缺失/非法只跳过欢迎信
+  并记 warning，不影响注册。客服联系方式更新为微信号 hhdshwe 或邮件
+  1711496337@qq.com。
+
 ## 0.5.24 — 2026-11-16
 
 - **访问日志新增 `runtime_read` surface**：`/v1/agents/{id}/runtime-binding(s)`、

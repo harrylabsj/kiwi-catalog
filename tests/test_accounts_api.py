@@ -2080,9 +2080,57 @@ class RegistrationEmailTest(unittest.TestCase):
             "Acme 商贸，\n\n"
             "您好，感谢您注册成为kiwi 商家，欣赏您尝试新事物的勇气。"
             "让我们一起开启Agentic Commerce 之旅。\n\n"
-            "我们的官网是: kiwi.harrylabsj.com , 有问题也可以随时添加我的微信（hhdshwe）联系。\n\n"
+            "我们的官网是: kiwi.harrylabsj.com , 欢迎随时联系客服（微信号：hhdshwe 或邮件: 1711496337@qq.com）。\n\n"
             "感谢，\nKiwi 客服\n",
         )
+
+    def test_welcome_email_template_can_be_overridden_by_config_file(self):
+        """文案来自 TOML 配置：env 指向外部文件即可改内容，不需要改代码。"""
+        ticket = self._ticket()
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        template_path = os.path.join(os.path.dirname(self.db_path), "welcome.toml")
+        with open(template_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                'subject = "自定义欢迎信"\n'
+                'body = """\n'
+                "{merchant_name} 你好，客服邮箱 {account_email}。\n"
+                '"""\n'
+            )
+        self.send.reset_mock()
+        with mock.patch.dict(
+            os.environ, {"KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE": template_path}
+        ):
+            status, payload, _ = self.register(ticket)
+        self.assertEqual(status, 200, payload)
+        welcome = next(
+            call.args
+            for call in self.send.call_args_list
+            if call.args[1] == "自定义欢迎信"
+        )
+        self.assertEqual(welcome[0], REGISTER_BODY["email"])
+        self.assertEqual(
+            welcome[2],
+            f"Acme 商贸 你好，客服邮箱 {REGISTER_BODY['email']}。\n",
+        )
+
+    def test_bad_welcome_template_skips_email_without_failing_registration(self):
+        """配置错误是旁路：只跳过欢迎信，注册与运营通知照常。"""
+        ticket = self._ticket()
+        os.environ["KIWI_CATALOG_EMAIL_VERIFICATION_MODE"] = "smtp"
+        self.send.reset_mock()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE": os.path.join(
+                    os.path.dirname(self.db_path), "missing-welcome.toml"
+                )
+            },
+        ):
+            status, payload, _ = self.register(ticket)
+        self.assertEqual(status, 200, payload)
+        subjects = [call.args[1] for call in self.send.call_args_list]
+        self.assertNotIn("欢迎成为 Kiwi 商家", subjects)
+        self.assertTrue(any(subject.startswith("[Kiwi] 新商家注册") for subject in subjects))
 
     def test_ticket_is_single_use(self):
         """ticket 单次消费：重放必须被拒，不能重复建号。"""

@@ -42,7 +42,9 @@ import os
 import re
 import secrets
 import sqlite3
+import tomllib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.core.errors import (
@@ -526,24 +528,62 @@ def notify_admin_new_registration(
         return False
 
 
+_WELCOME_EMAIL_TEMPLATE_ENV = "KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE"
+_WELCOME_EMAIL_TEMPLATE_DEFAULT = (
+    Path(__file__).resolve().parent.parent / "templates" / "welcome_email.toml"
+)
+
+
+def welcome_email_template_path() -> Path:
+    """欢迎信配置路径：env 覆盖优先，否则用包内默认模板。"""
+    override = str(os.environ.get(_WELCOME_EMAIL_TEMPLATE_ENV) or "").strip()
+    return Path(override).expanduser() if override else _WELCOME_EMAIL_TEMPLATE_DEFAULT
+
+
+def load_welcome_email_template() -> tuple[str, str]:
+    """读取欢迎信配置 ``(subject, body)``；文件缺失/非法时抛异常。
+
+    调用方（``send_welcome_email``）把这里的异常当作旁路失败处理：不建号回滚、
+    也不静默改发旧文案。配置由运营维护时，错误应出现在日志里。
+    """
+    path = welcome_email_template_path()
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    subject = str(data.get("subject") or "").strip()
+    body = str(data.get("body") or "")
+    if not subject or not body.strip():
+        raise ValueError(f"welcome email template needs non-empty subject/body: {path}")
+    return subject, body
+
+
+def render_welcome_email(
+    *, merchant_name: str, account_email: str
+) -> tuple[str, str]:
+    """按配置渲染 ``(subject, body)``；支持 {merchant_name}/{account_email}。"""
+    subject, body = load_welcome_email_template()
+    name = " ".join((merchant_name or account_email).splitlines())
+    rendered = body.replace("{merchant_name}", name).replace(
+        "{account_email}", account_email
+    )
+    return subject, rendered
+
+
 def send_welcome_email(*, merchant_name: str, account_email: str) -> bool:
     """商家**首次验证邮箱**（事务提交后）发送欢迎信。
 
     - 仅 smtp 模式发真实邮件；console/未配置模式返回 False（开发/演示环境本就
       不发信，不是错误）。
-    - **不抛异常**：欢迎信是旁路，SMTP 故障不得影响邮箱验证结果。
+    - 文案来自 ``KIWI_CATALOG_WELCOME_EMAIL_TEMPLATE`` 指向的 TOML，缺省为包内
+      ``templates/welcome_email.toml``；改文案不需要改代码。
+    - **不抛异常**：欢迎信是旁路，SMTP/配置故障不得影响邮箱验证结果。
     """
     if _verification_mode() != "smtp":
         return False
-    body = (
-        f"{merchant_name}，\n\n"
-        "您好，感谢您注册成为kiwi 商家，欣赏您尝试新事物的勇气。"
-        "让我们一起开启Agentic Commerce 之旅。\n\n"
-        "我们的官网是: kiwi.harrylabsj.com , 有问题也可以随时添加我的微信（hhdshwe）联系。\n\n"
-        "感谢，\nKiwi 客服\n"
-    )
     try:
-        _send_email(account_email, "欢迎成为 Kiwi 商家", body)
+        subject, body = render_welcome_email(
+            merchant_name=merchant_name, account_email=account_email
+        )
+        _send_email(account_email, subject, body)
         return True
     except Exception as exc:  # noqa: BLE001 —— 旁路：失败不得影响邮箱验证
         _LOGGER.warning("merchant welcome email failed: %r", exc)
