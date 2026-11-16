@@ -45,9 +45,12 @@ from typing import Any
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services.buyer_origin import derive_buyer_source
 
-# ── surface 词表（五分类；运营端以此为单一来源）──────────────────────────────
+# ── surface 词表（六分类；运营端以此为单一来源）──────────────────────────────
 SURFACE_BUYER_SEARCH = "buyer_search"
 SURFACE_BUYER_DETAIL = "buyer_detail"
+# 机器读/控制面：runtime 绑定与治理状态轮询、名片发现、访问授权等。
+# 这些不是买家"看详情"，不得计入搜→看转化（runtime 每分钟轮询会淹没漏斗）。
+SURFACE_RUNTIME_READ = "runtime_read"
 SURFACE_MERCHANT_WRITE = "merchant_write"
 SURFACE_ACCOUNT_PORTAL = "account_portal"
 SURFACE_ADMIN = "admin"
@@ -55,6 +58,7 @@ SURFACE_ADMIN = "admin"
 ALL_SURFACES = (
     SURFACE_BUYER_SEARCH,
     SURFACE_BUYER_DETAIL,
+    SURFACE_RUNTIME_READ,
     SURFACE_MERCHANT_WRITE,
     SURFACE_ACCOUNT_PORTAL,
     SURFACE_ADMIN,
@@ -79,6 +83,8 @@ _SEARCH_PATHS = frozenset(
         "/v1/agents/search",
         "/v1/listings/search",
         "/v1/agent-catalog/agents/search",
+        # 商家公开资料检索：买家发现"资料可查"商家的入口，属于买家搜索。
+        "/v1/merchant-publications/search",
     }
 )
 
@@ -90,6 +96,16 @@ _DETAIL_RE = re.compile(
     r"|^/v1/listings/([^/]+)$"
     r"|^/v1/agent-catalog/agents/([^/]+)$"
     r"|^/v1/hosted/agents/[^/]+/(?:agent-card\.json|ucp)$"
+)
+
+# 机器读/控制子资源：runtime 轮询（每分钟复查绑定/治理状态）、名片发现、
+# 访问授权与合规同意状态。均不属于买家详情，归 ``runtime_read``。
+_RUNTIME_SUBRESOURCE_RE = re.compile(
+    r"^/v1/agents/[^/]+/(?:"
+    r"runtime-binding|runtime-bindings|runtime-access|runtime-keepalive-consent"
+    r"|agent-card\.json|buyer-access|bound-account"
+    r"|public-inquiry|public-inquiry-consent"
+    r")$"
 )
 
 # 路径中的静态动作段——不算 target_id / 详情资源 id
@@ -145,12 +161,14 @@ _CREDENTIAL_PARAM_SUBSTRINGS = (
 
 
 def classify_surface(method: str, path: str) -> str | None:
-    """surface 五分类；``/health`` 不记录返回 None。
+    """surface 六分类；``/health`` 不记录返回 None。
 
-    - ``buyer_search``：三个搜索端点（/v1/agents/search、/v1/listings/search、
-      legacy /v1/agent-catalog/agents/search）；
-    - ``buyer_detail``：买家读详情（/v1/agents/{id}、/v1/listings/{id}、
-      /v1/hosted/agents/{id}/agent-card.json、/v1/hosted/agents/{id}/ucp 等）；
+    - ``buyer_search``：买家搜索端点（/v1/agents/search、/v1/listings/search、
+      legacy /v1/agent-catalog/agents/search、/v1/merchant-publications/search）；
+    - ``buyer_detail``：买家读**单个**详情资源（/v1/agents/{id}、
+      /v1/listings/{id}、/v1/agent-catalog/agents/{id}、hosted card/ucp）；
+    - ``runtime_read``：agent 子资源机器读（runtime-binding(s)、runtime-access、
+      agent-card.json、buyer-access、bound-account、public-inquiry* 等）；
     - ``merchant_write``：其余商家写操作 POST /v1/*（含商家读端点自查——
       /v1/merchants/self 等归入商家面）；
     - ``account_portal``：账号体系 /v1/accounts/* 与门户 HTML 页 /portal/*；
@@ -173,13 +191,14 @@ def classify_surface(method: str, path: str) -> str | None:
         return SURFACE_BUYER_SEARCH
     if _is_buyer_detail_path(path):
         return SURFACE_BUYER_DETAIL
+    if method == "GET" and _RUNTIME_SUBRESOURCE_RE.match(path):
+        return SURFACE_RUNTIME_READ
     if method in ("POST", "PUT", "PATCH", "DELETE") and path.startswith("/v1/"):
         return SURFACE_MERCHANT_WRITE
     if path.startswith("/v1/"):
-        # 其余 /v1/* 读端点：agent/listing/hosted 目录读归 buyer_detail，
-        # 商家面读端点（/v1/merchants/*）归 merchant_write。
-        if path.startswith(("/v1/agents", "/v1/listings", "/v1/hosted", "/v1/agent-catalog")):
-            return SURFACE_BUYER_DETAIL
+        # 其余 /v1/* 读端点：商家面（含目录列表/子资源）归 merchant_write。
+        # 不再把整个 /v1/agents|listings|hosted|agent-catalog 前缀都算详情——
+        # 那会把 runtime 轮询、名片发现、列表页一起塞进搜→看漏斗。
         return SURFACE_MERCHANT_WRITE
     return None
 
@@ -190,6 +209,27 @@ def _is_buyer_detail_path(path: str) -> bool:
         return False
     groups = [group for group in match.groups() if group]
     return not any(group in _STATIC_SEGMENTS for group in groups)
+
+
+def detail_path_sql(column: str = "path") -> str:
+    """SQL 布尔表达式：只匹配买家详情路径（与 ``_DETAIL_RE`` 同口径）。
+
+    供运营报表对**历史行**做同口径过滤——surface 是写入时分类的，修复前的
+    ``/runtime-binding`` 等机器轮询仍存在库里，必须按 path 再筛一次。
+
+    GLOB 的 ``*`` 会跨 ``/``，因此单段资源额外用 ``not ... */*`` 排除子资源
+    （如 /v1/agents/{id}/runtime-binding、/agent-card.json）。调用方应同时
+    限定 ``surface = 'buyer_detail'``（``/v1/agents/search`` 也满足单段模式）。
+    """
+    col = str(column or "path")
+    return (
+        f"(({col} GLOB '/v1/agents/*' AND {col} NOT GLOB '/v1/agents/*/*')"
+        f" OR ({col} GLOB '/v1/listings/*' AND {col} NOT GLOB '/v1/listings/*/*')"
+        f" OR ({col} GLOB '/v1/agent-catalog/agents/*'"
+        f" AND {col} NOT GLOB '/v1/agent-catalog/agents/*/*')"
+        f" OR {col} GLOB '/v1/hosted/agents/*/agent-card.json'"
+        f" OR {col} GLOB '/v1/hosted/agents/*/ucp')"
+    )
 
 
 def derive_actor(surface: str, has_identity: bool) -> str:
@@ -204,7 +244,7 @@ def derive_actor(surface: str, has_identity: bool) -> str:
         return ACTOR_ADMIN
     if surface in (SURFACE_MERCHANT_WRITE, SURFACE_ACCOUNT_PORTAL):
         return ACTOR_MERCHANT
-    return ACTOR_BUYER  # buyer_search / buyer_detail
+    return ACTOR_BUYER  # buyer_search / buyer_detail / runtime_read
 
 
 def _has_identity(headers: dict[str, str]) -> bool:

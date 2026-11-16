@@ -15,7 +15,7 @@
 """个体访问日志测试（v28 运营质量 + 安全审计数据源）。
 
 覆盖：
-- 服务层：surface 五分类、actor 派生、IP 截断、query 摘要凭据剔除、
+- 服务层：surface 六分类、actor 派生、IP 截断、query 摘要凭据剔除、
   target_id 提取、record/list/prune 往返、记录失败不抛错；
 - 中间件：fallback 栈（MarketplaceASGIApp 直挂）与 FastAPI 栈（TestClient）
   都落日志，/health 不记，result_count 从响应提取；
@@ -124,6 +124,10 @@ class AccessLogClassificationTest(unittest.TestCase):
             access_log.classify_surface("GET", "/v1/agent-catalog/agents/search"),
             access_log.SURFACE_BUYER_SEARCH,
         )
+        self.assertEqual(
+            access_log.classify_surface("GET", "/v1/merchant-publications/search"),
+            access_log.SURFACE_BUYER_SEARCH,
+        )
         # buyer_detail：/v1/agents/{id}、/v1/listings/{id}、hosted card/ucp
         self.assertEqual(
             access_log.classify_surface("GET", "/v1/agents/cagt_1"),
@@ -145,6 +149,36 @@ class AccessLogClassificationTest(unittest.TestCase):
             access_log.classify_surface("GET", "/v1/hosted/agents/cagt_1/ucp"),
             access_log.SURFACE_BUYER_DETAIL,
         )
+        # runtime_read：runtime 轮询/控制子资源与名片发现不算买家详情。
+        for path in (
+            "/v1/agents/cagt_1/runtime-binding",
+            "/v1/agents/cagt_1/runtime-bindings",
+            "/v1/agents/cagt_1/runtime-access",
+            "/v1/agents/cagt_1/runtime-keepalive-consent",
+            "/v1/agents/cagt_1/agent-card.json",
+            "/v1/agents/cagt_1/buyer-access",
+            "/v1/agents/cagt_1/bound-account",
+            "/v1/agents/cagt_1/public-inquiry",
+            "/v1/agents/cagt_1/public-inquiry-consent",
+        ):
+            self.assertEqual(
+                access_log.classify_surface("GET", path),
+                access_log.SURFACE_RUNTIME_READ,
+                path,
+            )
+        # 列表/未知子资源不再兜底成 buyer_detail
+        for path in (
+            "/v1/agents",
+            "/v1/agents/cagt_1/listings",
+            "/v1/agent-catalog/agents",
+            "/v1/agent-catalog/merchants/mkt_1/agents",
+            "/v1/hosted/agents/cagt_1/other",
+        ):
+            self.assertEqual(
+                access_log.classify_surface("GET", path),
+                access_log.SURFACE_MERCHANT_WRITE,
+                path,
+            )
         # merchant_write：POST /v1/* + 商家读端点自查
         self.assertEqual(
             access_log.classify_surface("POST", "/v1/agents/register"),
@@ -191,6 +225,42 @@ class AccessLogClassificationTest(unittest.TestCase):
         self.assertEqual(
             access_log.classify_surface("GET", "/portal/dashboard"),
             access_log.SURFACE_ADMIN,
+        )
+
+    def test_detail_path_sql_matches_only_single_resource_details(self) -> None:
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("create table t(path text)")
+        conn.executemany(
+            "insert into t(path) values (?)",
+            [
+                ("/v1/agents/cagt_1",),
+                ("/v1/listings/lst_1",),
+                ("/v1/agent-catalog/agents/cagt_1",),
+                ("/v1/hosted/agents/cagt_1/agent-card.json",),
+                ("/v1/hosted/agents/cagt_1/ucp",),
+                ("/v1/agents/cagt_1/runtime-binding",),
+                ("/v1/agents/cagt_1/agent-card.json",),
+                ("/v1/agents",),
+                ("/v1/merchant-publications/pub_1",),
+            ],
+        )
+        matched = {
+            row[0]
+            for row in conn.execute(
+                "select path from t where " + access_log.detail_path_sql()
+            )
+        }
+        self.assertEqual(
+            matched,
+            {
+                "/v1/agents/cagt_1",
+                "/v1/listings/lst_1",
+                "/v1/agent-catalog/agents/cagt_1",
+                "/v1/hosted/agents/cagt_1/agent-card.json",
+                "/v1/hosted/agents/cagt_1/ucp",
+            },
         )
 
     def test_derive_actor(self) -> None:

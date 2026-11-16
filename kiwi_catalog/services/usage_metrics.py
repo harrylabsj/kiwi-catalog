@@ -22,7 +22,7 @@ access_log 承担（v28，2026-08-22 原则修订：记录个体访问日志用�
 buyer/merchant 的个体访问日志）」运行。
 
 指标词表（dashboard 消费方以此为单一来源）：
-- ``buyer_agent_search``    /v1/agents/search（含 legacy 搜索）
+- ``buyer_agent_search``    /v1/agents/search（含 legacy 搜索与商家资料检索）
 - ``buyer_listing_search``  /v1/listings/search
 - ``merchant_self_check``   /v1/merchants/self（商家自查）
 - ``listing_publish``       /v1/listings/publish（商家上传商品）
@@ -102,6 +102,7 @@ def usage_series(
 _PATH_METRIC: tuple[tuple[str, str], ...] = (
     ("/v1/agents/search", METRIC_BUYER_AGENT_SEARCH),
     ("/v1/agent-catalog/agents/search", METRIC_BUYER_AGENT_SEARCH),
+    ("/v1/merchant-publications/search", METRIC_BUYER_AGENT_SEARCH),
     ("/v1/listings/search", METRIC_BUYER_LISTING_SEARCH),
     ("/v1/merchants/self", METRIC_MERCHANT_SELF_CHECK),
     ("/v1/listings/publish", METRIC_LISTING_PUBLISH),

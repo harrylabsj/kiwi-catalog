@@ -32,8 +32,10 @@ from kiwi_catalog.core.errors import AuthError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.services import accounts as accounts_service
 from kiwi_catalog.services import buyer_follows as follows_service
+from kiwi_catalog.services import buyer_stats
 from kiwi_catalog.services import connector_identity as identity_service
 from kiwi_catalog.services import merchant_publications as publications_service
+from kiwi_catalog.services import usage_metrics
 from kiwi_catalog.services.rate_limit import SQLiteRateLimitBackend, enforce_rate_limit
 
 _PUBLICATION_RATE_LIMIT_PER_15MIN_ENV = "KIWI_CATALOG_PUBLICATION_RATE_LIMIT_PER_15MIN"
@@ -221,13 +223,21 @@ def search_publications(
 
     只返回 status=published 且未过期的记录；排序分页沿用 listings 搜索约定
     （确定性排序 + cursor）。结果恒带 inquiry_available=false（第 0 版商家
-    资料可查，不可实时询价）。
+    资料可查，不可实时询价）。买家搜索口径与 /v1/agents/search 相同：计入
+    ``buyer_agent_search`` 与每日去重买家统计（不落原始身份）。
     """
     with db_session(db_path) as conn:
+        usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
+        buyer_stats.record_buyer_search(
+            conn,
+            usage_metrics.METRIC_BUYER_AGENT_SEARCH,
+            buyer_stats.buyer_identity_from_payload(auth_payload),
+        )
         try:
             rows, next_cursor = publications_service.search_publications(conn, query or {})
         except publications_service.SearchQueryError as exc:
             raise ValidationError(str(exc)) from exc
+        buyer_stats.record_buyer_keyword(conn, "agent", (query or {}).get("q"), len(rows))
         allowed_merchants = publications_service.merchants_with_active_binding(
             conn, (str(row["merchant_id"]) for row in rows)
         )

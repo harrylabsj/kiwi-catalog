@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.24 — 2026-11-16
+
+- **访问日志新增 `runtime_read` surface**：`/v1/agents/{id}/runtime-binding(s)`、
+  `runtime-access`、`runtime-keepalive-consent`、`agent-card.json`、`buyer-access`、
+  `bound-account`、`public-inquiry*` 等机器读/控制子资源不再归入
+  `buyer_detail`。此前 runtime 每分钟复查绑定会产生大量「详情查看」，把
+  搜→看漏斗放大到 1000% 以上。
+- **详情面收窄为单个资源**：移除「GET `/v1/agents|listings|hosted|agent-catalog*`
+  一律算详情」的兜底；列表页与未知子资源归 `merchant_write`。
+- **买家搜索口径补齐**：`/v1/merchant-publications/search` 归入
+  `buyer_search`，并计入 `buyer_agent_search`、每日去重买家与关键词统计。
+- 新增 `access_log.detail_path_sql()`，供运营报表对历史行按路径同口径过滤。
+
 ## 0.5.22 — 2026-11-12
 
 - **断开连接后的公开面收口**：无活动绑定时，门户列表、公开搜索/详情投影与
