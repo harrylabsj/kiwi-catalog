@@ -29,7 +29,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kiwi_catalog.core.errors import NotFoundError, PermissionDenied
@@ -37,8 +36,7 @@ from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.listings import sqlite_repository as repo
 from kiwi_catalog.listings.domain import (
     ACTIVE,
-    DEFAULT_TTL_HOURS,
-    PRODUCT,
+    PERMANENT_FRESH_UNTIL,
     SUSPENDED,
     WITHDRAWN,
 )
@@ -56,13 +54,12 @@ def _compute_listing_digest(canonical: dict[str, Any]) -> str:
 
 
 def _default_fresh_until(listing_type: str, published_fresh_until: str | None = None) -> str:
-    """fresh_until：publisher 声明优先；无声明用服务端默认 TTL（评审 P1-2 拍板）。"""
-    if published_fresh_until:
-        return published_fresh_until
-    hours = DEFAULT_TTL_HOURS.get(listing_type, DEFAULT_TTL_HOURS[PRODUCT])
-    # 与 now_iso() 同格式（UTC + 无微秒）：expire 比较是纯字符串比较，
-    # 微秒/时区不一致会让 TTL 偏移（历史教训）。
-    return (datetime.now(UTC).replace(microsecond=0) + timedelta(hours=hours)).isoformat()
+    """Listing 上架即永久：统一写永久哨兵，忽略 publisher 的 TTL 声明。
+
+    字段与状态列保留用于旧客户端/wire 兼容；新鲜期不再参与可见性、排序或
+    自动下架。是否在架只由 publication_state 决定。
+    """
+    return PERMANENT_FRESH_UNTIL
 
 
 def _owner_agent(conn: sqlite3.Connection, owner_agent_id: str) -> dict[str, Any] | None:

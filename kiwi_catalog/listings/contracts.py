@@ -251,8 +251,8 @@ def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
         canonical["handoff_destination_ref"] = _require_str(
             payload["handoff_destination_ref"], "handoff_destination_ref"
         )
-    if "fresh_until" in payload:
-        canonical["fresh_until"] = _parse_fresh_until(payload["fresh_until"])
+    # fresh_until：Listing 上架即永久，字段仍被接受但忽略（服务端统一写永久
+    # 哨兵）；不再校验 TTL，也不再影响可见性。
 
     # secret scan（v0.4 §19：标题/summary/attributes 是 untrusted remote content）
     secrets = scan_secrets(canonical)

@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 55
+CURRENT_SCHEMA_VERSION = 56
 
 
 @dataclass(frozen=True)
@@ -1970,6 +1970,21 @@ def migration_055_listing_plan_tiers(conn: sqlite3.Connection) -> None:
         )
 
 
+def migration_056_listing_permanent(conn: sqlite3.Connection) -> None:
+    """Listing 上架即永久：清掉历史 STALE 与 TTL，统一写 FRESH + 永久哨兵。
+
+    新鲜期概念取消后，是否在架只由 publication_state 决定；列与 wire 字段保留
+    用于旧客户端兼容。
+    """
+    from kiwi_catalog.listings.domain import PERMANENT_FRESH_UNTIL
+
+    conn.execute(
+        "update commerce_listings set listing_freshness_state = 'FRESH',"
+        " fresh_until = ?",
+        (PERMANENT_FRESH_UNTIL,),
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -2026,6 +2041,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(53, "buyer_source", migration_053_buyer_source),
     Migration(54, "trade_platform_rules", migration_054_trade_platform_rules),
     Migration(55, "listing_plan_tiers", migration_055_listing_plan_tiers),
+    Migration(56, "listing_permanent", migration_056_listing_permanent),
 )
 
 

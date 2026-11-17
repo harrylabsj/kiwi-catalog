@@ -51,8 +51,12 @@ STALE = "STALE"
 
 LISTING_FRESHNESS_STATES: tuple[str, ...] = (FRESH, STALE)
 
-# ── Freshness TTL（v0.4 §15.1；评审 P1-2 拍板默认值）───────────────────────
-# publisher 可在 publish 时声明 fresh_until；无声明时用服务端默认。
+# 2026-11-17：Listing 新鲜期概念取消——上架即永久，只有 publication_state
+# （ACTIVE / WITHDRAWN / SUSPENDED）决定是否在架。列与 wire 字段保留用于兼容，
+# 所有 Listing 统一写 FRESH + 永久哨兵；不再做 on-read STALE 翻转。
+PERMANENT_FRESH_UNTIL = "9999-12-31T00:00:00+00:00"
+
+# ── 兼容保留：旧 TTL 常量不再参与发布计算 ─────────────────────────────────
 DEFAULT_TTL_HOURS: dict[str, int] = {
     PRODUCT: 24,
     CAPABILITY: 7 * 24,

@@ -170,47 +170,20 @@ class PublishContractTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate_publish_payload({**PRODUCT_PAYLOAD, "attributes": {"list": [1, 2]}})
 
-    def test_fresh_until_must_be_future_iso_with_tz_and_bounded(self) -> None:
-        with self.assertRaises(ValidationError):
-            validate_publish_payload({**PRODUCT_PAYLOAD, "fresh_until": "2026-08-06T00:00:00Z"})  # past
-        with self.assertRaises(ValidationError):
-            validate_publish_payload({**PRODUCT_PAYLOAD, "fresh_until": "2026-08-08"})  # no tz
-        with self.assertRaises(ValidationError):
-            validate_publish_payload(
-                {**PRODUCT_PAYLOAD, "fresh_until": "2027-08-08T00:00:00Z"}  # > 30 days
+    def test_fresh_until_is_accepted_but_ignored(self) -> None:
+        """Listing 上架即永久：publisher 的 fresh_until 不再校验/进入 canonical。"""
+        for value in ("2026-08-06T00:00:00Z", "2026-08-08", "2099-01-01T00:00:00Z"):
+            canonical = validate_publish_payload(
+                {**PRODUCT_PAYLOAD, "fresh_until": value}
             )
+            self.assertNotIn("fresh_until", canonical)
 
-    def test_fresh_until_and_now_iso_share_utc_format(self) -> None:
-        """时区回归（历史教训）：默认 fresh_until 与 now_iso() 必须同为
-        UTC + 无微秒且精确差 24h——否则过期比较（纯字符串）随服务器时区
-        偏移 TTL（UTC+8 曾把 24h TTL 压到 16h 提前过期）。"""
-        from kiwi_catalog.db.session import now_iso
+    def test_default_fresh_until_is_permanent(self) -> None:
+        from kiwi_catalog.listings.domain import PERMANENT_FRESH_UNTIL
         from kiwi_catalog.listings.service import _default_fresh_until
 
-        fresh = _default_fresh_until("product")
-        now = now_iso()
-        self.assertRegex(now, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
-        self.assertRegex(fresh, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
-        self.assertEqual(datetime.fromisoformat(fresh) - datetime.fromisoformat(now), timedelta(hours=24))
-
-    def test_fresh_until_normalization_truncates_microseconds(self) -> None:
-        """publisher 声明的 fresh_until 归一化为 UTC + 无微秒（与 now_iso 同格式）。"""
-        from datetime import datetime, timezone
-
-        future = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=123456)
-        canonical = validate_publish_payload(
-            {**PRODUCT_PAYLOAD, "fresh_until": future.isoformat()}
-        )
-        self.assertTrue(canonical["fresh_until"].endswith("+00:00"))
-        self.assertNotIn(".", canonical["fresh_until"])  # 微秒已截断
-
-    def test_fresh_until_accepted_within_ttl(self) -> None:
-        # 相对未来时间（历史教训：硬编码日期会在过期后让套件时间炸弹式变红）
-        future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-        canonical = validate_publish_payload(
-            {**PRODUCT_PAYLOAD, "fresh_until": future}
-        )
-        self.assertIn("fresh_until", canonical)
+        self.assertEqual(_default_fresh_until("product"), PERMANENT_FRESH_UNTIL)
+        self.assertEqual(_default_fresh_until("capability", "2026-01-01T00:00:00+00:00"), PERMANENT_FRESH_UNTIL)
 
     def test_missing_required_title_or_category_rejected(self) -> None:
         for field in ("title", "category", "owner_agent_id", "merchant_id"):

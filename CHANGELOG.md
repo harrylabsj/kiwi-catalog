@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.26 — 2026-11-17
+
+- **商品上架即永久**：取消 Listing 新鲜期（`fresh_until` / `FRESH-STALE`）的
+  可见性、排序与自动下架语义；是否在架只由 `publication_state` 决定。发布时
+  统一写 `FRESH` + 永久哨兵，忽略客户端 `fresh_until`；搜索不再 on-read
+  翻转 STALE，`freshness_state` 查询参数保留但不过滤。
+- **迁移 56**：历史 STALE 行统一恢复为 `FRESH` 并写入永久 fresh_until。
+  商品数据的 `valid_until` 仍保留为报价数据有效期，过期只停止自动报价，
+  不改变上架状态。
+
 ## 0.5.25 — 2026-11-16
 
 - **欢迎信改为配置文件**：主题/正文读取

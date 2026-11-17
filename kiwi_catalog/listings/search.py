@@ -31,15 +31,12 @@ import sqlite3
 import urllib.parse
 from typing import Any
 
-from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.listings.domain import (
     ACTIVE,
     ATTRIBUTE_PATH_SEGMENT_RE,
-    LISTING_FRESHNESS_STATES,
     LISTING_TYPES,
     MAX_ATTRIBUTE_PATH_DEPTH,
 )
-from kiwi_catalog.listings.sqlite_repository import expire_stale_listings
 
 # ── 搜索分页游标（审查 P1-6）──────────────────────────────────────────────
 # 搜索的排序键是 (freshness rank, updated_at desc, id desc)；旧游标只编码
@@ -189,9 +186,8 @@ def search_listings(
             raise SearchQueryError("limit must be between 1 and 100")
     cursor = str(query.get("cursor") or "")
 
-    # on-read 惰性翻转（v0.4 §15.1）：先过期再查，fresh_until 索引路径生效
-    expire_stale_listings(conn, now_iso())
-
+    # Listing 上架即永久：不再在读取时翻转 STALE；是否可见只由
+    # publication_state / governance_hold 决定。
     where: list[str] = ["publication_state = ?", "coalesce(governance_hold, 0) = 0"]
     values: list[Any] = [ACTIVE]
 
@@ -267,12 +263,8 @@ def search_listings(
         where.append(f"json_extract(commercial_hints_json, '$.{key}') = ?")
         values.append(flag)
 
-    freshness = str(query.get("freshness_state") or "").strip()
-    if freshness:
-        if freshness not in LISTING_FRESHNESS_STATES:
-            raise SearchQueryError(f"freshness_state must be one of {LISTING_FRESHNESS_STATES}")
-        where.append("listing_freshness_state = ?")
-        values.append(freshness)
+    # freshness_state 查询参数保留用于旧客户端兼容，但不再过滤：Listing
+    # 上架即永久，新鲜期不参与可见性。
 
     handoff = str(query.get("handoff_destination_type") or "").strip()
     if handoff:

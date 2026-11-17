@@ -34,7 +34,7 @@ from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api import idempotency as api_idempotency
 from kiwi_catalog.api.handlers.common import result_limit
 from kiwi_catalog.core.errors import AuthError, PermissionDenied, ValidationError
-from kiwi_catalog.db.session import db_session, now_iso
+from kiwi_catalog.db.session import db_session
 from kiwi_catalog.listings import sqlite_repository as repo
 from kiwi_catalog.listings.contracts import validate_publish_payload
 from kiwi_catalog.listings.domain import LISTING_FRESHNESS_STATES
@@ -338,7 +338,6 @@ def v1_get_listing(db_path: str | Path, listing_id: str) -> dict[str, Any]:
     if not listing_id:
         raise ValidationError("listing_id is required")
     with db_session(db_path) as conn:
-        repo.expire_stale_listings(conn, now_iso())
         row = repo.get_listing(conn, listing_id)
         from kiwi_catalog.core.errors import NotFoundError
         from kiwi_catalog.listings.domain import ACTIVE
@@ -423,7 +422,6 @@ def v1_list_agent_listings(
                 raise AuthError(
                     f"agent {owner_agent_id} has no merchant binding; only admin may read its listings"
                 ) from exc
-        repo.expire_stale_listings(conn, now_iso())
         from kiwi_catalog.listings.quarantine import is_hidden_from_public
 
         try:

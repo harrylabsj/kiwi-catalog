@@ -20,7 +20,7 @@
 - attribute.<path> 过滤与路径注入防护；
 - 默认排除 WITHDRAWN/SUSPENDED 与 owner suspended/rejected（agent join）；
 - 确定性排序与 cursor 翻页稳定；
-- freshness：fresh_until 到期后 on-read 惰性翻转 STALE + 搜索降权/过滤；
+- 上架即永久：fresh_until / STALE 不再触发隐藏或过滤；迁移 56 恢复历史 STALE；
 - authority=discovery_projection / requires_direct_confirmation=true 恒值。
 """
 
@@ -337,11 +337,9 @@ class ListingsSearchTest(unittest.TestCase):
 
     # ── freshness (v0.4 §7.2 / §15.1) ───────────────────────────────────────
 
-    def test_expired_listing_flips_to_stale_on_read(self) -> None:
-        # 相对未来时间（publish 要求 future；随后手动改成 2000 触发翻转）
-        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        self._publish({"fresh_until": future})
-        listing_id = None
+    def test_listing_does_not_expire_on_read(self) -> None:
+        """上架即永久：历史 fresh_until 再旧也不会在读取时翻转/隐藏。"""
+        self._publish()
         with db_session(self.db_path) as conn:
             listing_id = conn.execute("select listing_id from commerce_listings").fetchone()[0]
             conn.execute(
@@ -349,29 +347,27 @@ class ListingsSearchTest(unittest.TestCase):
                 " where listing_id = ?",
                 (listing_id,),
             )
-        # on-read 惰性翻转：搜索触发翻转，结果带 STALE 标注
         _, payload = _call_http(self.app, "GET", "/v1/listings/search")
         self.assertEqual(len(payload["results"]), 1)
-        self.assertEqual(payload["results"][0]["listing"]["listing_freshness_state"], "STALE")
-        self.assertEqual(payload["results"][0]["listing_freshness_state"], "STALE")
-        # 翻转已写回
+        self.assertEqual(payload["results"][0]["listing"]["listing_freshness_state"], "FRESH")
         with db_session(self.db_path) as conn:
             state = conn.execute(
                 "select listing_freshness_state from commerce_listings where listing_id = ?",
                 (listing_id,),
             ).fetchone()[0]
-        self.assertEqual(state, "STALE")
+        self.assertEqual(state, "FRESH")
 
-    def test_freshness_state_filter(self) -> None:
+    def test_freshness_state_filter_is_ignored(self) -> None:
         self._publish()
         with db_session(self.db_path) as conn:
             conn.execute(
                 "update commerce_listings set listing_freshness_state = 'STALE', fresh_until = '2000-01-01T00:00:00Z'"
             )
-        _, payload = _call_http(self.app, "GET", "/v1/listings/search?freshness_state=STALE")
-        self.assertEqual(len(payload["results"]), 1)
-        _, payload = _call_http(self.app, "GET", "/v1/listings/search?freshness_state=FRESH")
-        self.assertEqual(payload["results"], [])
+        for value in ("STALE", "FRESH"):
+            _, payload = _call_http(
+                self.app, "GET", f"/v1/listings/search?freshness_state={value}"
+            )
+            self.assertEqual(len(payload["results"]), 1, value)
 
     def test_republish_refreshes_freshness(self) -> None:
         published = self._publish()
@@ -383,6 +379,24 @@ class ListingsSearchTest(unittest.TestCase):
         _, payload = _call_http(self.app, "GET", "/v1/listings/search")
         self.assertEqual(payload["results"][0]["listing"]["listing_freshness_state"], "FRESH")
         self.assertEqual(payload["results"][0]["listing"]["listing_id"], published["listing"]["listing_id"])
+
+    def test_migration_056_restores_historical_stale_listings(self) -> None:
+        self._publish()
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update commerce_listings set listing_freshness_state = 'STALE',"
+                " fresh_until = '2000-01-01T00:00:00Z'"
+            )
+        from kiwi_catalog.db.migrations import migration_056_listing_permanent
+        from kiwi_catalog.listings.domain import PERMANENT_FRESH_UNTIL
+
+        with db_session(self.db_path) as conn:
+            migration_056_listing_permanent(conn)
+            row = conn.execute(
+                "select listing_freshness_state, fresh_until from commerce_listings"
+            ).fetchone()
+        self.assertEqual(row["listing_freshness_state"], "FRESH")
+        self.assertEqual(row["fresh_until"], PERMANENT_FRESH_UNTIL)
 
     def test_owner_agent_id_filter_matches_kiwi_source_contract(self) -> None:
         """kiwi-source.ts 的 owner_agent_id 查询必须被 catalog 精确接受。"""
