@@ -68,6 +68,9 @@ from kiwi_catalog.api.route_table import (
     _set_card_publication_state,
     _suspend_catalog_agent,
     _v1_claim_agent,
+    _v1_commerce_facts,
+    _v1_commerce_receipts_list,
+    _v1_commerce_receipts_submit,
     _v1_create_connector_identity_request,
     _v1_create_merchant_publication,
     _v1_create_device_enrollment,
@@ -963,6 +966,39 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             db_path,
             api_auth.payload_with_auth({}, request.headers.get("authorization", ""), ""),
             _query_params_from_request(request),
+        )
+
+    # ── /v1/commerce/receipts（买家识别与交易回执 · C1；Bearer 经 payload_with_auth）──
+    def _receipts_payload(request: _FastAPIRequest, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        merged = api_auth.payload_with_auth(
+            dict(body or {}),
+            request.headers.get("authorization", ""),
+            request.headers.get("idempotency-key", ""),
+        )
+        merged.pop("_client_ip", None)
+        client = getattr(request, "client", None)
+        merged["_client_ip"] = resolve_client_ip(
+            request.headers.get("x-forwarded-for", ""),
+            str(client.host or "") if client is not None else None,
+        )
+        return merged
+
+    @app.post("/v1/commerce/receipts")
+    def v1_commerce_receipts_submit(
+        request: _FastAPIRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _v1_commerce_receipts_submit(db_path, _receipts_payload(request, payload))
+
+    @app.get("/v1/commerce/receipts")
+    def v1_commerce_receipts_list(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_commerce_receipts_list(
+            db_path, _receipts_payload(request), _query_params_from_request(request)
+        )
+
+    @app.get("/v1/commerce/facts")
+    def v1_commerce_facts(request: _FastAPIRequest) -> dict[str, Any]:
+        return _v1_commerce_facts(
+            db_path, _receipts_payload(request), _query_params_from_request(request)
         )
 
     # ── /v1/accounts（商家账号；cookie 会话经 request 透传）───────────────

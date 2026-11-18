@@ -933,6 +933,53 @@ create table if not exists buyer_access_routes (
 create index if not exists idx_buyer_access_routes_binding
         on buyer_access_routes(binding_id)
     """,
+    # 买家识别与交易回执 · C1：独立回执入口。业务事实的产生方主动报告；
+    # 按（已验证报告方, 事件 ID）幂等，同 ID 不同内容记冲突。
+    # 公开页面不投影本表——逐笔回执只对参与方与运营可见。
+    """
+create table if not exists commerce_receipts (
+        receipt_id integer primary key,
+        protocol_version text not null,
+        event_id text not null,
+        event_type text not null check (event_type in (
+            'merchant_agreement_issued', 'buyer_agreement_accepted',
+            'merchant_entry_offered', 'buyer_handoff_generated',
+            'merchant_order_created')),
+        reporter_role text not null check (reporter_role in ('merchant', 'buyer', 'order_adapter')),
+        merchant_id text not null,
+        negotiation_id text not null default '',
+        merchant_agreement_id text not null default '',
+        accepted_offer_id text not null default '',
+        terms_digest text not null default '',
+        buyer_binding text not null default '',
+        entry_type text not null default '',
+        quote_ref_json text not null default '{}',
+        handoff_ref text not null default '',
+        order_channel text not null default '',
+        order_ref text not null default '',
+        order_evidence_json text not null default '{}',
+        occurred_at text not null,
+        received_at text not null,
+        reporter_identity text not null,
+        assurance text not null check (assurance in ('verified', 'self_signed', 'adapter_delegated')),
+        content_hash text not null,
+        payload_json text not null,
+        created_at text not null,
+        unique (merchant_id, reporter_role, reporter_identity, event_id)
+    )
+    """,
+    """
+create index if not exists idx_commerce_receipts_negotiation
+        on commerce_receipts(merchant_id, negotiation_id, event_type)
+    """,
+    """
+create index if not exists idx_commerce_receipts_order
+        on commerce_receipts(merchant_id, order_channel, order_ref)
+    """,
+    """
+create index if not exists idx_commerce_receipts_agreement
+        on commerce_receipts(merchant_id, merchant_agreement_id)
+    """,
 
 ]
 

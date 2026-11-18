@@ -32,6 +32,7 @@ from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
 from kiwi_catalog.api.handlers import buyer_follows as buyer_follows_handlers
 from kiwi_catalog.api.handlers import cloud_binding as cloud_binding_handlers
+from kiwi_catalog.api.handlers import commerce_receipts as commerce_receipts_handlers
 from kiwi_catalog.api.handlers import public_inquiry as public_inquiry_handlers
 from kiwi_catalog.api.handlers import runtime_keepalive as runtime_keepalive_handlers
 from kiwi_catalog.api.handlers import cloud_card as cloud_card_handlers
@@ -436,6 +437,25 @@ RouteEntry(
         {"GET"},
         "/v1/merchants/self",
         lambda db_path, payload, query, **kw: _v1_merchant_self(db_path, payload, query),
+    ),
+# ── /v1/commerce/receipts（买家识别与交易回执 · C1）────────────────────────
+# 业务事实的产生方主动报告：商家 token / 买方自签 JWS / 运营协助（适配器）。
+# 逐笔回执只对参与方与运营可见；公开页面不投影。
+RouteEntry(
+        {"POST"},
+        "/v1/commerce/receipts",
+        lambda db_path, payload, query, **kw: _v1_commerce_receipts_submit(db_path, payload),
+    ),
+RouteEntry(
+        {"GET"},
+        "/v1/commerce/receipts",
+        lambda db_path, payload, query, **kw: _v1_commerce_receipts_list(db_path, payload, query),
+    ),
+# ── /v1/commerce/facts（买家识别与交易回执 · C2：独立事实投影，只读）────────
+RouteEntry(
+        {"GET"},
+        "/v1/commerce/facts",
+        lambda db_path, payload, query, **kw: _v1_commerce_facts(db_path, payload, query),
     ),
 # ── /v1/accounts（商家账号，docs/accounts.md）───────────────────────────────
 # 邮箱先行注册：register/code（发码）→ register/verify（验码换 ticket）→
@@ -897,6 +917,21 @@ def _v1_submit_application(db_path, payload):
 
 def _v1_merchant_self(db_path, payload, query):
     return merchants_handlers.self_status(db_path, payload, query or {})
+
+
+# ── /v1/commerce/receipts wrapper（买家识别与交易回执 · C1）────────────────
+
+
+def _v1_commerce_receipts_submit(db_path, payload):
+    return commerce_receipts_handlers.submit(db_path, payload or {})
+
+
+def _v1_commerce_receipts_list(db_path, payload, query):
+    return commerce_receipts_handlers.list_receipts(db_path, payload or {}, query or {})
+
+
+def _v1_commerce_facts(db_path, payload, query):
+    return commerce_receipts_handlers.query_facts(db_path, payload or {}, query or {})
 
 
 # ── /v1/accounts wrapper（商家账号）──────────────────────────────────────

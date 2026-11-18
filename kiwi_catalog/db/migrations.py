@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 56
+CURRENT_SCHEMA_VERSION = 57
 
 
 @dataclass(frozen=True)
@@ -1985,6 +1985,65 @@ def migration_056_listing_permanent(conn: sqlite3.Connection) -> None:
     )
 
 
+def migration_057_commerce_receipts(conn: sqlite3.Connection) -> None:
+    """买家识别与交易回执 · C1：独立回执存储。
+
+    按（商家, 报告方角色, 已验证报告方, 事件 ID）唯一幂等；content_hash 用于
+    同 ID 不同内容的冲突判定。公开页面永不投影本表。
+    """
+    for statement in _COMMERCE_RECEIPTS_DDL:
+        conn.execute(statement)
+
+
+# 与 db/models.py SCHEMA 中 commerce_receipts 段保持逐字节一致（DDL 双处收敛）。
+_COMMERCE_RECEIPTS_DDL = [
+    """
+create table if not exists commerce_receipts (
+        receipt_id integer primary key,
+        protocol_version text not null,
+        event_id text not null,
+        event_type text not null check (event_type in (
+            'merchant_agreement_issued', 'buyer_agreement_accepted',
+            'merchant_entry_offered', 'buyer_handoff_generated',
+            'merchant_order_created')),
+        reporter_role text not null check (reporter_role in ('merchant', 'buyer', 'order_adapter')),
+        merchant_id text not null,
+        negotiation_id text not null default '',
+        merchant_agreement_id text not null default '',
+        accepted_offer_id text not null default '',
+        terms_digest text not null default '',
+        buyer_binding text not null default '',
+        entry_type text not null default '',
+        quote_ref_json text not null default '{}',
+        handoff_ref text not null default '',
+        order_channel text not null default '',
+        order_ref text not null default '',
+        order_evidence_json text not null default '{}',
+        occurred_at text not null,
+        received_at text not null,
+        reporter_identity text not null,
+        assurance text not null check (assurance in ('verified', 'self_signed', 'adapter_delegated')),
+        content_hash text not null,
+        payload_json text not null,
+        created_at text not null,
+        unique (merchant_id, reporter_role, reporter_identity, event_id)
+    )
+    """,
+    """
+create index if not exists idx_commerce_receipts_negotiation
+        on commerce_receipts(merchant_id, negotiation_id, event_type)
+    """,
+    """
+create index if not exists idx_commerce_receipts_order
+        on commerce_receipts(merchant_id, order_channel, order_ref)
+    """,
+    """
+create index if not exists idx_commerce_receipts_agreement
+        on commerce_receipts(merchant_id, merchant_agreement_id)
+    """,
+]
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -2042,6 +2101,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(54, "trade_platform_rules", migration_054_trade_platform_rules),
     Migration(55, "listing_plan_tiers", migration_055_listing_plan_tiers),
     Migration(56, "listing_permanent", migration_056_listing_permanent),
+    Migration(57, "commerce_receipts", migration_057_commerce_receipts),
 )
 
 
