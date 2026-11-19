@@ -35,9 +35,11 @@ from kiwi_catalog.a2a.binding_claims import jwk_thumbprint
 from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
 from kiwi_catalog.agent_catalog.sqlite_repository import new_catalog_agent_id, upsert_catalog_agent
 from kiwi_catalog.api.app import create_catalog_app
+from kiwi_catalog.api.idempotency import request_hash
 from kiwi_catalog.core.tokens import token_digest
 from kiwi_catalog.db.session import db_session, now_iso
 from kiwi_catalog.listings.contracts import validate_publish_payload
+from kiwi_catalog.listings.domain import PERMANENT_FRESH_UNTIL
 
 
 def _b64url(value: bytes) -> str:
@@ -161,8 +163,10 @@ class ListingsBindingAuthTest(unittest.TestCase):
     def _signature(self, body: dict, idempotency_key: str, *, key=None, kid: str | None = None,
                    binding_id: str | None = None, merchant_id: str | None = None,
                    exp: str | None = None, nonce: str | None = None,
-                   digest_body: dict | None = None) -> str:
+                   digest_body: dict | None = None, legacy_fresh_until: str | None = None) -> str:
         canonical = validate_publish_payload(digest_body if digest_body is not None else body)
+        if legacy_fresh_until is not None:
+            canonical["fresh_until"] = legacy_fresh_until
         claims = {
             "method": "POST", "path": "/v1/listings/publish", "audience": "kiwi-catalog",
             "agent_id": self.agent_id, "merchant_id": merchant_id or self.merchant_id,
@@ -191,6 +195,36 @@ class ListingsBindingAuthTest(unittest.TestCase):
         status, payload = self._publish()
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["listing"]["merchant_id"], self.merchant_id)
+
+    def test_legacy_freshness_signature_and_request_hash_remain_valid(self) -> None:
+        body = self._body(fresh_until="2026-10-01T08:00:00+08:00")
+        signed_timestamp = "2026-10-01T00:00:00+00:00"
+        idem = "legacy-fresh-publish"
+        status, payload = self._publish(
+            body, self._signature(body, idem, legacy_fresh_until=signed_timestamp), idem
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["listing"]["fresh_until"], PERMANENT_FRESH_UNTIL)
+
+        # A previously completed request stored its hash with the old canonical field.
+        old_hash = request_hash({**validate_publish_payload(body), "fresh_until": signed_timestamp})
+        with db_session(self.db_path) as conn:
+            conn.execute(
+                "update agent_catalog_write_idempotency set request_hash = ? where idempotency_key = ?",
+                (old_hash, idem),
+            )
+        status, replay = self._publish(
+            body, self._signature(body, idem, legacy_fresh_until=signed_timestamp), idem
+        )
+        self.assertEqual(status, 200, replay)
+        self.assertTrue(replay["idempotent"])
+
+        tampered = {**body, "fresh_until": "2026-10-02T08:00:00+08:00"}
+        status, _ = self._publish(
+            tampered, self._signature(body, idem, legacy_fresh_until=signed_timestamp), idem
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(self._publish({**body, "fresh_until": "ignored"}, idempotency_key="new-client")[0], 200)
         self.assertEqual(payload["listing"]["owner_agent_id"], self.agent_id)
 
     def test_configurable_capacity_counts_active_rows_not_retries(self) -> None:

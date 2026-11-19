@@ -165,13 +165,15 @@ def replay_catalog_write_idempotency(
     actor_key: str,
     idempotency_key: str,
     request_hash_value: str,
+    *,
+    compatible_request_hash: str | None = None,
 ) -> dict[str, Any] | None:
     if not idempotency_key:
         return None
     row = catalog_write_idempotency_row(conn, endpoint, actor_key, idempotency_key)
     if row is None:
         return None
-    if str(row["request_hash"]) != request_hash_value:
+    if str(row["request_hash"]) not in (request_hash_value, compatible_request_hash):
         raise IdempotencyConflict("idempotency key was reused with a different request")
     if row["status"] != "completed":
         raise IdempotencyConflict("idempotent request is still processing")

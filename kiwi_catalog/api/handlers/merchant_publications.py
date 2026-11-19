@@ -202,7 +202,7 @@ def create_publication(db_path: str | Path, payload: dict[str, Any]) -> dict[str
             "ok": True,
             "publication": publications_service.public_projection(
                 row,
-                allow_home_url=publications_service.merchant_has_active_binding(
+                allow_home_url=publications_service.merchant_public_home_allowed(
                     conn, merchant_id
                 ),
             ),
@@ -238,7 +238,7 @@ def search_publications(
         except publications_service.SearchQueryError as exc:
             raise ValidationError(str(exc)) from exc
         buyer_stats.record_buyer_keyword(conn, "agent", (query or {}).get("q"), len(rows))
-        allowed_merchants = publications_service.merchants_with_active_binding(
+        allowed_merchants = publications_service.merchants_allowed_public_home(
             conn, (str(row["merchant_id"]) for row in rows)
         )
         return {
@@ -287,7 +287,7 @@ def get_publication(
             "ok": True,
             "publication": publications_service.public_projection(
                 row,
-                allow_home_url=publications_service.merchant_has_active_binding(
+                allow_home_url=publications_service.merchant_public_home_allowed(
                     conn, str(row["merchant_id"])
                 ),
             ),
@@ -359,10 +359,5 @@ def withdraw_publication(
         )
         return {
             "ok": True,
-            "publication": publications_service.public_projection(
-                row,
-                allow_home_url=publications_service.merchant_has_active_binding(
-                    conn, merchant_id
-                ),
-            ),
+            "publication": publications_service.public_projection(row),
         }

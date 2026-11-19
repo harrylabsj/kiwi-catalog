@@ -36,7 +36,7 @@ from kiwi_catalog.api.handlers.common import result_limit
 from kiwi_catalog.core.errors import AuthError, PermissionDenied, ValidationError
 from kiwi_catalog.db.session import db_session
 from kiwi_catalog.listings import sqlite_repository as repo
-from kiwi_catalog.listings.contracts import validate_publish_payload
+from kiwi_catalog.listings.contracts import legacy_fresh_until, validate_publish_payload
 from kiwi_catalog.listings.domain import LISTING_FRESHNESS_STATES
 from kiwi_catalog.listings.search import SearchQueryError
 from kiwi_catalog.listings.search import search_listings as _search_listings
@@ -95,6 +95,7 @@ def _verify_runtime_listing_signature(
     agent_id: str,
     merchant_id: str,
     signed_fields: dict[str, Any],
+    legacy_listing_digest: str | None = None,
 ) -> tuple[str, str, str]:
     from kiwi_catalog.a2a.request_signature import verify_runtime_request
 
@@ -124,6 +125,10 @@ def _verify_runtime_listing_signature(
         "key_id": key_id,
         **signed_fields,
     }
+    # Choose only between server-derived digests. The normal runtime signature,
+    # nonce and binding checks still apply to either form.
+    if legacy_listing_digest is not None and claims.get("listing_digest") == legacy_listing_digest:
+        expected["listing_digest"] = legacy_listing_digest
     verify_runtime_request(
         conn,
         catalog_agent_id=agent_id,
@@ -155,6 +160,7 @@ def _require_runtime_listing_grant(
     payload: dict[str, Any],
     canonical: dict[str, Any],
     idempotency_key: str,
+    legacy_canonical: dict[str, Any] | None,
 ) -> tuple[str, str, str]:
     """Verify a signed listing publish and its live narrow entitlement."""
     from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
@@ -173,6 +179,7 @@ def _require_runtime_listing_grant(
             "listing_digest": canonical_digest(canonical),
             "idempotency_key": idempotency_key,
         },
+        legacy_listing_digest=canonical_digest(legacy_canonical) if legacy_canonical is not None else None,
     )
     _require_current_listing_entitlement(conn, agent_id, merchant_id, binding_id)
     return actor, actor_key, binding_id
@@ -463,6 +470,8 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
     key（source_product_ref / publisher_listing_key）双轨（评审 P1-4/P2-8）。
     """
     canonical = validate_publish_payload(payload)
+    fresh_until = legacy_fresh_until(payload.get("fresh_until"))
+    legacy_canonical = {**canonical, "fresh_until": fresh_until} if fresh_until is not None else None
     # Runtime proof is selected by header presence and can never fall back to a
     # body owner token. Legacy token use is disabled by default.
     binding_signature = str(payload.get("_binding_jws") or "").strip()
@@ -474,7 +483,7 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
         conn.execute("BEGIN IMMEDIATE")
         if binding_signature:
             actor, actor_key, _binding_id = _require_runtime_listing_grant(
-                conn, payload, canonical, idempotency_key
+                conn, payload, canonical, idempotency_key, legacy_canonical
             )
         else:
             # Authentication remains before replay/rate budget consumption;
@@ -485,7 +494,8 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
             _reject_account_owner_token_listing(conn, str(canonical.get("merchant_id") or ""), actor)
             actor_key = api_idempotency.catalog_write_actor_key(payload)
         replayed = api_idempotency.replay_catalog_write_idempotency(
-            conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash
+            conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash,
+            compatible_request_hash=_listing_request_hash(legacy_canonical) if legacy_canonical is not None else None,
         )
         if replayed is not None:
             return replayed

@@ -154,14 +154,14 @@ class FastApiDualStackTest(unittest.TestCase):
                 " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
                 (merchant_id,),
             )
-            # 无活动绑定的商家：即使有 published 行，主页也必须 404。
+            # 独立商家发布的公开资料不需要 Runtime 绑定。
             conn.execute(
                 "insert into merchant_publications (publication_id, merchant_id, status,"
                 " source_kind, merchant_display_name, shop_platform, shop_url, title,"
                 " category, summary, faq_json, published_at, expires_at, version,"
                 " created_at, updated_at)"
                 " values ('mpub_fastapi_unbound', 'mkt_fastapi_unbound', 'published',"
-                " 'merchant_declared', '无绑定商家', '', '', '旧商品', '', '',"
+                " 'merchant_declared', '独立商家', '', '', '独立发布的商品', '', '',"
                 " '[]', '2026-01-01T00:00:00+00:00', '', 1,"
                 " '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
             )
@@ -175,9 +175,15 @@ class FastApiDualStackTest(unittest.TestCase):
             alias = client.get(f"/merchants/{merchant_id}")
             self.assertEqual(alias.status_code, 200, alias.text)
             self.assertIn("FastAPI 主页商品", alias.text)
-            # 无活动绑定 → 直链也 404，旧内容不再对外展示。
             unbound = client.get("/m/mkt_fastapi_unbound")
-            self.assertEqual(unbound.status_code, 404, unbound.text)
+            self.assertEqual(unbound.status_code, 200, unbound.text)
+            self.assertIn("独立发布的商品", unbound.text)
+            with db_session(self.db_file) as conn:
+                conn.execute(
+                    "update runtime_bindings set status = 'revoked' where binding_id = 'bind-fastapi-home'"
+                )
+            revoked = client.get(f"/m/{merchant_id}")
+            self.assertEqual(revoked.status_code, 404, revoked.text)
 
     def test_listings_routes_in_both_stacks(self) -> None:
         """6 条 listing 路由双栈覆盖（v0.4）；/v1/listings/search 不被 {listing_id} 吞掉。"""

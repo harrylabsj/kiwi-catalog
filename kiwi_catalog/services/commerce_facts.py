@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 from kiwi_catalog.core.errors import ValidationError
@@ -92,16 +91,23 @@ def compute_intents(conn: sqlite3.Connection, merchant_id: str | None = None) ->
 
     merchant_side: dict[tuple[str, ...], sqlite3.Row] = {}
     buyer_side: dict[tuple[str, ...], sqlite3.Row] = {}
-    # 同软键（商家+磋商+协议号）出现多个不同六元组 = 字段冲突 → 待核对。
     soft_variants: dict[tuple[str, str, str], set[tuple[str, ...]]] = {}
+    merchant_bindings: dict[tuple[str, str, str], set[str]] = {}
     for row in rows:
         key = _intent_key(row)
-        soft = _soft_key(row)
-        soft_variants.setdefault(soft, set()).add(key)
         if str(row["event_type"]) == _INTENT_MERCHANT:
             merchant_side.setdefault(key, row)
+            soft = _soft_key(row)
+            soft_variants.setdefault(soft, set()).add(key)
+            merchant_bindings.setdefault(soft, set()).add(key[5])
         else:
             buyer_side.setdefault(key, row)
+
+    # Only the buyer key named by the merchant can dispute that agreement.
+    for key, buyer_variant in buyer_side.items():
+        soft = _soft_key(buyer_variant)
+        if key[5] in merchant_bindings.get(soft, ()):
+            soft_variants[soft].add(key)
 
     intents: list[dict[str, Any]] = []
     matched_keys: set[tuple[str, ...]] = set()

@@ -530,11 +530,7 @@ def public_merchant_home_url(merchant_id: str) -> str:
 
 
 def merchant_has_active_binding(conn: sqlite3.Connection, merchant_id: str) -> bool:
-    """商家名下是否有活动的 Runtime 绑定。
-
-    解除连接后旧应用留下的公开内容不再对外展示：门户与公开面都用这个
-    口径决定是否给出主页链接 / 是否让主页可达。
-    """
+    """Whether the merchant can currently expose content from a bound runtime."""
     merchant_id = str(merchant_id or "").strip()
     if not merchant_id:
         return False
@@ -545,20 +541,25 @@ def merchant_has_active_binding(conn: sqlite3.Connection, merchant_id: str) -> b
     return row is not None
 
 
-def merchants_with_active_binding(
+def merchants_allowed_public_home(
     conn: sqlite3.Connection, merchant_ids: Iterable[str]
 ) -> set[str]:
-    """批量版 ``merchant_has_active_binding``：避免公开列表逐行查询。"""
-    ids = sorted({str(item or "").strip() for item in merchant_ids if str(item or "").strip()})
+    """Independent publishers and merchants with an active runtime may show a home page."""
+    ids = {item.strip() for item in merchant_ids if item.strip()}
     if not ids:
         return set()
     placeholders = ",".join("?" for _ in ids)
     rows = conn.execute(
-        "select distinct merchant_id from runtime_bindings"
-        f" where status = 'active' and merchant_id in ({placeholders})",
-        tuple(ids),
+        "select merchant_id from runtime_bindings"
+        f" where merchant_id in ({placeholders})"
+        " group by merchant_id having max(status = 'active') = 0",
+        tuple(sorted(ids)),
     ).fetchall()
-    return {str(row["merchant_id"]) for row in rows}
+    return ids - {str(row["merchant_id"]) for row in rows}
+
+
+def merchant_public_home_allowed(conn: sqlite3.Connection, merchant_id: str) -> bool:
+    return merchant_id.strip() in merchants_allowed_public_home(conn, (merchant_id,))
 
 
 def has_public_content(

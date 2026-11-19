@@ -226,6 +226,28 @@ class CommerceFactsTest(unittest.TestCase):
         self.assertEqual(result["summary"]["confirmed_intents"], 0)
         self.assertIn("needs_review", [fact["status"] for fact in result["facts"]])
 
+    def test_only_the_bound_buyer_key_can_dispute_a_confirmed_intent(self) -> None:
+        stamp = "2026-11-18T08:00:00+00:00"
+        base = _intent()
+        _insert_receipt(
+            self.conn, event_id="m", event_type="merchant_agreement_issued",
+            reporter_role="merchant", reporter_identity="merchant_token:mkt-alpha", assurance="verified",
+            occurred_at=stamp, received_at=stamp, **base,
+        )
+        for event_id, fields in [
+            ("bound", base),
+            ("unbound", {**base, "buyer_binding": "different-key", "accepted_offer_id": "different-offer"}),
+            ("bound-conflict", {**base, "accepted_offer_id": "different-offer"}),
+        ]:
+            _insert_receipt(
+                self.conn, event_id=event_id, event_type="buyer_agreement_accepted",
+                reporter_role="buyer", reporter_identity=f"buyer:{fields['buyer_binding']}", assurance="self_signed",
+                occurred_at=stamp, received_at=stamp, **fields,
+            )
+            result = commerce_facts.query_facts(self.conn, {}, "mkt-alpha")
+            self.assertEqual(result["summary"]["confirmed_intents"], int(event_id != "bound-conflict"))
+            self.assertEqual(any(fact["status"] == "needs_review" for fact in result["facts"]), event_id == "bound-conflict")
+
     # ── B5 三组错误组合零确认 ──────────────────────────────────────────────
 
     def test_b5_error_combinations_produce_zero_confirmed_intents(self) -> None:

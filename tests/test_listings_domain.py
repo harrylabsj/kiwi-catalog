@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
 
 from kiwi_catalog.core.errors import ValidationError
 from kiwi_catalog.listings.contracts import validate_publish_payload

@@ -538,7 +538,26 @@ class MerchantPublicationsApiTest(unittest.TestCase):
         status, _page, _ = _call_http(self.app, "GET", "/m/mkt_missing")
         self.assertEqual(status, 404)
 
-    def test_public_home_link_requires_active_binding(self) -> None:
+    def test_independent_publisher_has_a_public_home_without_a_runtime(self) -> None:
+        cookie = _register_and_login(self.app, "independent@example.test", "Independent Merchant")
+        mid = _merchant_id(self.app, cookie)
+        status, payload = self._create(cookie, _publish_body("Independent product"))
+        self.assertEqual(status, 200, payload)
+        publication = payload["publication"]
+        self.assertTrue(publication["public_home_url"].endswith(f"/m/{mid}"))
+
+        status, page, _ = _call_http(self.app, "GET", f"/m/{mid}")
+        self.assertEqual(status, 200, page)
+        self.assertIn("Independent product", page["_raw"])
+
+        status, detail = self._get(publication["publication_id"])
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(detail["publication"]["public_home_url"], publication["public_home_url"])
+        status, search = self._search("q=Independent product")
+        self.assertEqual(status, 200, search)
+        self.assertEqual([result["public_home_url"] for result in search["results"]], [publication["public_home_url"]])
+
+    def test_public_home_link_requires_active_binding_after_runtime_disconnect(self) -> None:
         """断开后公开投影与公开主页都不再给入口。"""
         status, payload = self._create(self.cookie_a, _publish_body("绑定门禁商品"))
         self.assertEqual(status, 200, payload)

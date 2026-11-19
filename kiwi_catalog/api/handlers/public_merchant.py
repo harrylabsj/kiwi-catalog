@@ -303,17 +303,17 @@ def public_merchant_home(
         from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
 
         enforce_public_read_limit(conn, payload, surface="merchant home")
-        # 解除连接后旧应用留下的内容不再对外展示：没有活动绑定时主页整体
-        # 404，不再通过直链暴露旧商品/旧名片。
-        if not publications_service.merchant_has_active_binding(conn, merchant_id):
+        active_binding = publications_service.merchant_has_active_binding(conn, merchant_id)
+        if not active_binding and not publications_service.merchant_public_home_allowed(conn, merchant_id):
             raise NotFoundError(f"Unknown merchant page: {merchant_id}")
         now = now_iso()
         # 多取一条判断是否还有下一页；展示仍严格限制在 50 件/页。
         publications = publications_service.list_public_publications(
             conn, merchant_id, now=now, limit=page_size + 1, offset=offset
         )
-        listings, listings_more = _public_listings(
-            conn, merchant_id, limit=page_size, offset=offset
+        listings, listings_more = (
+            _public_listings(conn, merchant_id, limit=page_size, offset=offset)
+            if active_binding else ([], False)
         )
         has_next = (
             len(publications) > page_size
@@ -323,7 +323,7 @@ def public_merchant_home(
         publications = publications[:page_size]
         listings = listings[:page_size]
         # 商家介绍只在第一页重复展示，避免翻页时冗余。
-        profile = _published_profile(conn, merchant_id) if page == 1 else None
+        profile = _published_profile(conn, merchant_id) if active_binding and page == 1 else None
         if not publications and not listings and profile is None and not has_next:
             raise NotFoundError(f"Unknown merchant page: {merchant_id}")
         display_name = (

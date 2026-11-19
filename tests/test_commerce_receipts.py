@@ -29,11 +29,11 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from typing import Any
 import unittest.mock
 
 from kiwi_catalog.api import app as app_module
 from kiwi_catalog.core.tokens import token_digest
-from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
 from kiwi_catalog.db.session import open_connection
 
 
@@ -299,8 +299,6 @@ class CommerceReceiptsSubmitTest(unittest.TestCase):
 
     def _sign_buyer_receipt(self, receipt: dict, key_seed: bytes | None = None) -> dict:
         """构造自包含 EdDSA JWS（载荷=回执字段 + jwk + issued_at）。"""
-        import hashlib
-
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
         from kiwi_catalog.a2a.binding_claims import jwk_thumbprint

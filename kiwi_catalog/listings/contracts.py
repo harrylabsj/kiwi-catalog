@@ -62,12 +62,8 @@ _PUBLISH_KEYS: frozenset[str] = frozenset({
     "commercial_hints",
     "handoff_destination_types",
     "handoff_destination_ref",  # 每商品成交入口（KTH destination_ref）
-    "fresh_until",  # publisher 声明的 TTL 上限；无声明用服务端默认
+    "fresh_until",  # Deprecated wire field retained for legacy signatures.
 })
-
-# publisher 可声明的 freshness TTL 上限（v0.4 §15.1：publisher 声明优先，但不能
-# 无限长——上限 30 天，超出视为非法输入）。
-MAX_PUBLISHED_TTL_SECONDS = 30 * 24 * 3600
 
 _MAX_STRING_LENGTH = 4096
 _MAX_ARRAY_LENGTH = 256
@@ -143,37 +139,19 @@ def _validate_handoff_destination_types(value: Any) -> list[str]:
     return items
 
 
-def _parse_fresh_until(value: Any) -> str:
-    """publisher 声明的 fresh_until（ISO-8601）。只接受明确未来时间，超 TTL 上限拒绝。"""
+def legacy_fresh_until(value: Any) -> str | None:
+    """Reproduce the old signed timestamp without using it as a listing deadline."""
     from datetime import UTC, datetime
 
     if not isinstance(value, str):
-        raise ValidationError("fresh_until must be an ISO-8601 string")
+        return None
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValidationError("fresh_until must be ISO-8601") from exc
-    if parsed.tzinfo is None:
-        raise ValidationError("fresh_until must include timezone")
-    now = datetime.now(UTC)
-    # 审查 P3：校验与输出统一按无微秒比较——声明未来 0.5s 的 fresh_until
-    # 若用带微秒的 delta 判定「未来」、输出却截断微秒，会归一化到与 now
-    # 同秒（立即过期）；截断后再算 delta，语义与存储一致。
-    normalized = parsed.astimezone(UTC).replace(microsecond=0)
-    now_truncated = now.replace(microsecond=0)
-    delta = (normalized - now_truncated).total_seconds()
-    if delta <= 0:
-        raise ValidationError("fresh_until must be in the future")
-    if delta > MAX_PUBLISHED_TTL_SECONDS:
-        raise ValidationError("fresh_until exceeds the max published TTL (30 days)")
-    # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
-    # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
-    # 整秒边界提前 1 秒判过期）。
-    return normalized.isoformat()
-    # 归一化为 UTC + 无微秒：与 now_iso()/_default_fresh_until 同格式，
-    # 保证过期比较（纯字符串）与时区无关（历史教训：微秒截断不一致会在
-    # 整秒边界提前 1 秒判过期）。
-    return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(UTC).replace(microsecond=0).isoformat()
+    except (ValueError, OverflowError):
+        pass
+    return None
 
 
 def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
