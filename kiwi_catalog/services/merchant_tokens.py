@@ -94,8 +94,24 @@ def list_applications(
 
 
 def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[str, Any]:
-    """原子签发：平台 merchant_id → 影子 merchants 行 → merchant_tokens active
-    行 → 工单置 approved。返回含明文 token（仅此一次）。重复 approve → 409。"""
+    """Reserve a pending application and issue its credential atomically."""
+    own_transaction = not conn.in_transaction
+    if own_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT approve_application")
+    try:
+        result = _approve_application(conn, application_id)
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT approve_application")
+        conn.execute("RELEASE SAVEPOINT approve_application")
+        if own_transaction:
+            conn.rollback()
+        raise
+    conn.execute("RELEASE SAVEPOINT approve_application")
+    return result
+
+
+def _approve_application(conn: sqlite3.Connection, application_id: int) -> dict[str, Any]:
     row = conn.execute(
         "select * from merchant_applications where application_id = ?", (application_id,)
     ).fetchone()
@@ -139,26 +155,28 @@ def approve_application(conn: sqlite3.Connection, application_id: int) -> dict[s
         ).fetchone()
         if account_row is not None and str(account_row["merchant_name"] or "").strip():
             display_name = str(account_row["merchant_name"]).strip()
-    conn.execute(
-        "insert or ignore into merchants(id, name, created_at, updated_at)"
-        " values (?, ?, ?, ?)",
-        (merchant_id, display_name, now, now),
+    updated = conn.execute(
+        "update merchant_applications set status = 'approved', merchant_id = ?,"
+        " reviewed_at = ? where application_id = ? and status = 'pending'",
+        (merchant_id, now, application_id),
     )
+    if updated.rowcount != 1:
+        raise ConflictError(f"application {application_id} is no longer pending")
     token = generate_merchant_token()
     # v14：明文 Fernet 加密落库（登录后"我的"可查，docs/accounts.md）
     from kiwi_catalog.services import accounts as accounts_service
 
     encrypted = accounts_service.encrypt_merchant_token(token)
     conn.execute(
+        "insert or ignore into merchants(id, name, created_at, updated_at)"
+        " values (?, ?, ?, ?)",
+        (merchant_id, display_name, now, now),
+    )
+    conn.execute(
         "insert or replace into merchant_tokens"
         " (merchant_id, token_hash, token_encrypted, status, issued_at)"
         " values (?, ?, ?, 'active', ?)",
         (merchant_id, token_digest(token), encrypted, now),
-    )
-    conn.execute(
-        "update merchant_applications set status = 'approved', merchant_id = ?,"
-        " reviewed_at = ? where application_id = ?",
-        (merchant_id, now, application_id),
     )
     # 回填注册账号的 merchant_id + 商家基本信息（v16）
     if account_id:
@@ -195,6 +213,8 @@ def reject_application(
     conn: sqlite3.Connection, application_id: int, review_note: str = ""
 ) -> None:
     """工单置 rejected + review_note；仅 pending 可拒（否则 409）。"""
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
         "select * from merchant_applications where application_id = ?", (application_id,)
     ).fetchone()
@@ -202,11 +222,13 @@ def reject_application(
         raise NotFoundError(f"Unknown application: {application_id}")
     if str(row["status"]) != "pending":
         raise ConflictError(f"application {application_id} already {row['status']}")
-    conn.execute(
+    updated = conn.execute(
         "update merchant_applications set status = 'rejected', review_note = ?,"
-        " reviewed_at = ? where application_id = ?",
+        " reviewed_at = ? where application_id = ? and status = 'pending'",
         (review_note, now_iso(), application_id),
     )
+    if updated.rowcount != 1:
+        raise ConflictError(f"application {application_id} is no longer pending")
     append_catalog_audit(
         conn, "", "admin", "merchant_application_rejected", {"application_id": application_id}
     )

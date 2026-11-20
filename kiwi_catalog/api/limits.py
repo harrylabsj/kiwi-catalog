@@ -20,6 +20,7 @@ import json
 import os
 from typing import Any
 
+from kiwi_catalog.api.transport import INQUIRY_TRANSPORT_KEYS as INQUIRY_TRANSPORT_KEYS
 from kiwi_catalog.core.errors import PayloadTooLargeError, ValidationError
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024
@@ -28,24 +29,6 @@ MAX_JSON_ITEMS = 1000
 MAX_JSON_STRING_CHARS = 65536
 MAX_JSON_NODES = 10000
 JSON_DEPTH_ERROR = f"JSON request body nesting must be <= {MAX_JSON_DEPTH}"
-
-# fallback ASGI 在派发前注入的传输层字段（不属于客户端 JSON）。开放询价
-# 中继路由必须先按原始 body 校验客户端 JSON，再剥掉客户端同名键、注入这些
-# 可信值；只有完成这两步的调用方才能把它们交给 validate_payload(skip_keys=…)。
-INQUIRY_TRANSPORT_KEYS = frozenset({
-    "_auth_token",
-    "_binding_jws",
-    "_origin",
-    "_referer",
-    "_cookie",
-    "_buyer_id",
-    "_buyer_source",
-    "_client_ip",
-    "_raw_inquiry_body_b64",
-    "_inquiry_headers",
-    "idempotency_key",
-})
-
 
 def max_request_body_bytes() -> int:
     # 本库 env 名优先，提取遗留的 SHOPPING_ 名兼容回退。
@@ -59,6 +42,19 @@ def max_request_body_bytes() -> int:
     except ValueError:
         return DEFAULT_MAX_REQUEST_BODY_BYTES
     return min(max(value, 1024), 16 * 1024 * 1024)
+
+
+def decode_request_body(raw: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8") or "{}")
+    except RecursionError as exc:
+        raise ValidationError(JSON_DEPTH_ERROR) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("invalid JSON request body") from exc
+    if not isinstance(payload, dict):
+        raise ValidationError("JSON request body must be an object")
+    validate_payload(payload)
+    return payload
 
 
 def validate_payload(payload: Any, *, skip_keys: frozenset[str] = frozenset()) -> None:

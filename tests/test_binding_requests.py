@@ -43,7 +43,7 @@ from kiwi_catalog.a2a.binding_claims import jwk_thumbprint
 from kiwi_catalog.api.app import create_catalog_app
 
 ADMIN_TOKEN = "admin-token-m3"
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 RUNTIME_ORIGIN = "https://pilot.example.app.workbuddy.host"
 A2A_ENDPOINT = f"{RUNTIME_ORIGIN}/a2a"
 CATALOG_ORIGIN = "https://catalog.example"

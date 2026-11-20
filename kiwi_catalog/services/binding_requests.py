@@ -333,6 +333,8 @@ def confirm_request(
     不覆盖 direct 商家已有域名）→ §4.5 同步 a2a 端点行 → D5 写两条
     passed 证据行（绑定声明即证据）→ 审计。
     """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     row = _require_owned_agent(conn, account, catalog_agent_id)
     agent_id = str(row["catalog_agent_id"])
     merchant_id = str(row["merchant_id"] or "").strip()
@@ -352,11 +354,12 @@ def confirm_request(
         "select binding_id from runtime_bindings where catalog_agent_id = ? and status = 'active'",
         (agent_id,),
     ).fetchone()
-    conn.execute(
+    inserted = conn.execute(
         "insert into runtime_bindings (binding_id, catalog_agent_id, merchant_id,"
         " runtime_origin, a2a_endpoint, key_id, key_thumbprint, key_jwk_json,"
         " binding_version, service_epoch, status, expires_at, created_at, updated_at)"
-        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', '', ?, ?)",
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', '', ?, ?)"
+        " on conflict do nothing",
         (
             binding_id,
             agent_id,
@@ -372,6 +375,8 @@ def confirm_request(
             now,
         ),
     )
+    if inserted.rowcount != 1:
+        raise ConflictError("runtime binding version was allocated by another request")
     if active is not None:
         conn.execute(
             "update runtime_bindings set status = 'revoked', updated_at = ? where binding_id = ?",

@@ -30,6 +30,7 @@ from kiwi_catalog.db.migrations import (
     run_migrations,
 )
 from kiwi_catalog.db.models import INDEXES, SCHEMA
+from kiwi_catalog.db.schema_integrity import assert_catalog_schema
 
 # review 3-59：re-export 包版本——此前硬编码 "0.5.0" 且写进 meta 表的
 # package_version，所有 ≥0.5.1 安装的库运营元数据都是错版本。
@@ -41,7 +42,12 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 def now_iso() -> str:
     # 统一 UTC（fresh_until 等跨模块时间戳逐字符比较的前提；历史教训：
     # 本地 naive 与 UTC-aware 混用会让 freshness TTL 偏移服务器时区差）。
-    return datetime.now(UTC).replace(microsecond=0).isoformat()
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def iso_from_epoch(timestamp: float) -> str:
+    """Format a Unix timestamp in the same UTC form as now_iso."""
+    return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds")
 
 
 def encode_json(value: Any) -> str:
@@ -71,12 +77,24 @@ def decode_json(value: str | None, default: Any) -> Any:
     return decoded
 
 
-def open_connection(db_path: str | Path) -> sqlite3.Connection:
+def open_connection(
+    db_path: str | Path, *, migrate: bool = True, check_same_thread: bool = True,
+) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
     # 审查 P2：数据目录/文件 0700/0600（CLAUDE.md 约定落地）——SQLite 库含
     # owner token digest / 审计事件 / 影子表，共享机器上不得被其他本地用户读取。
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    conn = sqlite3.connect(path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    if migrate:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = str(path) if migrate else path.resolve().as_uri() + "?mode=rw"
+    try:
+        conn = sqlite3.connect(
+            target, uri=not migrate, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=check_same_thread,
+        )
+    except sqlite3.OperationalError as exc:
+        if not migrate and not path.exists():
+            raise RuntimeError("catalog connection requires an existing migrated catalog database") from exc
+        raise
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -86,11 +104,15 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
     try:
         conn.row_factory = sqlite3.Row
         conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-        conn.execute("pragma journal_mode = wal")
         conn.execute("pragma foreign_keys = on")
         version_row = conn.execute("pragma user_version").fetchone()
         current_version = int(version_row[0] or 0) if version_row is not None else 0
         if current_version < CURRENT_SCHEMA_VERSION:
+            if not migrate:
+                raise RuntimeError(
+                    f"catalog database requires schema v{CURRENT_SCHEMA_VERSION}, found v{current_version}; "
+                    "open the database through kiwi_catalog.db.session.open_connection first"
+                )
             init_db(conn)
         elif current_version > CURRENT_SCHEMA_VERSION:
             raise RuntimeError(
@@ -98,6 +120,9 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
                 f"{CURRENT_SCHEMA_VERSION}; upgrade kiwi-catalog instead of opening this database "
                 "with an older release"
             )
+        else:
+            assert_catalog_schema(conn, current_version)
+        conn.execute("pragma journal_mode = wal")
         return conn
     except Exception:
         conn.close()
@@ -105,20 +130,27 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    for statement in SCHEMA:
-        conn.execute(statement)
-    run_migrations(conn)
-    for statement in INDEXES:
-        conn.execute(statement)
-    conn.execute(
-        "insert or replace into meta(key, value) values('schema_version', ?)",
-        (str(CURRENT_SCHEMA_VERSION),),
-    )
-    conn.execute(
-        "insert or replace into meta(key, value) values('package_version', ?)",
-        (VERSION,),
-    )
-    conn.commit()
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    with conn:
+        version = int(conn.execute("pragma user_version").fetchone()[0])
+        if version > CURRENT_SCHEMA_VERSION:
+            raise RuntimeError(f"catalog schema v{version} is newer than supported v{CURRENT_SCHEMA_VERSION}")
+        assert_catalog_schema(conn, version)
+        for statement in SCHEMA:
+            conn.execute(statement)
+        run_migrations(conn)
+        for statement in INDEXES:
+            conn.execute(statement)
+        assert_catalog_schema(conn, CURRENT_SCHEMA_VERSION)
+        conn.execute(
+            "insert or replace into meta(key, value) values('schema_version', ?)",
+            (str(CURRENT_SCHEMA_VERSION),),
+        )
+        conn.execute(
+            "insert or replace into meta(key, value) values('package_version', ?)",
+            (VERSION,),
+        )
 
 
 @contextmanager

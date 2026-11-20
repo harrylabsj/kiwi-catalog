@@ -401,7 +401,7 @@ wheels = [
 
 [[package]]
 name = "kiwi-catalog"
-version = "0.5.27"
+version = "0.5.28"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

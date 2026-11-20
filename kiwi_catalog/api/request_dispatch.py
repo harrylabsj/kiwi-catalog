@@ -40,6 +40,8 @@ def dispatch_request(
     payload: dict[str, Any] | None,
     query: dict[str, Any] | None,
     matcher: Matcher,
+    *,
+    validate: Callable[[dict[str, Any]], None] | None = None,
 ) -> Any:
     """Invoke the handler selected by *method*/*path* from *routes*.
 
@@ -61,6 +63,8 @@ def dispatch_request(
             continue
         path_matched = True
         if method.upper() in route.methods:
+            if validate is not None:
+                validate(payload)
             return route.handler(db_path, payload, query, **path_params)
     if path_matched:
         raise MethodNotAllowedError(f"Method not allowed for {method} {path}")

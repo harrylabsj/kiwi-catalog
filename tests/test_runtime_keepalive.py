@@ -75,7 +75,7 @@ class KeepaliveTest(unittest.TestCase):
                 runtime_access.KEYS_ENV: json.dumps(self.keys),
                 runtime_access.ACTIVE_KEY_ENV: "key-v1",
                 runtime_access.CUSTODY_ENV: "1",
-                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret",
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-owner-key-example-2026",
             },
             clear=False,
         )

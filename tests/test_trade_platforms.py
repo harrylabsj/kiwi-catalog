@@ -44,7 +44,8 @@ class TradePlatformRulesTest(unittest.TestCase):
         self.conn.close()
 
     def test_schema_v54_and_defaults(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 57)
+        # 审查 P1-3 引入 v58，链尾随之推进。
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 58)
         rows = trade_platforms.list_platforms(self.conn)
         self.assertEqual([row["id"] for row in rows], ["jd", "taobao", "tmall"])
         self.assertTrue(all(row["enabled"] for row in rows))

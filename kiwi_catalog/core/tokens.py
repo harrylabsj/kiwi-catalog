@@ -23,10 +23,21 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 import string
 
 MERCHANT_TOKEN_PREFIX = "mkt_"
+OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
+MIN_OWNER_SECRET_LENGTH = 24
+
+
+def configured_owner_secret() -> str:
+    """Validate configured key material without disclosing it."""
+    secret = (os.environ.get(OWNER_SECRET_ENV) or "").strip()
+    if secret and len(secret) < MIN_OWNER_SECRET_LENGTH:
+        raise RuntimeError(f"{OWNER_SECRET_ENV} must contain at least {MIN_OWNER_SECRET_LENGTH} characters")
+    return secret
 
 
 def generate_merchant_token() -> str:
@@ -56,7 +67,7 @@ def is_sha256_digest(value: str) -> bool:
 
 
 def token_matches(candidate: str, expected: str) -> bool:
-    return hmac.compare_digest(str(candidate or ""), str(expected or ""))
+    return hmac.compare_digest(str(candidate or "").encode(), str(expected or "").encode())
 
 
 def merchant_token_audit_fingerprint(token: str) -> str:

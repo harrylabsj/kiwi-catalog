@@ -42,7 +42,7 @@ from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.route_table import _ROUTE_TABLE, resolve_route
 
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 
 
 def _call_http(

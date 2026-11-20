@@ -97,7 +97,7 @@ class PublicInquiryRelayHardeningTest(unittest.TestCase):
         self.app = create_catalog_app(self.db_path)
         self.env = unittest.mock.patch.dict(os.environ, {
             "KIWI_CATALOG_ADMIN_TOKEN": ADMIN_TOKEN,
-            "KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret",
+            "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-owner-key-example-2026",
             "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             "KIWI_CATALOG_PUBLIC_BASE_URL": CATALOG_ORIGIN,
             "KIWI_CATALOG_PUBLIC_ORIGIN": CATALOG_ORIGIN,

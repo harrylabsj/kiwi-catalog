@@ -21,7 +21,6 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kiwi_catalog.api.auth import payload_token
 from kiwi_catalog.core.errors import IdempotencyConflict, ValidationError
 from kiwi_catalog.core.tokens import token_digest
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
@@ -56,32 +55,37 @@ def request_hash(values: dict[str, Any]) -> str:
     return token_digest(canonical)
 
 
-def catalog_write_window_start(current: datetime, window_seconds: int = CATALOG_WRITE_RATE_LIMIT_WINDOW_SECONDS) -> str:
-    epoch_seconds = int(current.timestamp())
-    window_epoch = epoch_seconds - (epoch_seconds % window_seconds)
-    return datetime.fromtimestamp(window_epoch, tz=UTC).replace(microsecond=0).isoformat()
+# register 的公开路径在服务层使用的 actor 名（非认证身份，见 _register_actor）。
+ANONYMOUS_CATALOG_ACTOR = "cli"
 
 
-def catalog_write_actor_key(payload: dict[str, Any], canonical_domain: str = "") -> str:
+def catalog_write_actor_key(
+    payload: dict[str, Any], canonical_domain: str = "", *, actor: str = ""
+) -> str:
     """Derive the idempotency/rate-limit actor from a request payload.
 
-    The presented API token (admin / merchant / verification worker) is the
-    actor when present.  The public register route may be unauthenticated; its
-    actor is a *constant* anonymous bucket so that (a) reusing an idempotency
-    key with a different request is detected even when the canonical domain
-    differs (the request_hash mismatch is what raises IdempotencyConflict),
-    and (b) all unauthenticated catalog writes share one bounded per-minute
-    budget.  The §17.4 per-domain registration limit independently caps each
-    domain, so the constant bucket adds a global bound without becoming an
-    SSRF amplification vector.
+    审查 P1-1：分桶键必须来自**已验证**身份，不能来自请求呈现的凭据。公开
+    register 路由无认证，而 _auth_token 来自 Authorization 头且双栈都会注入；
+    此前直接对呈现 token 做 digest 分桶，攻击者每请求换一个随机 junk token 就
+    得到全新桶，60/min 的 per-actor 预算形同虚设（docstring 声称的 "(b) all
+    unauthenticated catalog writes share one bounded per-minute budget" 被击穿），
+    连带让 anon 桶的幂等 key 空间跨用户共享（抢注可预测 idempotency_key）。
+
+    现在的口径：
+
+    * 已通过认证的调用方用 **验证后的 actor 字符串**（admin / merchant:<id> /
+      verification_worker）分桶——与呈现哪个 token 无关，同一主体一个桶；
+    * 未认证调用按传输层解析的客户端 IP 分桶（两栈都在派发前剥除客户端伪造
+      的同名键再注入 _client_ip），轮换 junk token 换不到新桶；
+    * 没有对端信息时退回全局常量桶（fail-closed：宁可共享一个小预算，也不给
+      未认证调用方按任意键扩散的预算）。
     """
-    token = (
-        payload_token(payload)
-        or str(payload.get("owner_token") or "")
-        or str(payload.get("_auth_token") or "")
-    )
-    if token:
-        return token_digest(str(token))
+    identity = str(actor or "").strip()
+    if identity and identity != ANONYMOUS_CATALOG_ACTOR:
+        return "actor:" + token_digest(identity)
+    client_ip = str((payload or {}).get("_client_ip") or "").strip()
+    if client_ip:
+        return "ip:" + token_digest(client_ip)
     return "anon:" + token_digest("catalog-write")
 
 

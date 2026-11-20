@@ -38,7 +38,9 @@ from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
     IdempotencyConflict,
+    MethodNotAllowedError,
     NotFoundError,
+    PayloadTooLargeError,
     PermissionDenied,
     RateLimitError,
     ShoppingCliError,
@@ -74,9 +76,10 @@ class FakeValidationError(Exception):
 
 
 class FakeJSONResponse:
-    def __init__(self, content: Any, status_code: int = 200) -> None:
+    def __init__(self, content: Any, status_code: int = 200, headers: dict[str, str] | None = None) -> None:
         self.content = content
         self.status_code = status_code
+        self.headers = headers or {}
 
 
 class FakeApp:
@@ -115,12 +118,15 @@ def test_business_exception_mappings() -> None:
         (IdempotencyConflict("reused key"), 409),
         (RateLimitError("too many requests"), 429),
         (ValidationError("invalid input"), 400),
+        (MethodNotAllowedError("wrong method"), 405),
+        (PayloadTooLargeError("too large"), 413),
         (ShoppingCliError("base failure"), 400),
     ]
     for exc, status in cases:
         resp = handlers[type(exc)](FakeRequest(), exc)
         assert resp.status_code == status
         assert resp.content == {"ok": False, "error": str(exc)}
+        assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 def test_registration_order_matches_original_mapping() -> None:
@@ -134,6 +140,8 @@ def test_registration_order_matches_original_mapping() -> None:
         IdempotencyConflict,
         RateLimitError,
         ValidationError,
+        MethodNotAllowedError,
+        PayloadTooLargeError,
         ShoppingCliError,
         FakeValidationError,
         FakeHTTPException,

@@ -484,13 +484,19 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
     _validate_register_input(payload)
     canonical = agent_catalog_writes.normalize_canonical_domain(require_field(payload, "domain"))
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_register_request_hash(payload)
+    merchant_id = str(payload.get("merchant_id") or "").strip()
 
     response: dict[str, Any] = {}
     cagt_id = ""
-    actor = "cli"
+    actor = api_idempotency.ANONYMOUS_CATALOG_ACTOR
     with db_session(db_path) as conn:
+        # 审查 P1-1：限流/幂等分桶必须先拿到**已验证**身份。公开 register 的
+        # 呈现 token 在认证通过前不可信（每请求换 junk token 就会换出新桶），
+        # 因此把 actor 解析提到 replay/限流之前，再按 actor 取桶（未认证调用
+        # 落到传输层 IP 桶，轮换 token 无法扩散预算）。
+        actor = _register_actor(conn, payload, merchant_id)
+        actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, REGISTER_ENDPOINT, actor_key, idempotency_key, request_hash
         )
@@ -508,8 +514,7 @@ def register_catalog_agent(db_path: str | Path, payload: dict[str, Any]) -> dict
         if replayed is not None:
             return replayed
         try:
-            merchant_id = str(payload.get("merchant_id") or "").strip()
-            actor = _register_actor(conn, payload, merchant_id)
+            # actor 已在 replay/限流之前解析（审查 P1-1）。
             # 审查 P2（v17 删域名唯一索引后）：一域多商家——重注册的控制权证明
             # 不能按「域名最新行」判定（会误拦在共享域名上开新 agent 的商家，
             # 且 created_at 同秒时选中任意商家行）。服务层 merchant 路径只操作
@@ -602,19 +607,21 @@ def refresh_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: d
     """
     catalog_agent_id = str(catalog_agent_id).strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
 
     with db_session(db_path) as conn:
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        # 审查 P1-1：分桶键只用**验证后**的 actor；请求呈现的 token 在认证通过
+        # 前不可信（轮换 junk token 会换出新桶），未认证调用按传输层 IP 分桶。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        actor = _require_catalog_write_auth(conn, agent, payload)
+        actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, REFRESH_ENDPOINT, actor_key, idempotency_key, request_hash
         )
         if replayed is not None:
             return replayed
-        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
-        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
-        agent = require_catalog_agent(conn, catalog_agent_id)
-        actor = _require_catalog_write_auth(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -694,7 +701,8 @@ def heartbeat_catalog_agent(
             rate_actor = f"runtime:{catalog_agent_id}:{verified['binding_id']}"
         else:
             actor = _require_catalog_write_auth(conn, agent, payload)
-            rate_actor = api_idempotency.catalog_write_actor_key(payload)
+            # 审查 P1-1：按验证后的 actor 分桶（呈现 token 不是身份）。
+            rate_actor = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, rate_actor, _catalog_write_rate_limit_per_minute()
         )
@@ -719,19 +727,21 @@ def verify_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: di
     """
     catalog_agent_id = str(catalog_agent_id).strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
 
     with db_session(db_path) as conn:
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        # 审查 P1-1：分桶键只用**验证后**的 actor；请求呈现的 token 在认证通过
+        # 前不可信（轮换 junk token 会换出新桶），未认证调用按传输层 IP 分桶。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        actor = _require_catalog_write_auth(conn, agent, payload)
+        actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, VERIFY_ENDPOINT, actor_key, idempotency_key, request_hash
         )
         if replayed is not None:
             return replayed
-        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
-        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
-        agent = require_catalog_agent(conn, catalog_agent_id)
-        actor = _require_catalog_write_auth(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -772,19 +782,20 @@ def claim_catalog_agent(db_path: str | Path, catalog_agent_id: str, payload: dic
     """
     catalog_agent_id = str(catalog_agent_id).strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
 
     with db_session(db_path) as conn:
+        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
+        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
+        # 审查 P1-1：分桶键只用**验证后**的 actor（呈现 token 认证前不可信）。
+        agent = require_catalog_agent(conn, catalog_agent_id)
+        merchant_id, actor = _claim_identity(conn, agent, payload)
+        actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, CLAIM_ENDPOINT, actor_key, idempotency_key, request_hash
         )
         if replayed is not None:
             return replayed
-        # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
-        # 预算后 403，可耗尽匿名桶 DoS 公共 register。
-        agent = require_catalog_agent(conn, catalog_agent_id)
-        merchant_id, actor = _claim_identity(conn, agent, payload)
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()
         )
@@ -938,20 +949,21 @@ def _moderation_action(
     """
     catalog_agent_id = str(catalog_agent_id).strip()
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
     request_hash = api_idempotency.catalog_agent_action_request_hash(payload, catalog_agent_id)
 
     with db_session(db_path) as conn:
-        replayed = api_idempotency.replay_catalog_write_idempotency(
-            conn, endpoint, actor_key, idempotency_key, request_hash
-        )
-        if replayed is not None:
-            return replayed
         # 审查 M4：auth 必须在限流消费之前——否则未认证请求用共享匿名桶消耗
         # 预算后 403，可耗尽匿名桶 DoS 公共 register。
         # Admin-only: moderation must never be driven by a merchant owner
         # or the verification worker (raises AuthError → 401/403).
         api_auth.require_admin_token(payload, db_path)
+        # 审查 P1-1：admin 身份验证通过后才确定桶键。
+        actor_key = api_idempotency.catalog_write_actor_key(payload, actor="admin")
+        replayed = api_idempotency.replay_catalog_write_idempotency(
+            conn, endpoint, actor_key, idempotency_key, request_hash
+        )
+        if replayed is not None:
+            return replayed
         require_catalog_agent(conn, catalog_agent_id)  # 404 on unknown id
         api_idempotency.enforce_agent_catalog_rate_limit(
             conn, actor_key, _catalog_write_rate_limit_per_minute()

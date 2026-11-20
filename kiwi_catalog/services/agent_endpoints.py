@@ -59,23 +59,16 @@ def _upsert_a2a_endpoint(
     conn: sqlite3.Connection, catalog_agent_id: str, url: str, now: str
 ) -> None:
     """upsert `a2a` 行（另写：形状与 upsert_profile_endpoints 一致，但不走它）。"""
-    row = conn.execute(
-        "select endpoint_id from agent_endpoints where catalog_agent_id = ? and kind = 'a2a'",
-        (catalog_agent_id,),
-    ).fetchone()
-    if row is None:
-        conn.execute(
-            "insert into agent_endpoints("
-            " catalog_agent_id, kind, url, protocol, protocol_version,"
-            " preference, auth_summary_json, status, last_checked_at)"
-            " values (?, 'a2a', ?, 'a2a', '', 1, '{}', 'active', ?)",
-            (catalog_agent_id, url, now),
-        )
-    else:
-        conn.execute(
-            "update agent_endpoints set url = ?, last_checked_at = ? where endpoint_id = ?",
-            (url, now, int(row["endpoint_id"])),
-        )
+    # 审查 P1-3：单语句 upsert（唯一索引 (catalog_agent_id, kind) 兜底并发写）。
+    conn.execute(
+        "insert into agent_endpoints("
+        " catalog_agent_id, kind, url, protocol, protocol_version,"
+        " preference, auth_summary_json, status, last_checked_at)"
+        " values (?, 'a2a', ?, 'a2a', '', 1, '{}', 'active', ?)"
+        " on conflict(catalog_agent_id, kind) do update set"
+        " url = excluded.url, last_checked_at = excluded.last_checked_at",
+        (catalog_agent_id, url, now),
+    )
 
 
 def sync_cloud_endpoints(conn: sqlite3.Connection, catalog_agent_id: str, now: str) -> None:

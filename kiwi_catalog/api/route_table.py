@@ -22,11 +22,12 @@ selection; both stacks dispatch through this table plus extension routes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kiwi_catalog.api.extensions import extension_route_specs
+from kiwi_catalog.api.extensions import ExtensionRouteSpec, extension_route_specs
 
 from kiwi_catalog.api.handlers import accounts as accounts_handlers
 from kiwi_catalog.api.handlers import agent_catalog as agent_catalog_handlers
@@ -46,6 +47,7 @@ from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.handlers import trade_platforms as trade_platforms_handlers
 from kiwi_catalog.api.handlers import enrollments as enrollment_handlers
 from kiwi_catalog.api.route_matching import match_path as _match_path
+from kiwi_catalog.api.route_matching import compile_template, paths_overlap
 
 
 def _health(db_path: str | Path) -> dict[str, Any]:
@@ -57,6 +59,7 @@ class RouteEntry:
     methods: set[str]
     path_template: str
     handler: Any
+    extension_name: str = ""
 
 
 _ROUTE_TABLE: tuple[RouteEntry, ...] = (
@@ -1134,20 +1137,44 @@ def _v1_reinstate_listing(db_path, listing_id, payload=None, query=None):
     return listings_handlers.v1_reinstate_listing(db_path, listing_id, payload or {})
 
 
-def all_routes() -> tuple[RouteEntry, ...]:
-    """基表 + 扩展路由（docs/extensions.md）。
+_extension_route_cache: tuple[tuple[ExtensionRouteSpec, ...], tuple[RouteEntry, ...]] | None = None
 
-    无扩展时直接返回基表（零分配快路径）；扩展路由追加在基表之后，
-    模板冲突时基路由优先（resolve_route 顺序匹配先到先得）。
-    """
+
+def extension_routes() -> tuple[RouteEntry, ...]:
+    """Validate and filter configured routes once per extension load."""
+    global _extension_route_cache
     specs = extension_route_specs()
     if not specs:
-        return _ROUTE_TABLE
-    extra = tuple(
-        RouteEntry(set(spec.methods), spec.path_template, spec.handler)
-        for spec in specs
-    )
-    return _ROUTE_TABLE + extra
+        return ()
+    if _extension_route_cache is not None and _extension_route_cache[0] is specs:
+        return _extension_route_cache[1]
+    occupied = [(route.path_template, route.methods) for route in _ROUTE_TABLE]
+    routes = []
+    for spec in specs:
+        if compile_template(spec.path_template) is None:
+            continue
+        methods = set()
+        for method in sorted(spec.methods):
+            conflict = next((path for path, reserved in occupied
+                             if method in reserved and paths_overlap(path, spec.path_template)), None)
+            if conflict is not None:
+                logging.getLogger(__name__).warning(
+                    "ignoring overlapping extension route: %s %s conflicts with %s",
+                    method, spec.path_template, conflict,
+                )
+                continue
+            methods.add(method)
+        if methods:
+            occupied.append((spec.path_template, methods))
+            routes.append(RouteEntry(methods, spec.path_template, spec.handler, spec.extension_name))
+    result = tuple(routes)
+    _extension_route_cache = (specs, result)
+    return result
+
+
+def all_routes() -> tuple[RouteEntry, ...]:
+    """Return the built-in routes followed by accepted extension routes."""
+    return _ROUTE_TABLE + extension_routes()
 
 
 def resolve_route(

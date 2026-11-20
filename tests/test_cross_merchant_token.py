@@ -44,7 +44,7 @@ from kiwi_catalog.services.agent_catalog_writes import (
     register_catalog_agent,
 )
 
-OWNER_SECRET = "test-p2-05-secret"
+OWNER_SECRET = "fixture-only-p205-owner-key-example"
 
 
 def _call_http(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict]:

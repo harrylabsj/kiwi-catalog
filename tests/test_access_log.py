@@ -41,7 +41,7 @@ from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services import access_log
 
 ADMIN_TOKEN = "test-admin"
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 
 
 def _make_db() -> Path:

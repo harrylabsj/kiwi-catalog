@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.28 — 2026-11-19
+
+- DNS 解析复用 2 秒内的成功结果，地址仍需重新通过安全校验。通常使用有硬时限的
+  子进程，无法启动子进程时使用单槽、有调用时限的线程回退。
+  内部 `BoundedResolver.submit` 现在要求先传主机/端口键，用于合并同一查询。
+
+- **写限流分桶改用已验证身份**（审查 P1-1）：`catalog_write_actor_key` 不再对
+  请求呈现的 token 做 digest——公开 register 无认证，轮换 junk token 此前每次
+  都是新桶，per-actor 预算被完全击穿。现在认证通过的调用按验证后的 actor
+  （admin / merchant / verification worker）分桶，未认证调用按传输层解析的
+  客户端 IP 分桶；FastAPI 栈 register 路由补注入可信 `_client_ip`（与 fallback
+  同口径：先剥客户端伪造值再写 server 侧解析值）。
+  两栈按收到的顺序合并 `X-Forwarded-For` 的多条头字段。升级前以旧 actor 键
+  保存的幂等结果可能无法跨版本重放。
+- **验证队列 unknown 围栏对账闭环**（审查 P1-2）：`mark_task_unknown` 的
+  fail-closed 围栏此前只有赋值、没有任何清除点——进程带着在途任务被杀后，
+  该 agent 的 enqueue 永久拒绝，只能手工改库。新增
+  `catalog verification-queue list|resolve --task-id X --outcome discarded|completed`、
+  `VerificationQueue.reconcile_unknown` 与
+  `reconcile_verification_unknown`（独立连接），内部用受守卫 UPDATE
+  （`status='running' and verification_status='queue_outcome_unknown'`）推进终态。
+  同一 agent 的所有未决任务都完成对账后才解除围栏。CLI 要求停止调度器及其执行线程，
+  也可处理异常退出时尚未来得及标记的 running 记录。`catalog doctor`
+  报告新增围栏任务清单。
+- **agent_endpoints 唯一性 + 证据表索引**（审查 P1-3，迁移 58）：建
+  `(catalog_agent_id, kind)` 唯一索引前合并竞态产生的历史重复行（保留首行），
+  两处端点写入改为 `insert ... on conflict do update`
+  原子写；补 `agent_verifications(catalog_agent_id, checked_at)`、
+  `agent_profile_snapshots(catalog_agent_id, snapshot_id)`、
+  `agent_trust_observations(catalog_agent_id, observed_at)` 索引。
+- **非法路由模板 fail-closed**（审查 P1-4）：`match_path` 校验参数名并在编译
+  失败时视为不匹配——此前 `{a-b}` 这类模板让进程内所有本应 404 的未知路径
+  返回裸文本 500（FastAPI 栈则是信封 500）。
+- **封禁对存量会话生效**（审查 P2-1）：`resolve_session` 读到非 active 账号时
+  删除会话并拒绝，不再让被封账号的现有 cookie 用满 7 天。
+- **公开检索补匿名读限流**（审查 P2-9）：
+  `/v1/merchant-publications/search` 补 `enforce_public_read_limit`，与其余匿名
+  读面一致（该端点每次调用做四列 LIKE 全表扫并写 3 张统计表）。
+- 删除死代码 `catalog_write_window_start`（审查 P3-12）。
+- 验证任务认领、商家审批、身份回填、公开动态版本和发布名额增加并发保护。
+  调度器未取得执行槽位时记录 `runner_unavailable`，避免留下未执行的 running 行。
+- 域名 challenge 的有效期为 90 天。注册与账号路由统一校验传输字段，公开店铺链接
+  拒绝非规范 IP。两栈统一尾斜杠、错误封装、跳转和多 Cookie。
+- schema v59 增加运营查询索引与账号状态变更时的会话撤销触发器。
+  CI 同时验证 Python 3.11/3.13，加入提交历史扫描和发布门禁的契约锁检查。
+
+## 0.5.27 — 2026-11-19
+
+- **交易回执接收与投影**：新增 `commerce_receipts` 存储（迁移 57），按
+  （商家, 报告方角色, 已验证报告方, 事件 ID）幂等，`content_hash` 判定同 ID 不同
+  内容的冲突；公开页面永不投影回执。
+- 修复：签名商品发布不再被陈旧校验路径丢弃；回执绑定在写入前完成校验。
+
 ## 0.5.26 — 2026-11-17
 
 - **商品上架即永久**：取消 Listing 新鲜期（`fresh_until` / `FRESH-STALE`）的

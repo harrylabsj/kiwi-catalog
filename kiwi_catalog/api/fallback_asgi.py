@@ -27,13 +27,19 @@ from urllib.parse import parse_qs
 
 from kiwi_catalog.a2a import card_store
 from kiwi_catalog.api import auth as api_auth
-from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.api.ip_trust import resolve_asgi_client_ip
 from kiwi_catalog.services.buyer_origin import derive_buyer_source
 from kiwi_catalog.api.limits import (
     INQUIRY_TRANSPORT_KEYS,
-    JSON_DEPTH_ERROR,
+    decode_request_body,
     max_request_body_bytes,
-    validate_payload,
+)
+from kiwi_catalog.api.transport import (
+    BODY_METHODS,
+    RESPONSE_META_FIELDS,
+    SECURITY_HEADERS,
+    redirect_location,
+    strip_transport_fields,
 )
 from kiwi_catalog.core.errors import PayloadTooLargeError, ValidationError
 from kiwi_catalog.discovery.cache import compute_etag, etag_matches
@@ -96,11 +102,9 @@ class MarketplaceASGIApp:
         }
         method = str(scope.get("method") or "GET").upper()
         path = str(scope.get("path") or "/")
-        client = scope.get("client")
-        direct_peer = str(client[0] or "") if client else None
         # 客户端 IP（访问日志 ip_prefix 与 payload._client_ip 共用同一解析——
         # 仅可信代理采信 XFF，直连对端非可信代理则忽略 XFF）。
-        client_ip = resolve_client_ip(headers.get("x-forwarded-for", ""), direct_peer)
+        client_ip = resolve_asgi_client_ip(scope)
         # 访问日志（v28）：捕获响应 status/body 用于 result_count 提取，测
         # latency；record 失败绝不抛错（services/access_log.py）。
         started = time.perf_counter()
@@ -138,14 +142,6 @@ class MarketplaceASGIApp:
             )
 
         try:
-            maximum = max_request_body_bytes()
-            try:
-                content_length = int(headers.get("content-length", "0") or 0)
-            except ValueError:
-                content_length = 0
-            if content_length > maximum:
-                await self._send_json(_capture_send, 413, {"ok": False, "error": "request body is too large"})
-                return
             path_known, method_allowed = self._resolver()(method, path)
             if not path_known:
                 await self._send_json(_capture_send, 404, {"ok": False, "error": f"No route for {method} {path}"})
@@ -153,80 +149,48 @@ class MarketplaceASGIApp:
             if not method_allowed:
                 await self._send_json(_capture_send, 405, {"ok": False, "error": f"Method not allowed for {method} {path}"})
                 return
-            chunks: list[bytes] = []
-            body_size = 0
-            while True:
-                message = await receive()
-                chunk = message.get("body", b"")
-                body_size += len(chunk)
-                if body_size > maximum:
+
+            raw_body = b""
+            payload: dict[str, Any] = {}
+            if method in BODY_METHODS:
+                maximum = max_request_body_bytes()
+                try:
+                    content_length = int(headers.get("content-length", "0") or 0)
+                except ValueError:
+                    content_length = 0
+                if content_length > maximum:
                     await self._send_json(_capture_send, 413, {"ok": False, "error": "request body is too large"})
                     return
-                chunks.append(chunk)
-                if not message.get("more_body", False):
-                    break
-            try:
-                decoded_payload = json.loads(b"".join(chunks).decode("utf-8") or "{}")
-            except RecursionError:
-                # 超深嵌套在解析阶段就触发 RecursionError，必须在 json.loads
-                # 边界安全返回 400（FastAPI 中间件同口径），不能逃逸成 500。
-                body = json.dumps(
-                    {"ok": False, "error": JSON_DEPTH_ERROR},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-                await _capture_send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"application/json")]})
-                await _capture_send({"type": "http.response.body", "body": body})
-                return
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                body = json.dumps(
-                    {"ok": False, "error": "invalid JSON request body"},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-                await _capture_send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"application/json")]})
-                await _capture_send({"type": "http.response.body", "body": body})
-                return
-            if not isinstance(decoded_payload, dict):
-                body = json.dumps(
-                    {"ok": False, "error": "JSON request body must be an object"},
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode("utf-8")
-                await _capture_send({"type": "http.response.start", "status": 400, "headers": [(b"content-type", b"application/json")]})
-                await _capture_send({"type": "http.response.body", "body": body})
-                return
+                chunks: list[bytes] = []
+                body_size = 0
+                while True:
+                    message = await receive()
+                    if message.get("type") == "http.disconnect":
+                        return
+                    chunk = message.get("body", b"")
+                    body_size += len(chunk)
+                    if body_size > maximum:
+                        await self._send_json(_capture_send, 413, {"ok": False, "error": "request body is too large"})
+                        return
+                    chunks.append(chunk)
+                    if not message.get("more_body", False):
+                        break
+                raw_body = b"".join(chunks)
+                try:
+                    payload = strip_transport_fields(decode_request_body(raw_body), path=path)
+                except PayloadTooLargeError as exc:
+                    await self._send_json(_capture_send, 413, {"ok": False, "error": str(exc)})
+                    return
+                except ValidationError as exc:
+                    await self._send_json(_capture_send, 400, {"ok": False, "error": str(exc)})
+                    return
             is_inquiry = (
                 method == "POST"
                 and path.startswith("/v1/agents/")
                 and path.endswith("/public-inquiry")
             )
-            # 先在未经任何传输层修改的客户端 JSON 上执行与 FastAPI 中间件相同
-            # 的通用限制（大小/深度/项目数/字符串/节点数）。此前把同名键整体
-            # 跳过，客户端可在自己的 JSON 里伪造 `_raw_inquiry_body_b64` 等键，
-            # 绕过这些限制。
-            try:
-                validate_payload(decoded_payload)
-            except PayloadTooLargeError as exc:
-                await self._send_json(_capture_send, 413, {"ok": False, "error": str(exc)})
-                return
-            except ValidationError as exc:
-                await self._send_json(_capture_send, 400, {"ok": False, "error": str(exc)})
-                return
-            payload = decoded_payload
             if is_inquiry:
-                # 原始 body 已校验；删掉客户端自带的传输层同名键，后续只注入
-                # 由 HTTP 头/原始字节派生的可信值。这样 handle_request 跳过这些
-                # 键时不会跳过任何客户端 JSON。
-                for key in INQUIRY_TRANSPORT_KEYS:
-                    payload.pop(key, None)
-            # 传输层元数据永远不是客户端字段：先剥除客户端 JSON 里的同名键
-            # （_auth_token/_binding_jws/_origin/_referer 由 payload_with_auth 统一
-            # 剥除，这里补齐 cookie / 买家标识 / 客户端 IP），之后只注入由 HTTP 头
-            # 与真实对端派生的可信值。否则客户端可用 body 冒充 IP 选限流桶、
-            # 冒充买家标识或会话 cookie。
-            for key in ("_cookie", "_buyer_id", "_buyer_source", "_client_ip"):
-                payload.pop(key, None)
+                payload.pop("idempotency_key", None)
             payload = api_auth.payload_with_auth(
                 payload,
                 authorization=headers.get("authorization", ""),
@@ -269,7 +233,7 @@ class MarketplaceASGIApp:
                             return
                         forwarded[name] = raw_value.decode("latin-1")
                 import base64
-                payload["_raw_inquiry_body_b64"] = base64.b64encode(b"".join(chunks)).decode("ascii")
+                payload["_raw_inquiry_body_b64"] = base64.b64encode(raw_body).decode("ascii")
                 payload["_inquiry_headers"] = forwarded
             try:
                 raw_query = scope.get("query_string", b"").decode("utf-8")
@@ -278,13 +242,11 @@ class MarketplaceASGIApp:
             query = parse_qs(raw_query, keep_blank_values=True)
             handler = self._handler()
             handler_kwargs: dict[str, Any] = {}
-            if is_inquiry:
-                # 只有默认 handle_request 接受可信键名集合；自定义 handler 仍按
-                # 原五参数调用（它们自行负责 payload 校验）。
-                from kiwi_catalog.api.app import handle_request as _default_handle_request
+            # Client JSON was validated before trusted transport fields were injected.
+            from kiwi_catalog.api.app import handle_request as _default_handle_request
 
-                if handler is _default_handle_request:
-                    handler_kwargs["trusted_transport_keys"] = INQUIRY_TRANSPORT_KEYS
+            if handler is _default_handle_request:
+                handler_kwargs["trusted_transport_keys"] = INQUIRY_TRANSPORT_KEYS
             status, response = await asyncio.to_thread(
                 handler,
                 self.state.db_path,
@@ -327,6 +289,7 @@ class MarketplaceASGIApp:
         ``__cookies__`` 列表下发 Set-Cookie（账号会话，docs/accounts.md）。
         这些 ``__*`` 元键只用于传输控制，绝不进入响应体。
         """
+        security = [(name.encode("ascii"), value.encode("ascii")) for name, value in SECURITY_HEADERS.items()]
         html = response.get("__html__") if isinstance(response, dict) else None
         redirect_to = response.get("__redirect__") if isinstance(response, dict) else None
         if redirect_to is not None:
@@ -336,8 +299,10 @@ class MarketplaceASGIApp:
                     "type": "http.response.start",
                     "status": 302,
                     "headers": [
-                        (b"location", str(redirect_to).encode("utf-8")),
+                        (b"location", redirect_location(redirect_to).encode("ascii")),
                         (b"cache-control", b"no-store"),
+                        *security,
+                        *((b"set-cookie", str(cookie).encode("utf-8")) for cookie in response.get("__cookies__") or ()),
                     ],
                 }
             )
@@ -351,15 +316,16 @@ class MarketplaceASGIApp:
         # 元键只用于传输控制（覆盖状态码 / no-store / Set-Cookie），绝不进入
         # 响应体。FastAPI 栈在路由层逐个 pop；fallback 在这里统一剥除，保证
         # 双栈错误响应体形状一致（F-2：502 曾把 "__status__":502 序列化出去）。
-        no_store = bool(response.get("__no_store__")) if isinstance(response, dict) else False
         cookies = response.get("__cookies__") if isinstance(response, dict) else None
+        no_store = bool(response.get("__no_store__") or cookies) if isinstance(response, dict) else False
         if isinstance(response, dict):
             response = {
                 k: v
                 for k, v in response.items()
-                if k not in {"__status__", "__no_store__", "__cookies__"}
+                if k not in RESPONSE_META_FIELDS
             }
         if html is not None:
+            no_store = True
             body = str(html).encode("utf-8")
             content_type = b"text/html; charset=utf-8"
             extra_headers = [(b"cache-control", b"no-store")]
@@ -367,19 +333,10 @@ class MarketplaceASGIApp:
             body = json.dumps(response, ensure_ascii=False, sort_keys=True).encode("utf-8")
             content_type = b"application/json"
             extra_headers = [(b"cache-control", b"no-store")] if no_store else []
-        # 安全响应头（KC-SEC-01 硬化）：凭据页/JSON API 一律 nosniff + 禁
-        # Referrer 泄漏（admin token 已改 header-only，referrer 兜底防
-        # 凭据随导航外泄）；frame-ancestors 只能经响应头传递（meta 忽略）。
-        extra_headers.extend(
-            [
-                (b"x-content-type-options", b"nosniff"),
-                (b"referrer-policy", b"no-referrer"),
-                (b"content-security-policy", b"frame-ancestors 'none'"),
-            ]
-        )
+        extra_headers.extend(security)
         # 稳定读地址（M3 §11.3 / 计划 A3）：公开只读 + ETag ⇒ 允许中间缓存但必须回源
         # 重验证。**只在成功响应上**加；404/410 不得带缓存头（错误不可缓存）。
-        if status == 200 and card_store.is_stable_card_read(request_method, request_path):
+        if status == 200 and not no_store and card_store.is_stable_card_read(request_method, request_path):
             extra_headers.append((b"cache-control", card_store.CARD_CACHE_CONTROL.encode("ascii")))
         if cookies:
             extra_headers.extend(
@@ -401,7 +358,7 @@ class MarketplaceASGIApp:
                 {
                     "type": "http.response.start",
                     "status": 304,
-                    "headers": [(b"etag", etag.encode("ascii"))],
+                    "headers": [(b"etag", etag.encode("ascii")), *extra_headers],
                 }
             )
             await send({"type": "http.response.body", "body": b""})

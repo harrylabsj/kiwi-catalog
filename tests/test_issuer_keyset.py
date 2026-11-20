@@ -133,7 +133,7 @@ class IssuerKeySetTest(unittest.TestCase):
         key_set = load_issuer_key_set(self._env_with_set(["ACTIVE", "RETIRED"]))
         distributed = key_set.public_keys()
         self.assertEqual(sorted(distributed), ["issuer-0", "issuer-1"])
-        for kid, entry in distributed.items():
+        for entry in distributed.values():
             self.assertIn(entry["state"], ("ACTIVE", "RETIRED"))
             self.assertEqual(entry["jwk"]["kty"], "OKP")
             self.assertEqual(entry["jwk"]["crv"], "Ed25519")

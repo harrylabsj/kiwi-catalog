@@ -10,7 +10,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.api.ip_trust import resolve_asgi_client_ip, resolve_client_ip
 
 
 class ResolveClientIpTest(unittest.TestCase):
@@ -26,10 +26,22 @@ class ResolveClientIpTest(unittest.TestCase):
     def test_trusted_proxies_env_extends_allowlist(self) -> None:
         with patch.dict(os.environ, {"KIWI_CATALOG_TRUSTED_PROXIES": "10.0.0.5"}):
             self.assertEqual(resolve_client_ip("203.0.113.9", "10.0.0.5"), "203.0.113.9")
+            self.assertEqual(resolve_client_ip("203.0.113.9, 10.0.0.5", "127.0.0.1"), "203.0.113.9")
             self.assertEqual(resolve_client_ip("203.0.113.9", "192.0.2.1"), "192.0.2.1")
 
     def test_no_direct_peer_returns_empty(self) -> None:
         self.assertEqual(resolve_client_ip("1.2.3.4", None), "")
+
+    def test_asgi_forwarding_chain_can_span_multiple_headers(self) -> None:
+        scope = {
+            "client": ("127.0.0.1", 40000),
+            "headers": [
+                (b"x-forwarded-for", b"192.0.2.1"),
+                (b"x-forwarded-for", b"203.0.113.9"),
+                (b"x-forwarded-for", b"127.0.0.1"),
+            ],
+        }
+        self.assertEqual(resolve_asgi_client_ip(scope), "203.0.113.9")
 
 
 if __name__ == "__main__":

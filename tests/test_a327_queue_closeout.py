@@ -6,7 +6,6 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest import mock
 
 from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services.agent_verification import (
@@ -14,6 +13,7 @@ from kiwi_catalog.services.agent_verification import (
     VerificationQueueConfig,
     VerificationTask,
 )
+from kiwi_catalog.services.verification_stages import VerificationResult
 
 
 class Harness:
@@ -56,19 +56,14 @@ class Harness:
                 harness.on_execute(task)
                 time.sleep(0.03)
                 harness.off_execute(task)
-                return mock.Mock(
-                    verification_status="verified",
-                    verification_level="verified",
-                    freshness_state="fresh",
-                    administrative_state="active",
-                )
+                return VerificationResult(catalog_agent_id, "discovered", "profile_valid", ())
 
             def refresh(self, catalog_agent_id, *, actor="", force=False, **kw):
                 task = task_ctx.task
                 harness.on_execute(task)
                 time.sleep(0.03)
                 harness.off_execute(task)
-                return mock.Mock(verification_status="discovered", verification_level="discovered")
+                return VerificationResult(catalog_agent_id, "profile_valid", "profile_valid", ())
 
         def factory():
             return _Svc()
@@ -92,6 +87,14 @@ class Harness:
 
     def bind_task(self, task):
         pass
+
+
+def _admit_fixture_task(q: VerificationQueue, task: VerificationTask) -> None:
+    """Exercise scheduling of already-admitted tasks with duplicate keys."""
+    with q._results_cv:
+        q._persist_insert(task)
+        q._track_task(task)
+        q._pending.put_nowait(task)
 
 
 def _drain_results(q: VerificationQueue, task_ids, timeout=15.0):
@@ -128,9 +131,11 @@ class AgentSerializationTest(unittest.TestCase):
             task_ids.append(t.task_id)
             # review 2-31（A327）：绕过入队 (agent,kind) 去重——直接投递真实
             # 任务对象，制造同 agent 多任务并发提交形态
-            q._pending.put(t)
+            _admit_fixture_task(q, t)
         missing = _drain_results(q, task_ids)
         self.assertEqual(missing, set(), "存在无结果滞留任务（deferred 滞留）")
+        self.assertEqual(set(self.h.executions), set(task_ids))
+        self.assertTrue(all(q.wait(task_id).status == "completed" for task_id in task_ids))
         for tid, n in self.h.executions.items():
             self.assertEqual(n, 1, f"任务 {tid} 被执行 {n} 次（应恰 1 次）")
         for agent, peak in self.h.concurrent_per_agent.items():
@@ -149,7 +154,7 @@ class AgentSerializationTest(unittest.TestCase):
                 kind="verify",
                 enqueued_at=time.time(),
             )
-            q._pending.put(t)
+            _admit_fixture_task(q, t)
             task_ids.append(t.task_id)
         missing = _drain_results(q, task_ids)
         self.assertEqual(missing, set())

@@ -32,7 +32,6 @@ network dependency is the SSRF-safe ``ProfileFetcher`` (W1), injected here.
 
 from __future__ import annotations
 
-import hmac
 import re
 import urllib.parse
 from collections.abc import Mapping
@@ -47,6 +46,12 @@ from kiwi_catalog.discovery._validation import (
     is_same_authority,
 )
 from kiwi_catalog.discovery.agent_card import AgentCardResult
+from kiwi_catalog.discovery.domain_challenge import (
+    CHALLENGE_DOCUMENT_KEYS as CHALLENGE_DOCUMENT_KEYS,
+    CHALLENGE_WELL_KNOWN_PATH,
+    challenge_matches,
+    is_challenge_document,
+)
 from kiwi_catalog.discovery.fetcher import FetchError, ProfileFetcher, SSRFBlockError
 from kiwi_catalog.discovery.trust import TrustPolicy
 from kiwi_catalog.discovery.ucp import UcpProfileResult
@@ -184,10 +189,7 @@ class VerificationEvidence:
 # ── HTTPS domain-control verification (§6) ──────────────────────────────────
 
 # 审查 P1-12：domain-control 的 well-known 200 只证明域名可达，不证明该
-# catalog_agent 行属于域名控制者。域名必须发布一份回指本行的一次性 challenge
-# 文件；文件路径与必需键是跨模块单一口径（services/domain_bindings.py 复用）。
-CHALLENGE_WELL_KNOWN_PATH = ".well-known/kiwi-catalog-agent.json"
-CHALLENGE_DOCUMENT_KEYS: tuple[str, ...] = ("catalog_agent_id", "challenge")
+# catalog_agent 行属于域名控制者。域名必须发布一份回指本行的 challenge 文件。
 
 
 class IdentityVerifier:
@@ -326,16 +328,20 @@ class IdentityVerifier:
                 f"domain-control challenge at {challenge_url} is not a JSON object",
                 details,
             )
-        published_agent_id = str(document.get("catalog_agent_id") or "")
-        published_challenge = str(document.get("challenge") or "")
-        if not hmac.compare_digest(published_agent_id.encode("utf-8"), str(expected_catalog_agent_id).encode("utf-8")):
+        if not is_challenge_document(document):
+            return _failed_evidence(
+                "domain_control",
+                f"domain-control challenge at {challenge_url} is missing a required field",
+                details,
+            )
+        if not challenge_matches(expected_catalog_agent_id, document.get("catalog_agent_id")):
             return _failed_evidence(
                 "domain_control",
                 f"domain-control challenge at {challenge_url} does not reference "
                 f"catalog agent {expected_catalog_agent_id}",
                 details,
             )
-        if not hmac.compare_digest(published_challenge.encode("utf-8"), str(challenge).encode("utf-8")):
+        if not challenge_matches(challenge, document.get("challenge")):
             return _failed_evidence(
                 "domain_control",
                 f"domain-control challenge token at {challenge_url} does not match "

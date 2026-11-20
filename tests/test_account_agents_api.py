@@ -36,7 +36,7 @@ from unittest import mock
 from kiwi_catalog.api.app import create_catalog_app
 
 ADMIN_TOKEN = "admin-tok-123"
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 
 BASE_REGISTER_BODY = {
     "merchant_name": "Acme 商贸",

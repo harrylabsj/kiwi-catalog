@@ -37,6 +37,8 @@ from kiwi_catalog.cli_agent_catalog_commands import (
     cmd_agent_catalog_search,
     cmd_agent_catalog_stats,
     cmd_agent_catalog_suspend,
+    cmd_agent_catalog_verification_queue_list,
+    cmd_agent_catalog_verification_queue_resolve,
     cmd_agent_catalog_verify,
 )
 from kiwi_catalog.cli_common import non_negative_int, positive_int
@@ -139,6 +141,29 @@ def build_parser() -> argparse.ArgumentParser:
     agent_catalog_doctor = agent_catalog_sub.add_parser("doctor", help="Local catalog health check (§24); exits 1 on issues")
     agent_catalog_doctor.add_argument("--format", choices=["text", "json"], default="text")
     agent_catalog_doctor.set_defaults(func=cmd_agent_catalog_doctor)
+    verification_queue = agent_catalog_sub.add_parser(
+        "verification-queue",
+        help="Inspect and reconcile verification tasks fenced by an unknown outcome (审查 P1-2)",
+    )
+    verification_queue_cmd = verification_queue.add_subparsers(
+        dest="verification_queue_command", required=True
+    )
+    verification_queue_list = verification_queue_cmd.add_parser(
+        "list", help="List tasks fenced with an unknown outcome"
+    )
+    verification_queue_list.add_argument("--format", choices=["text", "json"], default="text")
+    verification_queue_list.set_defaults(func=cmd_agent_catalog_verification_queue_list)
+    verification_queue_resolve = verification_queue_cmd.add_parser(
+        "resolve", help="Resolve one fenced task with an operator outcome"
+    )
+    verification_queue_resolve.add_argument("--task-id", required=True, dest="task_id", help="Fenced task id")
+    verification_queue_resolve.add_argument(
+        "--outcome", required=True, choices=["discarded", "completed"],
+        help="discarded => terminal failed; completed => terminal completed",
+    )
+    verification_queue_resolve.add_argument("--reason", default="", help="Optional operator note recorded in the ledger")
+    verification_queue_resolve.add_argument("--format", choices=["text", "json"], default="text")
+    verification_queue_resolve.set_defaults(func=cmd_agent_catalog_verification_queue_resolve)
 
     # ── catalog merchant（token 分发管理，docs/kiwi-catalog-token-portal-design-v0.1）──
     # catalog 的 subparsers 已存在（agent_catalog_command）——merchant 作为
@@ -150,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set a plan's active slot limit (plan quota; see listing-plan to assign a merchant)",
     )
     listing_plan.add_argument("plan_code")
-    listing_plan.add_argument("active_limit", type=int)
+    listing_plan.add_argument("active_limit", type=non_negative_int)
     listing_plan.add_argument("--format", choices=["text", "json"], default="text")
     listing_plan.set_defaults(func=cmd_listing_plan_limit)
     listing_limit = merchant_cmd.add_parser("listing-limit", help="Override or suspend a merchant's listing capacity")

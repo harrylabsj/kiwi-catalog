@@ -32,6 +32,7 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -223,13 +224,25 @@ class BuyerAccessRoutesTest(unittest.TestCase):
         self.assertEqual(version, CURRENT_SCHEMA_VERSION)
         self.assertIsNotNone(table)
 
-    def test_lazy_schema_recreates_missing_table_for_existing_database(self) -> None:
-        # 模拟已经处于当前迁移版本、升级前没有该表的存量库：首次访问应幂等补建。
+    def test_v54_can_upgrade_without_the_additive_buyer_access_table(self) -> None:
+        # v54 existed both before and after the additive buyer-access change.
         with db_session(self.db_path) as conn:
-            conn.execute("drop table if exists buyer_access_routes")
+            conn.execute("drop table buyer_access_routes")
+            conn.execute("pragma user_version = 54")
         status, payload = self._put("share_code", 0)
         self.assertEqual(status, 200, payload)
         self.assertEqual(self._public()["buyer_access"]["state"], "relay")
+
+    def test_current_database_missing_buyer_access_table_stays_unmodified(self) -> None:
+        with db_session(self.db_path) as conn:
+            conn.execute("drop table buyer_access_routes")
+        status, payload = self._put("share_code", 0)
+        self.assertEqual(status, 500, payload)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertIsNone(conn.execute(
+                "select 1 from sqlite_schema where name = 'buyer_access_routes'"
+            ).fetchone())
+            self.assertEqual(conn.execute("pragma user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
 
     def test_default_public_record_is_unchanged(self) -> None:
         record = self._public(include=False)

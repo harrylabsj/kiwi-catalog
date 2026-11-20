@@ -53,7 +53,7 @@ from kiwi_catalog.core.errors import (
     ShoppingCliError,
     ValidationError,
 )
-from kiwi_catalog.core.tokens import token_digest, token_matches
+from kiwi_catalog.core.tokens import OWNER_SECRET_ENV, configured_owner_secret, token_digest, token_matches
 from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import merchant_tokens as tokens_service
 
@@ -75,7 +75,6 @@ def normalize_registration_source(value: object) -> str:
     return source
 _PBKDF2_ITERATIONS = 200_000
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 
 
 # ── 密码 hash（PBKDF2，标准库）───────────────────────────────────────────
@@ -117,9 +116,9 @@ _KDF_P = 1
 
 
 def _owner_secret() -> str:
-    secret = str(os.environ.get(_OWNER_SECRET_ENV) or "").strip()
+    secret = configured_owner_secret()
     if not secret:
-        raise RuntimeError("KIWI_CATALOG_OWNER_TOKEN_SECRET is not configured")
+        raise RuntimeError(f"{OWNER_SECRET_ENV} is not configured")
     return secret
 
 
@@ -796,11 +795,18 @@ def ensure_merchant_id(conn: sqlite3.Connection, account_id: int, name_hint: str
         merchant_id = tokens_service.new_platform_merchant_id(
             name_hint or f"account-{account_id}"
         )
-        conn.execute(
+        updated = conn.execute(
             "update merchant_accounts set merchant_id = ?, updated_at = ?"
             " where account_id = ? and merchant_id = ''",
             (merchant_id, now_iso(), account_id),
         )
+        if updated.rowcount == 0:
+            current = conn.execute(
+                "select merchant_id from merchant_accounts where account_id = ?", (account_id,)
+            ).fetchone()
+            merchant_id = str(current["merchant_id"] or "").strip() if current is not None else ""
+            if not merchant_id:
+                return ""
     # 注册即商家：确保影子 merchants 行存在。insert or ignore 幂等——首次
     # 创建（display 名回退 email 前缀 name_hint），已存在的行（如审批路径
     # 先前创建）不覆盖其业务字段。
@@ -954,13 +960,19 @@ def authenticate(conn: sqlite3.Connection, email: str, password: str) -> dict[st
 def create_session(conn: sqlite3.Connection, account_id: int) -> str:
     """签发会话：返回明文 session token（落库 SHA-256 + 7 天过期）。"""
     session_token = secrets.token_urlsafe(32)
-    expires_at = (
-        datetime.now(UTC) + timedelta(days=_SESSION_TTL_DAYS)
-    ).replace(microsecond=0).isoformat()
+    created_at = datetime.now(UTC).replace(microsecond=0)
+    expires_at = (created_at + timedelta(days=_SESSION_TTL_DAYS)).isoformat()
+    # Use a subquery for portability to SQLite builds without DELETE LIMIT.
+    conn.execute(
+        "delete from account_sessions where session_token_hash in ("
+        " select session_token_hash from account_sessions"
+        " where expires_at <= ? order by expires_at limit 500)",
+        (created_at.isoformat(),),
+    )
     conn.execute(
         "insert into account_sessions(session_token_hash, account_id, expires_at, created_at)"
         " values (?, ?, ?, ?)",
-        (token_digest(session_token), account_id, expires_at, now_iso()),
+        (token_digest(session_token), account_id, expires_at, created_at.isoformat()),
     )
     return session_token
 
@@ -978,7 +990,7 @@ def resolve_session(
     ).fetchone()
     if row is None:
         return None
-    if str(row["expires_at"]) < now_iso():
+    if str(row["expires_at"]) <= now_iso():
         conn.execute(
             "delete from account_sessions where session_token_hash = ?",
             (token_digest(session_token),),
@@ -990,6 +1002,17 @@ def resolve_session(
     if account is None:
         return None
     account = dict(account)
+    # 审查 P2-1：封禁必须对存量会话 fail-closed。此前 resolve_session 不看
+    # status，运营把账号置 suspended 后该商家**现有 cookie 仍在 7 天有效期内
+    # 可用**，仍能发布/撤回公开资料、改资料、建 catalog agent、申 token——
+    # 封禁功能第一次被使用就会踩到。与 authenticate / require_publication_
+    # capacity 同口径：非 active 即删会话并返回 None（与过期处理同分支）。
+    if str(account.get("status") or "") != "active":
+        conn.execute(
+            "delete from account_sessions where session_token_hash = ?",
+            (token_digest(session_token),),
+        )
+        return None
     # 注册即商家：会话解析时确保 merchant_id + 影子 merchants 行存在——存量
     # 账号懒回填（含已分配 merchant_id 但缺影子行的，admin dashboard 无需
     # 审批即可见）；ensure_merchant_id 幂等，已有 id 直接返回、只补影子行。

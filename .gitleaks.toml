@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known synthetic credentials and actor IDs in catalog tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['(^|/)tests/']
+regexes = ['^(a316-owner-secret|abc123def456|strong-pw-123|synthetic-legacy-a388)$']
+
+[[allowlists]]
+description = "PBKDF2 public work-factor identifier used by the dummy password check"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['(^|/)kiwi_catalog/services/accounts\.py$']
+regexes = ['^_PBKDF2_ITERATIONS$']

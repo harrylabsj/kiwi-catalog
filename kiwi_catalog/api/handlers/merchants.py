@@ -47,19 +47,11 @@ def self_status(
 ) -> dict[str, Any]:
     """GET /v1/merchants/self（token 即身份，商家自查）。
 
-    返回 merchant_id、token 状态与名下 agent / listing 计数。owner token
-    优先经 Authorization header（review P1-6 收口：凭据不进 URL）；query
-    string 的 owner_token 仍被接受——token 即身份的既有语义（CLAUDE.md
-    记录），保持兼容但不再是推荐用法。admin 查询任意商家时 admin token
-    只经 Authorization header（KC-SEC-02）。
+    返回 merchant_id、token 状态与名下 agent / listing 计数。凭据经
+    Authorization: Bearer 传输；管理员可通过 merchant_id 指定查询对象。
     """
     merchant_id = str(query.get("merchant_id") or "").strip()
-    presented = str(
-        payload.get("_auth_token")
-        or query.get("owner_token")
-        or payload.get("owner_token")
-        or ""
-    ).strip()
+    presented = str(payload.get("_auth_token") or "").strip()
     with db_session(db_path) as conn:
         if merchant_id:
             api_auth.require_admin_token(payload, db_path)

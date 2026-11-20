@@ -41,16 +41,17 @@ __all__ = [
     "fetch_task_row",
     "finish_task",
     "insert_pending_task",
+    "list_unknown_tasks",
     "load_pending_tasks",
     "mark_task_running",
+    "resolve_unknown_task",
 ]
 
 
 def load_pending_tasks(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     """Select pending/running rows, oldest enqueued first (crash recovery)."""
     return conn.execute(
-        "select task_id, catalog_agent_id, kind, actor, enqueued_at"
-        " from verification_queue_tasks where status in ('pending','running')"
+        "select * from verification_queue_tasks where status in ('pending','running')"
         " order by enqueued_at"
     ).fetchall()
 
@@ -89,13 +90,27 @@ def mark_task_running(
     task_id: str,
     started_at: float,
     updated_at: str,
-) -> None:
-    """Mark a task as running in the ledger."""
-    conn.execute(
+) -> bool:
+    """Atomically claim an existing pending task."""
+    cursor = conn.execute(
         "update verification_queue_tasks"
         " set status = 'running', started_at = ?, updated_at = ?"
-        " where task_id = ?",
+        " where task_id = ? and status = 'pending'",
         (started_at, updated_at, task_id),
+    )
+    return cursor.rowcount == 1
+
+
+def fail_pending_task(
+    conn: sqlite3.Connection, *, task_id: str, verification_status: str, error: str,
+    finished_at: float, updated_at: str,
+) -> None:
+    """Record a terminal failure for work that never entered a runner."""
+    conn.execute(
+        "update verification_queue_tasks set status = 'failed', verification_status = ?,"
+        " error = ?, finished_at = ?, updated_at = ?"
+        " where task_id = ? and status = 'pending'",
+        (verification_status, error, finished_at, updated_at, task_id),
     )
 
 
@@ -143,6 +158,62 @@ def fetch_task_row(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None
     ).fetchone()
 
 
+def list_unknown_tasks(
+    conn: sqlite3.Connection, *, include_unmarked: bool = False,
+) -> Sequence[sqlite3.Row]:
+    """List rows fenced with the explicit unknown-outcome marker.
+
+    审查 P1-2：``mark_task_unknown`` 刻意把未决任务留在 ``running``，因此
+    这条查询是运营侧（CLI / doctor）唯一能看到围栏任务的入口。按
+    ``updated_at`` 升序返回最近更新的行在最后。
+    """
+    return conn.execute(
+        "select task_id, catalog_agent_id, kind, actor, status, enqueued_at,"
+        " started_at, finished_at, verification_status, error, updated_at"
+        " from verification_queue_tasks"
+        " where status = 'running' and (verification_status = ? or ?)"
+        " order by updated_at",
+        (UNKNOWN_OUTCOME_MARKER, include_unmarked),
+    ).fetchall()
+
+
+def resolve_unknown_task(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    status: str,
+    verification_status: str,
+    error: str,
+    finished_at: float,
+    updated_at: str,
+) -> bool:
+    """Close one unknown-outcome fence with a guarded terminal update.
+
+    审查 P1-2：对账（reconciliation）必须和普通完成走同一道写栅栏——
+    只有 ``status = 'running' and verification_status = 'queue_outcome_unknown'``
+    的行才能被改写。这样重复对账、以及晚到的 runner 完成，都不会覆盖
+    已经由运营者确认过的终态。返回 ``rowcount == 1``，调用方据此区分
+    「本次真的关掉了围栏」与「已被并发对账/不是围栏行」。
+    """
+    cursor = conn.execute(
+        "update verification_queue_tasks"
+        " set status = ?, verification_status = ?, error = ?, result_json = ?,"
+        " finished_at = ?, updated_at = ?"
+        " where task_id = ? and status = 'running' and verification_status = ?",
+        (
+            status,
+            verification_status,
+            error,
+            "{}",
+            finished_at,
+            updated_at,
+            task_id,
+            UNKNOWN_OUTCOME_MARKER,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
 def mark_task_unknown(conn: sqlite3.Connection, *, task_id: str, error: str,
                       finished_at: float, updated_at: str) -> None:
     """Keep unresolved work in running, outside automatic recovery/terminal GC.
@@ -153,7 +224,7 @@ def mark_task_unknown(conn: sqlite3.Connection, *, task_id: str, error: str,
     conn.execute(
         "update verification_queue_tasks set status='running', verification_status=?,"
         " error=?, result_json=?, finished_at=?, updated_at=?"
-        " where task_id=? and status in ('pending','running')",
+        " where task_id=? and status='running' and verification_status != ?",
         (UNKNOWN_OUTCOME_MARKER, error, '{"queue_outcome":"unknown"}',
-         finished_at, updated_at, task_id),
+         finished_at, updated_at, task_id, UNKNOWN_OUTCOME_MARKER),
     )

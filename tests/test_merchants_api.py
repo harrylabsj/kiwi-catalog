@@ -43,7 +43,7 @@ from kiwi_catalog.core.errors import ConflictError
 from kiwi_catalog.core.tokens import token_digest
 
 ADMIN_TOKEN = "admin-tok-123"
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 
 APPLY_BODY = {
     "domain": "acme.example",
@@ -480,7 +480,7 @@ class MerchantsApiTest(unittest.TestCase):
         self._publish(issued["merchant_id"], ADMIN_TOKEN)
 
         status, payload = _call_http(
-            self.app, "GET", "/v1/merchants/self?owner_token=" + issued["token"]
+            self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer " + issued["token"]}
         )[:2]
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["merchant_id"], issued["merchant_id"])
@@ -497,24 +497,24 @@ class MerchantsApiTest(unittest.TestCase):
         self.assertNotEqual(issued_a["merchant_id"], issued_b["merchant_id"])
 
         status, payload = _call_http(
-            self.app, "GET", "/v1/merchants/self?owner_token=" + issued_b["token"]
+            self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer " + issued_b["token"]}
         )[:2]
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["merchant_id"], issued_b["merchant_id"])
         status, payload = _call_http(
-            self.app, "GET", "/v1/merchants/self?owner_token=" + issued_a["token"]
+            self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer " + issued_a["token"]}
         )[:2]
         self.assertEqual(status, 200, payload)
         self.assertEqual(payload["merchant_id"], issued_a["merchant_id"])
 
     def test_self_rejects_unknown_and_revoked_tokens(self) -> None:
-        status, payload = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=mkt_bogus")[:2]
+        status, payload = _call_http(self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer mkt_bogus"})[:2]
         self.assertEqual(status, 403, payload)
         _, applied = self._apply()
         _, issued = self._approve(applied["application_id"])
         self._revoke(issued["merchant_id"])
         status, payload = _call_http(
-            self.app, "GET", "/v1/merchants/self?owner_token=" + issued["token"]
+            self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer " + issued["token"]}
         )[:2]
         self.assertEqual(status, 403, payload)
 
@@ -542,7 +542,7 @@ class MerchantsApiTest(unittest.TestCase):
             self.assertEqual(self._publish(mid, token), 200)
         # self 自查对 HMAC 商家仍 403（token 不在 merchant_tokens 表——设计如此：
         # 自查只认落库随机 token）
-        status, _ = _call_http(self.app, "GET", "/v1/merchants/self?owner_token=" + token)[:2]
+        status, _ = _call_http(self.app, "GET", "/v1/merchants/self", headers={"Authorization": "Bearer " + token})[:2]
         self.assertEqual(status, 403)
 
     def test_portal_html_pages_are_owned_by_private_extension(self) -> None:

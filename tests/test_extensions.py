@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 import types
 from collections.abc import Iterator
+from contextlib import closing
 from typing import Any
 
 import pytest
@@ -163,6 +164,146 @@ def test_fastapi_hook_registers_route_on_app(monkeypatch: pytest.MonkeyPatch) ->
     routes = {getattr(route, "path", None) for route in app.routes}
     assert "/v1/ext/fastapi-only" in routes
     assert captured["db_path"] == "unused.sqlite"
+
+
+@pytest.mark.parametrize("stack", ["fastapi", "fallback"])
+def test_shared_overlap_rejects_only_conflicting_methods(tmp_path, monkeypatch, caplog, stack) -> None:
+    from fastapi.testclient import TestClient
+
+    from kiwi_catalog.api import app as catalog_app
+    from kiwi_catalog.api.route_table import extension_routes
+
+    module = _install_dummy_extension()
+
+    def register(reg: extensions.ExtensionRegistry) -> None:
+        reg.add_route({"GET"}, "/review/{item}", lambda *_args, **_kw: {"route": "first"})
+        reg.add_route({"GET", "POST"}, "/review/summary", lambda *_args, **_kw: {"route": "second"})
+
+    module.register_kiwi_extension = register
+    _enable_dummy(monkeypatch)
+    if stack == "fallback":
+        monkeypatch.setattr(catalog_app, "FastAPI", None)
+    app = catalog_app.create_catalog_app(tmp_path / "catalog.sqlite")
+    # Fallback deliberately does not implement the ASGI lifespan protocol.
+    with closing(TestClient(app)) as client:
+        assert client.get("/review/summary").json() == {"route": "first"}
+        assert client.post("/review/summary", json={}).json() == {"route": "second"}
+    assert extension_routes()[1].methods == {"POST"}
+    assert "GET /review/summary conflicts with /review/{item}" in caplog.text
+
+
+def test_native_hook_can_replace_own_shared_route_but_not_shadow_another_extension(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    first = _install_dummy_extension()
+    second = types.ModuleType("kiwi_test_other_extension")
+    monkeypatch.setitem(sys.modules, second.__name__, second)
+
+    def first_register(reg: extensions.ExtensionRegistry) -> None:
+        reg.add_route({"GET"}, "/review/{item}", lambda *_args, **_kw: {"route": "shared"})
+
+        def first_hook(app, _db):
+            app.add_api_route("/review/{item:str}", lambda: {"route": "native"}, methods=["GET"])
+
+        reg.add_fastapi_hook(first_hook)
+
+    def second_register(reg: extensions.ExtensionRegistry) -> None:
+        def second_hook(app, _db):
+            app.add_api_route("/review/{item:path}", lambda: {"route": "other"}, methods=["GET"])
+
+        reg.add_fastapi_hook(second_hook)
+
+    first.register_kiwi_extension = first_register
+    second.register_kiwi_extension = second_register
+    db = tmp_path / "catalog.sqlite"
+    # Load the other extension first to verify that a native hook cannot
+    # claim a shared route's URL space before its adapter is installed.
+    _enable_dummy(monkeypatch, f"{second.__name__},{first.__name__}")
+    assert handle_request(db, "GET", "/review/summary")[1] == {"route": "shared"}
+    with TestClient(create_catalog_app(db)) as client:
+        assert client.get("/review/summary").json() == {"route": "native"}
+        assert client.get("/review/nested/extra").status_code == 404
+    assert "GET /review/{item:path} conflicts with /review/{item}" in caplog.text
+
+
+def test_included_fastapi_routers_keep_prefixes_and_reject_conflicts(tmp_path, monkeypatch, caplog) -> None:
+    from fastapi import APIRouter
+    from fastapi.testclient import TestClient
+
+    module = _install_dummy_extension()
+
+    def register(reg: extensions.ExtensionRegistry) -> None:
+        reg.add_route({"GET"}, "/review/summary", lambda *_args, **_kw: {"route": "shared"})
+
+        def hook(app, _db):
+            disjoint = APIRouter()
+            disjoint.add_api_route("/items", lambda: {"route": "prefixed"}, methods=["GET"])
+            app.include_router(disjoint, prefix="/native")
+            overlap = APIRouter()
+            overlap.add_api_route("/{name}", lambda: {"route": "overlap"}, methods=["GET"])
+            app.include_router(overlap, prefix="/review")
+
+        reg.add_fastapi_hook(hook)
+
+    module.register_kiwi_extension = register
+    _enable_dummy(monkeypatch)
+    with TestClient(create_catalog_app(tmp_path / "catalog.sqlite")) as client:
+        assert client.get("/native/items").json() == {"route": "prefixed"}
+        assert client.get("/review/summary").json() == {"route": "shared"}
+        assert client.get("/review/other").status_code == 404
+    assert "GET /review/{name} conflicts with /review/summary" in caplog.text
+
+
+@pytest.mark.parametrize("stack", ["fastapi", "fallback"])
+def test_shared_extension_response_and_body_parity(tmp_path, monkeypatch, stack) -> None:
+    from fastapi.testclient import TestClient
+
+    from kiwi_catalog.api import app as catalog_app
+    from kiwi_catalog.api.transport import SECURITY_HEADERS
+
+    module = _install_dummy_extension()
+
+    def register(reg: extensions.ExtensionRegistry) -> None:
+        def echo(_db, payload, _query, **params):
+            return {"message": payload.get("message", ""), **params}
+
+        def page(_db, _payload, _query):
+            return {"__html__": "<p>Catalog page</p>"}
+
+        def redirect(_db, _payload, _query):
+            return {"__redirect__": "/health", "__cookies__": ["first=1", "second=2"]}
+
+        reg.add_route({"GET", "POST"}, "/v1/ext/echo/{item}", echo)
+        reg.add_route({"GET"}, "/v1/ext/page", page)
+        reg.add_route({"GET"}, "/v1/ext/redirect", redirect)
+
+    module.register_kiwi_extension = register
+    _enable_dummy(monkeypatch)
+    if stack == "fallback":
+        monkeypatch.setattr(catalog_app, "FastAPI", None)
+    client = TestClient(catalog_app.create_catalog_app(tmp_path / "catalog.sqlite"), follow_redirects=False)
+    assert client.post("/v1/ext/echo/example", json={"message": "hello"}).json() == {
+        "message": "hello", "item": "example",
+    }
+    assert client.request("GET", "/v1/ext/echo/example", json={"message": "ignored"}).json() == {
+        "message": "", "item": "example",
+    }
+    assert client.get("/health/").status_code == 404
+    assert client.post("/unregistered", content=b"x" * 1_048_577).status_code == 404
+    for body, status in [(b"not-json", 400), (b"x" * 1_048_577, 413)]:
+        response = client.post("/v1/ext/echo/example", content=body)
+        assert response.status_code == status
+        assert {key: response.headers[key] for key in SECURITY_HEADERS} == SECURITY_HEADERS
+
+    page = client.get("/v1/ext/page", headers={"If-None-Match": "*"})
+    assert (page.status_code, page.text) == (200, "<p>Catalog page</p>")
+    assert "etag" not in page.headers and page.headers["cache-control"] == "no-store"
+    redirect = client.get("/v1/ext/redirect")
+    assert redirect.status_code == 302 and redirect.headers["location"] == "/health"
+    assert redirect.headers.get_list("set-cookie") == ["first=1", "second=2"]
+    assert {key: redirect.headers[key] for key in SECURITY_HEADERS} == SECURITY_HEADERS
 
 
 def test_broken_fastapi_hook_does_not_break_app(

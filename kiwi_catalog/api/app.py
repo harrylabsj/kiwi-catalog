@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from kiwi_catalog import VERSION
+from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api.error_envelope import error_result
 from kiwi_catalog.api.fallback_asgi import MarketplaceASGIApp
 from kiwi_catalog.api.fastapi_routes import FastAPI, register_fastapi_routes
@@ -61,6 +62,7 @@ from kiwi_catalog.core.errors import (
     ShoppingCliError,
     ValidationError,
 )
+from kiwi_catalog.core.tokens import configured_owner_secret
 
 # 公共导入兼容：_ROUTE_TABLE / RouteEntry / resolve_route / FastAPI 从拆分后
 # 的模块再导出（route_registry、fallback_asgi、scripts/kiwi_catalog_conformance
@@ -97,7 +99,6 @@ def handle_request(
         # 字段）；只有该可信注入路径才能把对应键名传进 trusted_transport_keys，
         # 避免 base64 膨胀被重复计数。绝不能按路径或 payload 里的键推断信任：
         # 客户端完全可以自己发送同名字段。
-        validate_payload(payload, skip_keys=trusted_transport_keys)
         # 纯路由分发循环已提取到 request_dispatch.dispatch_request：
         # 顺序匹配路径模板、命中即调 handler，路径已知但方法不符抛 405，
         # 未知路径抛 404（与内联实现逐字一致）。
@@ -109,6 +110,7 @@ def handle_request(
             payload,
             query,
             _match_path,
+            validate=lambda body: validate_payload(body, skip_keys=trusted_transport_keys),
         )
         return 200, result
     except AuthError as exc:
@@ -150,6 +152,11 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
     from kiwi_catalog.services import accounts as accounts_service
 
     accounts_service.assert_email_configuration()
+    if configured_owner_secret() and api_auth._legacy_hmac_enabled():
+        logging.getLogger(__name__).warning(
+            "legacy HMAC owner auth is enabled; migrate existing merchants to random tokens "
+            "before setting KIWI_CATALOG_LEGACY_HMAC_AUTH=off"
+        )
     if FastAPI is None:
         return MarketplaceASGIApp(
             db_path,
@@ -163,6 +170,7 @@ def create_catalog_app(db_path: str | Path = "kiwi-catalog.sqlite") -> Any:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        redirect_slashes=False,
     )
     app.state.db_path = str(db_path)
     register_fastapi_routes(app, db_path)
