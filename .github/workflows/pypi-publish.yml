@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   quality:
+    name: Release quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

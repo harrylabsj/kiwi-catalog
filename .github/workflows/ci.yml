@@ -23,7 +23,8 @@ jobs:
             ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
             git --config /repo/.gitleaks.toml --redact=100 --log-opts=--all /repo
 
-  quality:
+  quality-matrix:
+    name: quality (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -40,3 +41,15 @@ jobs:
       - run: uv run --locked --extra api --extra dev python -m ruff check kiwi_catalog tests scripts
       - run: uv run --locked --extra api --extra dev python -m mypy kiwi_catalog
       - run: uv run --locked --extra api --extra dev python -m pytest -q
+
+  quality:
+    # Keep the required branch protection check stable when the matrix expands.
+    if: ${{ always() }}
+    needs: [secrets, quality-matrix]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the scan and all matrix jobs to pass
+        env:
+          SECRETS_RESULT: ${{ needs.secrets.result }}
+          MATRIX_RESULT: ${{ needs['quality-matrix'].result }}
+        run: test "$SECRETS_RESULT" = success && test "$MATRIX_RESULT" = success
