@@ -31,11 +31,13 @@ class CatalogCliTest(unittest.TestCase):
     def _run(self, db_file: Path, *args: str) -> str:
         output = StringIO()
         with redirect_stdout(output):
-            try:
-                main(["--db", str(db_file), *args])
-            except SystemExit:
-                pass
+            main(["--db", str(db_file), *args])
         return output.getvalue()
+
+    def test_negative_listing_capacity_is_rejected_by_parser(self) -> None:
+        with self.assertRaises(SystemExit) as failure:
+            self._run(Path("unused.sqlite"), "catalog", "merchant", "listing-plan-limit", "lite", "-1")
+        self.assertEqual(failure.exception.code, 2)
 
     def test_all_catalog_commands_registered(self) -> None:
         parser = build_parser()
@@ -47,7 +49,7 @@ class CatalogCliTest(unittest.TestCase):
         self.assertEqual(
             sorted(catalog_cmds),
             ["challenge", "claim", "doctor", "get", "merchant", "refresh", "register",
-             "reinstate", "search", "stats", "suspend", "verify"],
+             "reinstate", "search", "stats", "suspend", "verification-queue", "verify"],
         )
 
     def test_stats_outputs_runtime_metrics(self) -> None:

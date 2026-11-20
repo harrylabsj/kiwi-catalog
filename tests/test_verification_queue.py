@@ -32,6 +32,7 @@ from unittest import mock
 
 from kiwi_catalog.services.verification_stages import VerificationResult
 
+from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services.agent_verification import (
     VerificationQueue,
     VerificationQueueConfig,
@@ -83,33 +84,7 @@ class VerificationQueueRunawayTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
         self.db = Path(self.tmp) / "queue.sqlite"
-        conn = sqlite3.connect(self.db)
-        conn.execute(
-            """
-            create table if not exists verification_queue_tasks (
-                task_id text primary key,
-                catalog_agent_id text not null,
-                kind text not null,
-                actor text not null default 'verification_worker',
-                status text not null default 'pending'
-                    check (status in ('pending','running','completed','failed','timeout')),
-                enqueued_at real not null,
-                started_at real not null default 0,
-                finished_at real not null default 0,
-                verification_status text not null default '',
-                error text not null default '',
-                result_json text not null default '{}',
-                created_at text not null,
-                updated_at text not null
-            )
-            """
-        )
-        # 审查 P3：队列构造要求已迁移 schema——手工建表后必须对齐 user_version
-        from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
-
-        conn.execute(f"pragma user_version = {CURRENT_SCHEMA_VERSION}")
-        conn.commit()
-        conn.close()
+        open_connection(self.db).close()
 
     def _ledger_row(self, task_id: str) -> dict:
         conn = sqlite3.connect(self.db)
@@ -228,7 +203,7 @@ class VerificationQueueRunawayTest(unittest.TestCase):
             q = _make_queue(self.db, lambda: _StubService(), timeout=1.0)
             outcomes: list[Any] = []
 
-            def _enqueuer() -> None:
+            def _enqueuer(q=q, outcomes=outcomes) -> None:
                 try:
                     outcomes.append(q.enqueue("cagt_race", wait=True, timeout=0.5))
                 except VerificationQueueShutdownError:

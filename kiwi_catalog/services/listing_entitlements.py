@@ -96,6 +96,8 @@ def require_publication_capacity(
     Updates to an already ACTIVE row do not consume another slot. A stale row
     still occupies its slot because refreshing it can make it discoverable.
     """
+    if not conn.in_transaction:
+        raise RuntimeError("publication capacity requires a write transaction")
     account = conn.execute("""select status,email_verified from merchant_accounts
         where merchant_id=? order by account_id limit 1""", (merchant_id,)).fetchone()
     if account is None or account["status"] != "active" or account["email_verified"] != 1:

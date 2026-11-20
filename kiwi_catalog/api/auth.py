@@ -35,8 +35,9 @@ import os
 import sqlite3
 from typing import Any
 
+from kiwi_catalog.api.transport import AUTH_TRANSPORT_FIELDS
 from kiwi_catalog.core.errors import AuthError
-from kiwi_catalog.core.tokens import token_digest, token_matches
+from kiwi_catalog.core.tokens import configured_owner_secret, token_digest, token_matches
 
 _LEGACY_HMAC_ENV = "KIWI_CATALOG_LEGACY_HMAC_AUTH"
 
@@ -50,7 +51,6 @@ def _legacy_hmac_enabled() -> bool:
     raw = str(os.environ.get(_LEGACY_HMAC_ENV) or "").strip().lower()
     return raw in ("", "1", "true", "yes", "on")
 
-_OWNER_SECRET_ENV = "KIWI_CATALOG_OWNER_TOKEN_SECRET"
 _ADMIN_TOKEN_ENV = "KIWI_CATALOG_ADMIN_TOKEN"
 # 商家连接器（WorkBuddy 侧「Kiwi 商家运营」远程入口）的机器凭据：只用于
 # 创建/兑换一次性身份授权请求，不授予任何商家数据访问——merchant_id 仍由
@@ -77,7 +77,7 @@ def payload_with_auth(
     merged = dict(payload or {})
     # These values are transport credentials/metadata, never JSON fields. Strip
     # client supplied copies before injecting values from actual HTTP headers.
-    for reserved in ("_auth_token", "_binding_jws", "_origin", "_referer"):
+    for reserved in AUTH_TRANSPORT_FIELDS:
         merged.pop(reserved, None)
     token = ""
     if authorization and authorization.lower().startswith("bearer "):
@@ -175,7 +175,10 @@ def require_connector_token(payload: dict[str, Any]) -> None:
 
 
 def _owner_secret() -> str:
-    secret = str(os.environ.get(_OWNER_SECRET_ENV) or "").strip()
+    try:
+        secret = configured_owner_secret()
+    except RuntimeError as exc:
+        raise AuthError("catalog owner token secret is invalid") from exc
     if not secret:
         raise AuthError("catalog owner token secret is not configured")
     return secret
@@ -211,7 +214,7 @@ def require_owner_token(payload: dict[str, Any], merchant_id: str) -> None:
 
 
 def require_merchant_token(
-    payload: dict[str, Any], merchant_id: str, conn: sqlite3.Connection | None = None
+    payload: dict[str, Any], merchant_id: str, conn: sqlite3.Connection
 ) -> None:
     """Dual-path merchant credential check (docs §5).
 
@@ -225,16 +228,17 @@ def require_merchant_token(
     无 token 行且 legacy 开启时，HMAC 只接受 body（不新增 Bearer legacy）。
     只要商户存在 token 行，失配/rotated/revoked 均拒绝，绝不回退 HMAC。
 
-    *conn* 缺省时只走 body HMAC fallback（可信本地旧调用合同不变）；
-    网络入口必须传 conn，legacy-off 关闭的是带 conn 的无行兼容路径。
+    The database connection is required so revoked credentials stay revoked.
     """
+    if conn is None:
+        raise AuthError("invalid owner token")
     # owner_token（body 直传）或 _auth_token（Authorization 头经 transport 合并）
     presented = str(
         (payload or {}).get("owner_token")
         or (payload or {}).get("_auth_token")
         or ""
     )
-    if presented and conn is not None:
+    if presented:
         rows = conn.execute(
             "select token_hash, status from merchant_tokens where merchant_id = ?",
             (merchant_id,),
@@ -257,5 +261,4 @@ def require_merchant_token(
                 "legacy HMAC owner-token auth is disabled "
                 "(KIWI_CATALOG_LEGACY_HMAC_AUTH=off)"
             )
-    # conn 缺省（本地 CLI 信任边界）仍走 HMAC 派生路径，行为不变。
     require_owner_token(payload, merchant_id)

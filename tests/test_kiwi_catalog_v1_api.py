@@ -644,7 +644,7 @@ class ThreeDomainPersistenceTest(unittest.TestCase):
         from kiwi_catalog.api.handlers import agent_catalog as handlers_mod
 
         # approve 签发明文 token 需 Fernet（owner secret）加密响应
-        os.environ["KIWI_CATALOG_OWNER_TOKEN_SECRET"] = "test-owner-secret-for-p1a"
+        os.environ["KIWI_CATALOG_OWNER_TOKEN_SECRET"] = "fixture-only-p1a-owner-key-example"
         self.addCleanup(os.environ.pop, "KIWI_CATALOG_OWNER_TOKEN_SECRET", None)
 
         merchant_a, token_a = self._issue_merchant_token("a@example.com", "a-merchant.example")

@@ -21,7 +21,7 @@ from kiwi_catalog.core.errors import PermissionDenied, ValidationError
 from kiwi_catalog.services.agent_verification import VerificationQueueShutdownError
 
 ADMIN_TOKEN = "a316-admin-token"
-OWNER_SECRET = "a316-owner-secret"
+OWNER_SECRET = "fixture-only-a316-owner-key-example"
 
 
 def _raw_call(app, method: str, path: str, body: bytes = b"") -> tuple[int, dict]:

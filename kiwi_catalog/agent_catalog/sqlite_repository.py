@@ -385,26 +385,25 @@ def replace_capabilities(
         (catalog_agent_id,),
     )
     ts = now_iso()
-    for cap in capabilities:
-        conn.execute(
-            """
-            insert into agent_capabilities(
-                catalog_agent_id, namespace, capability_id, version,
-                required, source, schema_url, spec_url, last_verified_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                catalog_agent_id,
-                cap["namespace"],
-                cap["capability_id"],
-                cap.get("version", ""),
-                int(cap.get("required", 0)),
-                cap.get("source", ""),
-                cap.get("schema_url", ""),
-                cap.get("spec_url", ""),
-                cap.get("last_verified_at", ts),
-            ),
-        )
+    conn.executemany(
+        """
+        insert into agent_capabilities(
+            catalog_agent_id, namespace, capability_id, version,
+            required, source, schema_url, spec_url, last_verified_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ((
+            catalog_agent_id,
+            cap["namespace"],
+            cap["capability_id"],
+            cap.get("version", ""),
+            int(cap.get("required", 0)),
+            cap.get("source", ""),
+            cap.get("schema_url", ""),
+            cap.get("spec_url", ""),
+            cap.get("last_verified_at", ts),
+        ) for cap in capabilities),
+    )
 
 
 # ── agent_endpoints ─────────────────────────────────────────────────────────
@@ -774,24 +773,23 @@ def replace_skills(
         "delete from agent_skills where catalog_agent_id = ?",
         (catalog_agent_id,),
     )
-    for skill in skills:
-        conn.execute(
-            """
-            insert into agent_skills(
-                catalog_agent_id, skill_id, name, description,
-                tags_json, input_modes_json, output_modes_json
-            ) values (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                catalog_agent_id,
-                skill.get("skill_id", ""),
-                skill.get("name", ""),
-                skill.get("description", ""),
-                skill.get("tags_json", "[]"),
-                skill.get("input_modes_json", "[]"),
-                skill.get("output_modes_json", "[]"),
-            ),
-        )
+    conn.executemany(
+        """
+        insert into agent_skills(
+            catalog_agent_id, skill_id, name, description,
+            tags_json, input_modes_json, output_modes_json
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ((
+            catalog_agent_id,
+            skill.get("skill_id", ""),
+            skill.get("name", ""),
+            skill.get("description", ""),
+            skill.get("tags_json", "[]"),
+            skill.get("input_modes_json", "[]"),
+            skill.get("output_modes_json", "[]"),
+        ) for skill in skills),
+    )
 
 
 def list_skills(
@@ -826,46 +824,33 @@ def upsert_profile_endpoints(
         kind = str(ep.get("kind", ""))
         if kind not in ("agent_card", "ucp_profile"):
             continue
-        row = conn.execute(
-            "select endpoint_id from agent_endpoints where catalog_agent_id = ? and kind = ?",
-            (catalog_agent_id, kind),
-        ).fetchone()
         ts = now_iso()
-        if row is None:
-            conn.execute(
-                """
-                insert into agent_endpoints(
-                    catalog_agent_id, kind, url, protocol, protocol_version,
-                    preference, auth_summary_json, status, last_checked_at
-                ) values (?, ?, ?, ?, ?, ?, '{}', 'active', ?)
-                """,
-                (
-                    catalog_agent_id,
-                    kind,
-                    ep.get("url", ""),
-                    ep.get("protocol", ""),
-                    ep.get("protocol_version", ""),
-                    int(ep.get("preference", 0)),
-                    ts,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                update agent_endpoints
-                set url = ?, protocol = ?, protocol_version = ?, preference = ?,
-                    last_checked_at = ?
-                where endpoint_id = ?
-                """,
-                (
-                    ep.get("url", ""),
-                    ep.get("protocol", ""),
-                    ep.get("protocol_version", ""),
-                    int(ep.get("preference", 0)),
-                    ts,
-                    row["endpoint_id"],
-                ),
-            )
+        # 审查 P1-3：单语句 upsert——先 select 后 insert 在两个连接并发时都会读到
+        # 空，产生同一 (catalog_agent_id, kind) 的重复行（此后 update 只改首行，
+        # 重复行永不自愈）。唯一索引 + ON CONFLICT 把这段收成原子写。
+        conn.execute(
+            """
+            insert into agent_endpoints(
+                catalog_agent_id, kind, url, protocol, protocol_version,
+                preference, auth_summary_json, status, last_checked_at
+            ) values (?, ?, ?, ?, ?, ?, '{}', 'active', ?)
+            on conflict(catalog_agent_id, kind) do update set
+                url = excluded.url,
+                protocol = excluded.protocol,
+                protocol_version = excluded.protocol_version,
+                preference = excluded.preference,
+                last_checked_at = excluded.last_checked_at
+            """,
+            (
+                catalog_agent_id,
+                kind,
+                ep.get("url", ""),
+                ep.get("protocol", ""),
+                ep.get("protocol_version", ""),
+                int(ep.get("preference", 0)),
+                ts,
+            ),
+        )
 
 
 # ── Registration abuse controls (§17.4) ─────────────────────────────────────

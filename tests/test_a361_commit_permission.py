@@ -154,6 +154,8 @@ class CommitPermissionTest(unittest.TestCase):
         self.assertEqual(h.ledger_row(r.task_id)["status"], "running")
         with self.assertRaises(ConflictError):
             q.enqueue("a", kind="refresh")
+        with self.assertRaisesRegex(ConflictError, "still has an active runner"):
+            q.reconcile_unknown(r.task_id, outcome="discarded")
         gate.set()
         self.assertTrue(h.services[0].closed.wait(1))
         self.assertEqual(h.rows(), 1)
@@ -204,6 +206,9 @@ class CommitPermissionTest(unittest.TestCase):
             rebuilt.enqueue("a", kind="refresh")
         self.assertEqual(len(h.services), 1)
         self.assertEqual(h.rows(), 1)
+        rebuilt.reconcile_unknown(r.task_id, outcome="completed")
+        self.assertEqual(h.ledger_row(r.task_id)["status"], "completed")
+        self.assertEqual(rebuilt.enqueue("a", wait=True, timeout=1).status, "completed")
 
     def test_runner_threads_stay_bounded_while_commit_is_stuck(self):
         h = Harness(self)
@@ -214,7 +219,9 @@ class CommitPermissionTest(unittest.TestCase):
         self.assertEqual(q.wait(first.task_id, timeout=1).status, "unknown")
         for agent in ("b", "c", "d"):
             out = q.enqueue(agent, wait=True, timeout=1)
-            self.assertEqual(out.status, "timeout")
+            self.assertEqual((out.status, out.verification_status), ("failed", "runner_unavailable"))
+            row = h.ledger_row(out.task_id)
+            self.assertEqual((row["status"], row["started_at"]), ("failed", 0))
         self.assertEqual(len(h.services), 1)
         q.shutdown()
         self.assertFalse(any(w.is_alive() for w in q._workers))
@@ -237,7 +244,7 @@ class CommitPermissionTest(unittest.TestCase):
         c.close()
         q = h.queue(h.factory())
         self.assertEqual(q.wait("old-running", timeout=1).status, "unknown")
-        self.assertEqual(q.wait("pending-blocked", timeout=1).status, "unknown")
+        self.assertEqual(q.wait("pending-blocked", timeout=1).verification_status, "blocked_by_unknown")
         self.assertEqual(q.wait("pending-safe", timeout=1).status, "completed")
         self.assertEqual(h.rows(), 1)
         self.assertEqual(len(h.services), 1)
@@ -249,11 +256,13 @@ class CommitPermissionTest(unittest.TestCase):
         c = sqlite3.connect(h.ledger)
         cleanup_terminal_tasks(c, time.time() + 100 * 86400)
         c.commit()
+        self.assertIsNone(c.execute(
+            "select task_id from verification_queue_tasks where task_id=?", ("pending-blocked",),
+        ).fetchone())
         c.close()
         self.assertEqual(h.ledger_row("old-running")["status"], "running")
-        self.assertEqual(h.ledger_row("pending-blocked")["status"], "running")
 
-    def test_admitted_deferred_follower_becomes_unknown_without_effect(self):
+    def test_admitted_deferred_follower_fails_without_starting(self):
         h = Harness(self)
         gate = threading.Event()
         q = h.queue(h.factory(commit_gate=gate), concurrency=2)
@@ -263,62 +272,32 @@ class CommitPermissionTest(unittest.TestCase):
         self.wait_for(lambda: bool(q._agent_deferred.get("a")))
         self.assertEqual(q.wait(first.task_id, timeout=1).status, "unknown")
         blocked = q.wait(second.task_id, timeout=1)
-        self.assertEqual((blocked.task_id, blocked.kind, blocked.status), (second.task_id, "refresh", "unknown"))
+        self.assertEqual((blocked.task_id, blocked.kind, blocked.status), (second.task_id, "refresh", "failed"))
         self.assertEqual(len(h.services), 1)
         self.assertEqual(h.rows(), 0)
-        self.assertEqual(h.ledger_row(second.task_id)["status"], "running")
+        self.assertEqual(blocked.verification_status, "blocked_by_unknown")
+        self.assertEqual(h.ledger_row(second.task_id)["status"], "failed")
         q.shutdown()
         self.assertFalse(any(w.is_alive() for w in q._workers))
         self.assertEqual(q._agent_preclaimed, {})
         gate.set()
         self.assertTrue(h.services[0].closed.wait(1))
         self.assertEqual(h.rows(), 1)
-        self.assertEqual(q.wait(second.task_id).status, "unknown")
+        self.assertEqual(q.wait(second.task_id).status, "failed")
 
-    def test_enqueue_persisted_before_unknown_cannot_slip_into_execution(self):
+    def test_enqueue_after_a_fence_does_not_create_a_ledger_row(self):
         h = Harness(self)
         gate = threading.Event()
         q = h.queue(h.factory(commit_gate=gate), concurrency=2)
         first = q.enqueue("a")
         self.wait_for(lambda: h.services and h.services[0].committing.is_set())
-        inserted = threading.Event()
-        admit = threading.Event()
-        errors = []
-        original = q._persist_insert
+        self.assertEqual(q.wait(first.task_id, timeout=1).status, "unknown")
 
-        def pause_insert(task):
-            original(task)
-            inserted.set()
-            if not admit.wait(2):
-                raise AssertionError("admission fixture barrier not released")
-
-        def enqueue_second():
-            try:
+        with mock.patch.object(q, "_persist_insert", wraps=q._persist_insert) as insert:
+            with self.assertRaises(ConflictError):
                 q.enqueue("a", kind="refresh")
-            except Exception as exc:
-                errors.append(exc)
-
-        with mock.patch.object(q, "_persist_insert", side_effect=pause_insert):
-            thread = threading.Thread(target=enqueue_second)
-            thread.start()
-            try:
-                self.assertTrue(inserted.wait(1))
-                self.assertEqual(q.wait(first.task_id, timeout=1).status, "unknown")
-            finally:
-                admit.set()
-                thread.join(2)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], ConflictError)
-        blocked = [x for tid, x in q._results.items() if tid != first.task_id]
-        self.assertEqual(len(blocked), 1)
-        self.assertEqual((blocked[0].kind, blocked[0].status), ("refresh", "unknown"))
-        self.assertEqual(len(h.services), 1)
-        self.assertEqual(h.ledger_row(blocked[0].task_id)["status"], "running")
-        gate.set()
-        self.assertTrue(h.services[0].closed.wait(1))
-        q.shutdown()
-        self.assertEqual(set(q._tasks), set(q._results))
+            insert.assert_not_called()
+        self.assertEqual(set(q._tasks), {first.task_id})
 
     def test_register_preserves_committed_registration_when_unknown_blocks_enqueue(self):
         from kiwi_catalog.api.app import handle_request
@@ -327,7 +306,7 @@ class CommitPermissionTest(unittest.TestCase):
         with (
             mock.patch.dict(
                 "os.environ",
-                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "a361-fake-owner"},
+                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-a361-owner-key-example"},
             ),
             mock.patch(
                 "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
@@ -382,7 +361,7 @@ class CommitPermissionTest(unittest.TestCase):
         with (
             mock.patch.dict(
                 "os.environ",
-                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "a361-fake-owner"},
+                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-a361-owner-key-example"},
             ),
             mock.patch(
                 "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",
@@ -418,7 +397,7 @@ class CommitPermissionTest(unittest.TestCase):
         with (
             mock.patch.dict(
                 "os.environ",
-                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "a361-fake-owner"},
+                {"KIWI_CATALOG_ADMIN_TOKEN": "a361-fake-admin", "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-a361-owner-key-example"},
             ),
             mock.patch(
                 "kiwi_catalog.api.handlers.agent_catalog._enqueue_verification",

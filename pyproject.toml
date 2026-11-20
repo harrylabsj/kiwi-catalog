@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kiwi-catalog"
-version = "0.5.27"
+version = "0.5.28"
 description = "Standalone Agent Catalog service (published from shopping-cli extraction plan, phase 2)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,7 +33,14 @@ target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = [
+  "E4", "E7", "E9", "F", "B", "ASYNC", "UP006", "UP007",
+  "S102", "S307", "S501", "S502", "S506", "S602", "S605",
+]
+
+[tool.mypy]
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [project.scripts]
 kiwi-catalog-api = "kiwi_catalog.scripts.kiwi_catalog_api:main"

@@ -39,7 +39,7 @@ from kiwi_catalog.api.app import create_catalog_app
 from kiwi_catalog.api.auth import owner_token
 from kiwi_catalog.db.session import db_session
 
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 MERCHANT_ID = "mrc_01JABC"
 
 REGISTER_BODY = {

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from contextlib import nullcontext
 from pathlib import Path
+import os
 import socket
 import socketserver
 import ssl
@@ -16,6 +17,7 @@ import unittest
 from unittest import mock
 
 from kiwi_catalog.discovery import fetcher as f
+from kiwi_catalog.discovery import _bounded_dns
 
 
 class WireServer:
@@ -238,7 +240,8 @@ class DeadlineTests(unittest.TestCase):
                 untrusted.close()
             with (
                 mock.patch.object(f.ssl, "create_default_context", return_value=client),
-                mock.patch.object(f.http.client, "_create_https_context", return_value=client),
+                mock.patch.object(f.ssl, "_create_default_https_context", return_value=client),
+                mock.patch.object(f.http.client, "_create_https_context", return_value=client, create=True),
             ):
                 positive = WireServer(server)
                 try:
@@ -317,7 +320,7 @@ class DeadlineTests(unittest.TestCase):
         try:
             with (
                 mock.patch.object(f, "_MAX_FETCH_DURATION_SECONDS", 0.25),
-                mock.patch.object(f.socket, "getaddrinfo", side_effect=slow),
+                mock.patch.object(f, "lookup_address_infos", side_effect=slow),
             ):
                 started = time.monotonic()
                 with self.assertRaises(f.FetchError):
@@ -356,6 +359,70 @@ def drain_dns():
 
 
 class DNSBoundTests(unittest.TestCase):
+    def test_stalled_resolver_processes_are_reaped_and_queue_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            program = f"""
+import json, os, pathlib, sys, time
+if sys.argv[1].startswith("blocked-"):
+    folder = pathlib.Path({str(folder)!r})
+    (folder / sys.argv[1]).write_text(str(os.getpid()))
+    time.sleep(60)
+print(json.dumps([True, [[2, 1, 6, "", ["192.0.2.2", 443]]]]))
+"""
+            resolver = _bounded_dns.BoundedResolver()
+
+            def resolve(host: str):
+                return f._resolve_hostname(host, 443, deadline=time.monotonic() + 4)
+
+            with (
+                mock.patch.object(f, "_DNS_EXECUTOR", resolver),
+                mock.patch.object(_bounded_dns, "_DNS_LOOKUP_PROGRAM", program),
+                mock.patch.object(_bounded_dns, "DNS_LOOKUP_TIMEOUT_SECONDS", 0.6),
+                ThreadPoolExecutor(max_workers=2) as pool,
+            ):
+                first = pool.submit(resolve, "blocked-one.invalid")
+                second = pool.submit(resolve, "blocked-two.invalid")
+                until = time.monotonic() + 3
+                while len(list(folder.iterdir())) < 2 and time.monotonic() < until:
+                    time.sleep(0.01)
+                self.assertEqual(len(list(folder.iterdir())), 2)
+                self.assertEqual([str(ip) for ip in resolve("ready.invalid")], ["192.0.2.2"])
+                for request in (first, second):
+                    with self.assertRaisesRegex(f.FetchError, "DNS resolution"):
+                        request.result(timeout=2)
+                if os.name == "posix":
+                    for pid_file in folder.iterdir():
+                        with self.assertRaises(ChildProcessError):
+                            os.waitpid(int(pid_file.read_text()), os.WNOHANG)
+                resolver._work_queue.join()
+                for _ in range(6):
+                    self.assertTrue(resolver.admission.acquire(blocking=False))
+                for _ in range(6):
+                    resolver.admission.release()
+
+    def test_same_hostname_reuses_one_running_lookup_and_leaves_capacity_for_other_names(self):
+        gate = threading.Event()
+        calls = []
+
+        def resolver(host, *args, **kwargs):
+            calls.append(host)
+            if host == "shared.invalid":
+                gate.wait(2)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
+
+        try:
+            with mock.patch.object(f, "lookup_address_infos", side_effect=resolver):
+                for _ in range(3):
+                    with self.assertRaises(f.FetchError):
+                        f._resolve_hostname("shared.invalid", 443, deadline=time.monotonic() + 0.07)
+                other = f._resolve_hostname("other.invalid", 443, deadline=time.monotonic() + 1)
+                self.assertTrue(other)
+                self.assertEqual(calls, ["shared.invalid", "other.invalid"])
+        finally:
+            gate.set()
+            drain_dns()
+
     def test_cancelled_work_keeps_physical_slots_until_dequeued(self):
         gate = threading.Event()
         entered = threading.Event()
@@ -369,21 +436,21 @@ class DNSBoundTests(unittest.TestCase):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
 
         try:
-            with mock.patch.object(f.socket, "getaddrinfo", side_effect=resolver):
+            with mock.patch.object(f, "lookup_address_infos", side_effect=resolver):
 
-                def call():
+                def call(number):
                     try:
-                        f._resolve_hostname("fixture.invalid", 443, deadline=time.monotonic() + 0.04)
+                        f._resolve_hostname(f"fixture-{number}.invalid", 443, deadline=time.monotonic() + 0.04)
                     except f.FetchError:
                         pass
 
                 with ThreadPoolExecutor(max_workers=2) as pool:
-                    jobs = [pool.submit(call) for _ in range(2)]
+                    jobs = [pool.submit(call, number) for number in range(2)]
                     self.assertTrue(entered.wait(1))
                     for job in jobs:
                         job.result(1)
-                for _ in range(12):
-                    call()
+                for number in range(2, 14):
+                    call(number)
                 self.assertLessEqual(f._DNS_EXECUTOR_QUEUE.qsize(), 4)
                 self.assertEqual(len(count), 2)
                 self.assertFalse(f._DNS_ADMISSION.acquire(blocking=False))
@@ -411,7 +478,7 @@ class DNSBoundTests(unittest.TestCase):
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))]
 
         try:
-            with mock.patch.object(f.socket, "getaddrinfo", side_effect=resolver):
+            with mock.patch.object(f, "lookup_address_infos", side_effect=resolver):
                 started = time.monotonic()
                 with self.assertRaises(f.FetchError):
                     f._resolve_hostname("fixture.invalid", 443, deadline=time.monotonic() + 0.25)

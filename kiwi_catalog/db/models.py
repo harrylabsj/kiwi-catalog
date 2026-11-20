@@ -23,6 +23,12 @@ shopping-cli v14/v15 split.
 
 Extraction date: 2026-08-06.  Keep in sync with the shopping-cli DDL
 until the repos diverge intentionally (phase 3+).
+
+SCHEMA is the current bootstrap snapshot. Existing columns and indexes have
+historical DDL here as well as in migrations. New structural changes belong
+in an ordered migration, with corresponding snapshot changes where needed.
+The bootstrap runs SCHEMA before migrations, so an index that needs a new
+column or cleanup of historical duplicates is created only by the migration.
 """
 
 SCHEMA = [

@@ -45,8 +45,8 @@ def legacy_owner(body_token, merchant, roots, enabled=True, has_random_row=False
 
 @pytest.fixture
 def synthetic(monkeypatch):
-    monkeypatch.setenv("KIWI_CATALOG_OWNER_TOKEN_SECRET", "synthetic-legacy-a388")
-    return "synthetic-legacy-a388"
+    monkeypatch.setenv("KIWI_CATALOG_OWNER_TOKEN_SECRET", "fixture-only-a388-legacy-key-example")
+    return "fixture-only-a388-legacy-key-example"
 
 
 def test_old_v1_and_v2_real_ciphertext_and_two_new_key_versions_read_without_reencrypt(synthetic):

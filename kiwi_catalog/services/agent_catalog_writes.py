@@ -57,7 +57,9 @@ from kiwi_catalog.services.agent_catalog import get_catalog_agent_write_detail
 from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 from kiwi_catalog.services.domain_bindings import (
     CHALLENGE_REQUIRED_SOURCE_TYPES,
+    CHALLENGE_ROTATION_REQUIRED,
     STATE_LEGACY,
+    challenge_is_current,
     drop_domain_binding,
     ensure_domain_binding,
     mark_domain_bound,
@@ -551,24 +553,29 @@ def claim_catalog_agent(
         # 发布后再验；admin 仍可显式 rotate。
         if challenge_required and str(binding.get("state")) == STATE_LEGACY:
             binding = rotate_domain_binding(conn, catalog_agent_id, canonical, now=now_iso())
+        challenge = str(binding.get("challenge") or "")
         # 审查 P1-5：抓取前提交，关闭写事务——well-known 抓取（10s 级网络
         # I/O）期间不持有 SQLite 写锁（idempotency claim 行已持久化，失败时
         # handler 的 clear 独立生效；merchant 绑定写入由迁移 v7 唯一索引兜底）。
         conn.commit()
+        if challenge_required and not challenge_is_current(binding, now=now_iso()):
+            raise PermissionDenied(CHALLENGE_ROTATION_REQUIRED)
         # claim 是“主张所有权”，不是重跑存量验证：legacy 免挑战只适用于
         # 阶梯复验，不能让任意商家 token 直接认领历史未绑定行。
         evidence = verifier.verify_domain_control(
             canonical,
             declared=_declared_profile_urls(conn, catalog_agent_id),
             expected_catalog_agent_id=catalog_agent_id,
-            challenge=str(binding.get("challenge") or ""),
+            challenge=challenge,
             allow_unbound=not challenge_required,
             unbound_reason="source_trusted",
         )
         if not evidence.passed:
             raise PermissionDenied(f"claim denied: {evidence.reason}")
-        if challenge_required:
-            mark_domain_bound(conn, catalog_agent_id, canonical, now=now_iso())
+        if challenge_required and not mark_domain_bound(
+            conn, catalog_agent_id, canonical, challenge=challenge, now=now_iso()
+        ):
+            raise ConflictError("domain-control challenge changed or expired during verification")
         claim_method = "https_domain_control"
 
     current_merchant = str(agent.get("merchant_id") or "").strip()

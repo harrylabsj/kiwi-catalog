@@ -43,7 +43,7 @@ class CatalogMerchantCliTest(unittest.TestCase):
         self.db = Path(self.tmp.name) / "catalog.sqlite"
         # approve 签发时对 token 做 Fernet 加密（v14），需要 owner secret
         env_patch = mock.patch.dict(
-            os.environ, {"KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret"}, clear=False
+            os.environ, {"KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-owner-key-example-2026"}, clear=False
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)

@@ -82,7 +82,7 @@ class BudgetBoundTest(unittest.TestCase):
             time.sleep(1.2)
             return [(2, 1, 6, "", ("127.0.0.1", port))]
 
-        with mock.patch.object(fetcher_mod.socket, "getaddrinfo", side_effect=slow_getaddrinfo):
+        with mock.patch.object(fetcher_mod, "lookup_address_infos", side_effect=slow_getaddrinfo):
             fetcher = ProfileFetcher(TrustPolicy.defaults())
             started = time.monotonic()
             with self.assertRaises(FetchError):
@@ -99,7 +99,7 @@ class BudgetBoundTest(unittest.TestCase):
                     time.sleep(1.2)
                 return [(2, 1, 6, "", ("127.0.0.1", port))]
 
-            with mock.patch.object(fetcher_mod.socket, "getaddrinfo", side_effect=slow_getaddrinfo):
+            with mock.patch.object(fetcher_mod, "lookup_address_infos", side_effect=slow_getaddrinfo):
                 fetcher = ProfileFetcher(TrustPolicy.defaults())
                 started = time.monotonic()
                 with self.assertRaises(FetchError):

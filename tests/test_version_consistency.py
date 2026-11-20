@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -21,6 +22,19 @@ def test_version_constant_matches_pyproject() -> None:
     assert VERSION == declared, (
         f"kiwi_catalog.VERSION ({VERSION!r}) 与 pyproject.toml ({declared!r}) 不一致；"
         "发版时必须同步 kiwi_catalog/__init__.py"
+    )
+
+
+def test_readme_candidate_version_matches_package() -> None:
+    """审查 P3-31：README 候选版本此前停在 0.5.17（落后 10 个版本）。
+
+    「发版清单必做」靠人肉同步并不可靠，这里把 README 的候选版本也锁进守卫。
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search("当前源码候选：`([^`]+)`", readme)
+    assert match is not None, "README 缺少「当前源码候选：x.y.z」标记"
+    assert match.group(1) == VERSION, (
+        f"README 候选版本 ({match.group(1)!r}) 与 kiwi_catalog.VERSION ({VERSION!r}) 不一致"
     )
 
 

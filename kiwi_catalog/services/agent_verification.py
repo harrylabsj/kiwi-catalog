@@ -42,16 +42,12 @@ auth metadata.
 
 from __future__ import annotations
 
-import itertools
-import queue
 import sqlite3
-import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 from kiwi_catalog.agent_catalog.sqlite_repository import (
     append_catalog_audit,
@@ -73,9 +69,15 @@ from kiwi_catalog.agent_catalog.state_domains import (
     FreshnessStateMachine,
     VerificationLevelStateMachine,
 )
-from kiwi_catalog.core.errors import ConflictError, ShoppingCliError, ValidationError
-from kiwi_catalog.db.migrations import CURRENT_SCHEMA_VERSION
-from kiwi_catalog.db.session import SQLITE_BUSY_TIMEOUT_MS, encode_json, now_iso
+from kiwi_catalog.core.errors import (
+    ConflictError,
+    ValidationError,
+)
+from kiwi_catalog.db.session import (
+    encode_json,
+    now_iso,
+    open_connection,
+)
 from kiwi_catalog.discovery._validation import (
     ProfileValidationError,
     canonical_domain_of,
@@ -109,11 +111,14 @@ from kiwi_catalog.discovery.verifier import (
     VerificationStateMachine,
 )
 from kiwi_catalog.services.agent_catalog import _validate_hosting_invariant
-from kiwi_catalog.services.catalog_runtime_metrics import record_funnel, set_queue_depth
+from kiwi_catalog.services.catalog_runtime_metrics import record_funnel
 from kiwi_catalog.services.domain_bindings import (
     CHALLENGE_REQUIRED_SOURCE_TYPES,
+    CHALLENGE_ROTATION_REQUIRED,
     binding_legacy_allowed,
+    challenge_is_current,
     ensure_domain_binding,
+    get_domain_binding,
     mark_domain_bound,
     shared_domain_peer_count,
 )
@@ -163,35 +168,16 @@ from kiwi_catalog.services.verification_profile_policy import (
 from kiwi_catalog.services.verification_profile_policy import (
     profile_is_stale as _profile_is_stale,
 )
-from kiwi_catalog.services.verification_queue_ledger import (
-    UNKNOWN_OUTCOME_MARKER,
-    mark_task_unknown as _mark_task_unknown,
-    cleanup_terminal_tasks as _cleanup_terminal_tasks,
-)
-from kiwi_catalog.services.verification_queue_ledger import delete_task as _delete_task
-from kiwi_catalog.services.verification_queue_ledger import (
-    fetch_task_row as _fetch_task_row,
-)
-from kiwi_catalog.services.verification_queue_ledger import finish_task as _finish_task
-from kiwi_catalog.services.verification_queue_ledger import (
-    insert_pending_task as _insert_pending_task,
-)
-from kiwi_catalog.services.verification_queue_ledger import (
-    load_pending_tasks as _load_pending_tasks,
-)
-from kiwi_catalog.services.verification_queue_ledger import (
-    mark_task_running as _mark_task_running,
-)
-from kiwi_catalog.services.verification_queue_serialization import (
-    deserialize_verification_result as _deserialize_verification_result,
-)
-from kiwi_catalog.services.verification_queue_serialization import (
-    serialize_verification_result as _serialize_verification_result,
-)
-from kiwi_catalog.services.verification_queue_types import (
+from kiwi_catalog.services.verification_queue import (
+    VerificationQueue,
     VerificationQueueConfig,
+    VerificationQueueFullError,
+    VerificationQueueLedgerError as VerificationQueueLedgerError,
+    VerificationQueueOutcomeUnknownError,
+    VerificationQueueShutdownError,
     VerificationTask,
     VerificationTaskResult,
+    reconcile_verification_unknown,
 )
 from kiwi_catalog.services.verification_stages import (
     StageResult,
@@ -309,7 +295,16 @@ class VerificationService:
         # Freshness gate: only re-verify on-demand when the profile is stale,
         # unless the caller explicitly forces a full re-verification.
         if freshness == FRESH and level in _LADDER_RUNGS:
-            if not force:
+            binding = (
+                get_domain_binding(self._conn, catalog_agent_id)
+                if agent["source_type"] in CHALLENGE_REQUIRED_SOURCE_TYPES else None
+            )
+            challenge_expired = (
+                binding is not None
+                and not binding_legacy_allowed(binding, str(agent["canonical_domain"] or ""))
+                and not challenge_is_current(binding, now=now_iso())
+            )
+            if not force and not challenge_expired:
                 return VerificationResult(catalog_agent_id, previous, previous, ())
             stale_profile_audit = self._is_stale(catalog_agent_id)
         # D5：有活动绑定的云商家跳过域所有权阶梯（不抓卡、不做同源判定）——
@@ -810,17 +805,25 @@ class VerificationService:
         self._conn.commit()
         allow_unbound = (not challenge_required) or binding_legacy_allowed(binding, stored_domain)
         unbound_reason = "legacy" if binding_legacy_allowed(binding, stored_domain) else "source_trusted"
+        if not allow_unbound and not challenge_is_current(binding, now=now_iso()):
+            return _failed_evidence("domain_control", CHALLENGE_ROTATION_REQUIRED,
+                                    {"canonical_domain": stored_domain, "domain_binding": "expired"})
+        challenge = str(binding.get("challenge") or "")
         evidence = self._identity_verifier.verify_domain_control(
             stored_domain,
             declared={"agent_card": profiles.urls["agent_card"], "ucp_profile": profiles.urls["ucp_profile"]},
             expected_catalog_agent_id=catalog_agent_id,
-            challenge=str(binding.get("challenge") or ""),
+            challenge=challenge,
             allow_unbound=allow_unbound,
             unbound_reason=unbound_reason,
         )
         if evidence.passed and challenge_required and not allow_unbound:
-            mark_domain_bound(self._conn, catalog_agent_id, stored_domain, now=now_iso())
+            marked = mark_domain_bound(
+                self._conn, catalog_agent_id, stored_domain, challenge=challenge, now=now_iso()
+            )
             self._conn.commit()
+            if not marked:
+                raise ConflictError("domain-control challenge changed or expired during verification")
         peers = shared_domain_peer_count(self._conn, catalog_agent_id, stored_domain)
         if peers:
             evidence = replace(
@@ -1133,844 +1136,6 @@ class VerificationService:
             self._conn.close()
 
 
-# ── Bounded in-process verification queue (§25 Phase 2) ─────────────────────
-# Execution model (design §25 Phase 2):
-#
-#     registration / explicit refresh
-#             ↓
-#     bounded in-process verification queue
-#             ↓
-#     single-process worker with concurrency budget
-#
-# The queue is a bounded ``queue.Queue``; ``concurrency`` worker threads form
-# the concurrency budget.  Each worker supervises the real task in a daemon
-# sub-thread. A pre-commit deadline returns timeout; a commit already in
-# progress returns unknown without blocking the supervisor. Physical runner
-# capacity remains held until the real thread exits.  Every task opens its own database connection
-# through the injected *service_factory* — a ``VerificationService`` instance
-# is never shared across threads (see the service class docstring above).
-
-
-class VerificationQueueFullError(ShoppingCliError):
-    """Raised when the bounded queue is at capacity (fail-closed)."""
-
-
-class VerificationQueueShutdownError(ShoppingCliError):
-    """Raised when enqueueing after :meth:`VerificationQueue.shutdown`."""
-
-
-class VerificationQueueLedgerError(ShoppingCliError):
-    """Raised when the persistent ledger write fails at enqueue time.
-
-    审查 P2：enqueue 的 ledger 写失败必须抛类型化错误（而不是裸 sqlite3
-    异常冒泡）——调用方据此知道任务未入队、可安全重试。
-    """
-
-
-class VerificationQueueOutcomeUnknownError(ConflictError):
-    """A prior task for this agent needs reconciliation, not another run."""
-
-
-class _CommitPermission:
-    """Short state decisions only: never hold this lock across service I/O."""
-
-    def __init__(self, deadline: float, cancelled: threading.Event) -> None:
-        self._lock = threading.Lock()
-        self.deadline = deadline
-        self.cancelled = cancelled
-        self.state = "running"
-        self.result: VerificationTaskResult | None = None
-
-    def claim_commit(self) -> bool:
-        with self._lock:
-            if self.state != "running":
-                return False
-            if time.monotonic() >= self.deadline:
-                self.state = "timeout"
-                self.cancelled.set()
-                return False
-            self.state = "committing"
-            return True
-
-    def finish(self, result: VerificationTaskResult) -> None:
-        with self._lock:
-            if self.state in ("running", "committing"):
-                self.state, self.result = "done", result
-
-    def uncertain(self) -> None:
-        with self._lock:
-            self.state = "unknown"
-            self.cancelled.set()
-
-    def decide_deadline(self) -> tuple[str, VerificationTaskResult | None]:
-        with self._lock:
-            if self.state == "running":
-                self.state = "timeout"
-                self.cancelled.set()
-            elif self.state == "committing":
-                self.state = "unknown"
-                self.cancelled.set()
-            return self.state, self.result
-
-
-class VerificationQueue:
-    """Bounded in-process verification queue (§25 Phase 2, v3.0-P4).
-
-    Usage::
-
-        queue = make_verification_worker(db_path, config=VerificationQueueConfig(max_pending=50, concurrency=2))
-        outcome = queue.enqueue("cagt_123", wait=True)
-        # outcome.status == "completed" | "failed" | "timeout" | "unknown"
-
-    The queue is thread-safe and schedules tasks in a bounded in-process
-    ``queue.Queue``; ``concurrency`` worker threads form the concurrency
-    budget.  With ``db_path`` set (the production path via
-    :func:`make_verification_worker`) every task is written through to the
-    ``verification_queue_tasks`` ledger (schema v15) so tasks survive a
-    process restart: only safe ``pending`` rows are recovered. Old ``running``
-    work has an unknown outcome and requires reconciliation before any
-    same-agent run. ``wait()`` can rebuild outcomes from the ledger.  Without ``db_path`` the queue is
-    purely in-memory (tests / embedded use).  Call :meth:`shutdown` (or use
-    it as a context manager) to stop the worker threads.
-    """
-
-    _KINDS = frozenset({"verify", "refresh", "mark_stale", "suspend"})
-    # review 2-31 F2：关闭置位后 worker 复核「已接纳任务全部有结果」的周期。
-    _SHUTDOWN_POLL_SECONDS = 0.05
-
-    def __init__(
-        self,
-        *,
-        service_factory: Callable[[], VerificationService],
-        config: VerificationQueueConfig | None = None,
-        now: Callable[[], float] | None = None,
-        db_path: str | Path | None = None,
-    ) -> None:
-        self._config = config or VerificationQueueConfig()
-        self._service_factory = service_factory
-        self._now = now or time.time
-        self._db_path = Path(db_path) if db_path else None
-        self._results_cv = threading.Condition()
-
-        # Persistence ledger (v15).  All ledger access happens under
-        # _results_cv — a single queue thread touches it at a time plus the
-        # worker threads, which is exactly the sqlite3 serialization model.
-        self._db_conn: sqlite3.Connection | None = None
-        if self._db_path is not None:
-            self._db_conn = sqlite3.connect(self._db_path, check_same_thread=False)
-            self._db_conn.row_factory = sqlite3.Row  # ledger rows are column-accessed
-            # 与 open_connection 的 5s busy timeout 对齐（否则并发写等待行为不一致，
-            # 多 worker 部署下 SQLITE_BUSY 概率性失败）。
-            self._db_conn.execute(f"pragma busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-            # 审查 P3：裸连接不跑迁移——未迁移库会在 _recover_pending_tasks 的
-            # SELECT 上 no such table 崩。fail-closed 给出明确诊断（应用内路径
-            # 先经 db.session.open_connection 迁移，只有 CLI/嵌入直用才踩中）。
-            version_row = self._db_conn.execute("pragma user_version").fetchone()
-            ledger_version = int(version_row[0] or 0) if version_row is not None else 0
-            if ledger_version < CURRENT_SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"verification queue requires schema v{CURRENT_SCHEMA_VERSION}, "
-                    f"found v{ledger_version}; open the database through "
-                    f"kiwi_catalog.db.session.open_connection first (it runs migrations)"
-                )
-
-        self._results: dict[str, VerificationTaskResult] = {}
-        self._tasks: dict[str, VerificationTask] = {}
-        self._uncertain_agents: dict[str, str] = {}
-        # Keep physical daemon runners bounded even after a timeout/unknown.
-        # A slot is returned only when the actual runner (including close) exits.
-        self._runner_slots = threading.BoundedSemaphore(self._config.concurrency)
-        self._shutdown = threading.Event()
-        # 审查 P3：enqueue（检查+put）与 shutdown（置位+放哨兵）互斥锁
-        self._enqueue_lock = threading.Lock()
-
-        # Crash recovery: only safe pending work is re-enqueued. Running
-        # work has an unknown outcome and remains fenced across restarts.  Recovered count
-        # may exceed max_pending — the bound exists to stop runaway
-        # enqueueing, not to drop recovered work, so the queue is sized to
-        # fit both.
-        recovered = self._recover_pending_tasks()
-        self._pending: queue.Queue[VerificationTask | None] = queue.Queue(
-            maxsize=max(self._config.max_pending, recovered + 1)
-        )
-        # review 2-31：同 agent 串行化状态（在 _results_cv 保护下访问）。
-        self._agent_running: set[str] = set()
-        self._agent_deferred: dict[str, list[VerificationTask]] = {}
-        # review 2-31（A327）：preclaim 移交表——完成方在同一 cv 内把串行槽
-        # 移交给 deferred 队首任务；该任务出队时凭身份绕过 busy 检查。
-        self._agent_preclaimed: dict[str, VerificationTask] = {}
-        for task in self._recovered_tasks:
-            self._pending.put(task)
-        self._id_seq = itertools.count(1)
-        self._workers: list[threading.Thread] = []
-        for i in range(self._config.concurrency):
-            worker = threading.Thread(
-                target=self._worker_loop,
-                name=f"verification-queue-{i}",
-                daemon=True,
-            )
-            worker.start()
-            self._workers.append(worker)
-        self._update_depth()
-
-    def _update_depth(self) -> None:
-        """Refresh the §24 ``verification_queue_depth`` gauge.
-
-        Depth is the number of tasks enqueued but not yet finished — pending
-        plus in-flight — computed from the two lock-guarded dicts (O(1)).
-        """
-        with self._results_cv:
-            depth = len(self._tasks) - len(self._results)
-        set_queue_depth(max(depth, 0))
-
-    # ── Persistence ledger (v3.0-P4, schema v15) ──────────────────────────
-
-    def _recover_pending_tasks(self) -> int:
-        """Recover safe pending rows; all old running rows remain unresolved.
-
-        A crash may have happened after a commit permission or actual commit.
-        No running row is reliable evidence of non-execution. Unresolved rows
-        and same-agent pending followers retain identity without being run.
-        """
-        self._recovered_tasks: list[VerificationTask] = []
-        if self._db_conn is None:
-            return 0
-        with self._results_cv:
-            rows = [_fetch_task_row(self._db_conn, str(r["task_id"]))
-                    for r in _load_pending_tasks(self._db_conn)]
-            for row in rows:
-                if row is not None and row["status"] == "running":
-                    self._uncertain_agents[str(row["catalog_agent_id"])] = str(row["task_id"])
-            for row in rows:
-                if row is None:
-                    continue
-                task = VerificationTask(catalog_agent_id=str(row["catalog_agent_id"]),
-                    task_id=str(row["task_id"]), kind=str(row["kind"]),
-                    actor=str(row["actor"]), enqueued_at=float(row["enqueued_at"]))
-                self._tasks[task.task_id] = task
-                if task.catalog_agent_id in self._uncertain_agents:
-                    self._results[task.task_id] = self._unknown_outcome(
-                        task, float(row["started_at"] or 0),
-                        "recovered running outcome or same-agent outcome unknown; reconciliation required")
-                else:
-                    self._recovered_tasks.append(task)
-        return len(self._recovered_tasks)
-
-    def _persist_insert(self, task: VerificationTask) -> None:
-        """Insert one pending task into the ledger (fail-closed on error)."""
-        if self._db_conn is None:
-            return
-        with self._results_cv:
-            _insert_pending_task(
-                self._db_conn,
-                task_id=task.task_id,
-                catalog_agent_id=task.catalog_agent_id,
-                kind=task.kind,
-                actor=task.actor,
-                enqueued_at=task.enqueued_at,
-                created_at=now_iso(),
-                updated_at=now_iso(),
-            )
-            self._db_conn.commit()
-
-    def _persist_delete(self, task_id: str) -> None:
-        """Roll back a ledger insert (e.g. when the memory queue is full)."""
-        if self._db_conn is None:
-            return
-        with self._results_cv:
-            _delete_task(self._db_conn, task_id)
-            self._db_conn.commit()
-
-    def _persist_running(self, task_id: str, started_at: float) -> None:
-        """Mark a task as running in the ledger."""
-        if self._db_conn is None:
-            return
-        with self._results_cv:
-            _mark_task_running(
-                self._db_conn,
-                task_id=task_id,
-                started_at=started_at,
-                updated_at=now_iso(),
-            )
-            self._db_conn.commit()
-
-    def _persist_unknown(self, task_id: str, error: str) -> None:
-        if self._db_conn is None:
-            return
-        with self._results_cv:
-            # The business connection may still own the SQLite write lock.
-            # Never wait for that unknown commit to persist its marker: the
-            # already committed running row is itself a restart fence.
-            old_timeout = int(self._db_conn.execute("pragma busy_timeout").fetchone()[0])
-            self._db_conn.execute("pragma busy_timeout=0")
-            try:
-                _mark_task_unknown(self._db_conn, task_id=task_id, error=error,
-                                   finished_at=self._now(), updated_at=now_iso())
-                self._db_conn.commit()
-            except Exception:
-                self._db_conn.rollback()
-                raise
-            finally:
-                self._db_conn.execute(f"pragma busy_timeout={old_timeout}")
-
-    def _unknown_outcome(self, task: VerificationTask, started_at: float,
-                         reason: str) -> VerificationTaskResult:
-        with self._results_cv:
-            self._uncertain_agents.setdefault(task.catalog_agent_id, task.task_id)
-        error = reason
-        try:
-            self._persist_unknown(task.task_id, error)
-        except Exception as exc:
-            error += (f"; unknown marker persistence failed: {type(exc).__name__}: {exc}; "
-                      "original running row retained as restart fence")
-        return VerificationTaskResult(task_id=task.task_id,
-            catalog_agent_id=task.catalog_agent_id, kind=task.kind, status="unknown",
-            verification_status="", error=error, enqueued_at=task.enqueued_at,
-            started_at=started_at, finished_at=self._now())
-
-    def _persist_finish(
-        self,
-        task_id: str,
-        *,
-        status: str,
-        verification_status: str = "",
-        error: str = "",
-        result: VerificationResult | None = None,
-    ) -> None:
-        """Write the terminal ledger row for a finished task."""
-        if self._db_conn is None:
-            return
-        with self._results_cv:
-            _finish_task(
-                self._db_conn,
-                task_id=task_id,
-                status=status,
-                verification_status=verification_status,
-                error=error,
-                result_json=_serialize_verification_result(result),
-                finished_at=self._now(),
-                updated_at=now_iso(),
-            )
-            # 审查 P2：惰性清理终态行（键空间此前只增不删；finished_at 是
-            # epoch REAL，与 _now() 同单位）
-            self._finish_count = getattr(self, "_finish_count", 0) + 1
-            if self._finish_count % 256 == 0:
-                try:
-                    _cleanup_terminal_tasks(self._db_conn, self._now() - 7 * 86400)
-                except sqlite3.Error:
-                    pass  # 清理失败不影响任务结果写
-            self._db_conn.commit()
-
-    def _ledger_result(self, task_id: str) -> VerificationTaskResult | None:
-        """Rebuild a finished result from the ledger (restart path for wait())."""
-        if self._db_conn is None:
-            return None
-        row = _fetch_task_row(self._db_conn, task_id)
-        if row is None:
-            return None
-        if row["status"] == "running" and (
-            row["verification_status"] == UNKNOWN_OUTCOME_MARKER or
-            str(row["catalog_agent_id"]) in self._uncertain_agents
-        ):
-            return VerificationTaskResult(task_id=str(row["task_id"]),
-                catalog_agent_id=str(row["catalog_agent_id"]), kind=str(row["kind"]),
-                status="unknown", verification_status="",
-                error=str(row["error"] or "running outcome unknown; reconciliation required"),
-                enqueued_at=float(row["enqueued_at"]), started_at=float(row["started_at"]),
-                finished_at=float(row["finished_at"]))
-        if row["status"] in ("pending", "running"):
-            return None
-        return VerificationTaskResult(
-            task_id=str(row["task_id"]),
-            catalog_agent_id=str(row["catalog_agent_id"]),
-            kind=str(row["kind"]),
-            status=str(row["status"]),
-            verification_status=str(row["verification_status"]),
-            error=str(row["error"]),
-            enqueued_at=float(row["enqueued_at"]),
-            started_at=float(row["started_at"]),
-            finished_at=float(row["finished_at"]),
-            result=_deserialize_verification_result(str(row["result_json"])),
-        )
-
-    # ── Public API ───────────────────────────────────────────────────────
-
-    def enqueue(
-        self,
-        catalog_agent_id: str,
-        *,
-        kind: str = "verify",
-        actor: str = "verification_worker",
-        wait: bool = False,
-        timeout: float | None = None,
-    ) -> VerificationTaskResult:
-        """Enqueue a verification task for *catalog_agent_id*.
-
-        With ``wait=False`` (default) the call returns immediately with a
-        ``status == "enqueued"`` result carrying the ``task_id``.  With
-        ``wait=True`` it blocks until the task finishes and returns the final
-        outcome (or ``status == "timeout"`` after *timeout* seconds).
-
-        Raises:
-            VerificationQueueFullError: the bounded queue is at capacity.
-            VerificationQueueShutdownError: the queue has been shut down.
-            ValueError: *kind* is not a supported task kind.
-        """
-        if self._shutdown.is_set():
-            raise VerificationQueueShutdownError("verification queue is shut down")
-        if kind not in self._KINDS:
-            raise ValueError(f"unknown verification task kind: {kind!r}")
-        with self._results_cv:
-            blocker = self._uncertain_agents.get(catalog_agent_id)
-            if blocker is not None:
-                raise VerificationQueueOutcomeUnknownError(
-                    f"verification outcome unknown for {catalog_agent_id} ({blocker}); reconciliation required")
-        # 审查 P2：同 agent 任务去重——已有 pending/running 任务时复用，不
-        # 新建。并发任务各自基于入口处陈旧快照读-改-写，后写者可把已晋升
-        # 级别回退（队列任务 + 同步 /verify 请求并发时的真实竞态）。
-        # finished 的旧任务（已进 _results）不拦截新一轮验证。
-        # review 2-31：去重键从 (agent) 收紧为 (agent, kind)——此前已有 pending
-        # 的 verify 任务时，显式 enqueue(kind="refresh") 会被静默吞掉（返回
-        # verify 任务的 outcome 而不执行 refresh）；suspend 等未来 kind 同样
-        # 会被吞。不同 kind 语义不同，不能互相复用。
-        with self._results_cv:
-            existing_id = next(
-                (
-                    task_id
-                    for task_id, task in self._tasks.items()
-                    if task.catalog_agent_id == catalog_agent_id
-                    and task.kind == kind
-                    and task_id not in self._results
-                ),
-                None,
-            )
-        if existing_id is not None:
-            existing_task = self._tasks[existing_id]
-            if wait:
-                return self.wait(existing_id, timeout=timeout)
-            return VerificationTaskResult(
-                task_id=existing_id,
-                catalog_agent_id=catalog_agent_id,
-                kind=existing_task.kind,
-                status="enqueued",
-                verification_status="",
-                enqueued_at=existing_task.enqueued_at,
-                finished_at=self._now(),
-            )
-        task_id = f"vt-{next(self._id_seq):06d}-{uuid.uuid4().hex[:6]}"
-        enqueued_at = self._now()
-        task = VerificationTask(
-            catalog_agent_id=catalog_agent_id,
-            task_id=task_id,
-            kind=kind,
-            actor=actor,
-            enqueued_at=enqueued_at,
-        )
-        with self._results_cv:
-            self._tasks[task_id] = task
-        try:
-            self._persist_insert(task)
-        except Exception as exc:
-            # 审查 P2：ledger 写失败必须回滚内存条目——否则 _tasks 留下无人
-            # 消费的孤儿任务，wait(task_id) 永久挂死。抛类型化错误，调用方
-            # 可安全重试（register 幂等键机制保证不产生重复副作用）。
-            with self._results_cv:
-                self._tasks.pop(task_id, None)
-            raise VerificationQueueLedgerError(
-                f"failed to persist verification task {task_id}: {exc}"
-            ) from exc
-        try:
-            # 审查 P3（enqueue/shutdown 竞态）：检查 _shutdown 与 put 必须在
-            # 与 shutdown() 的「置位+放哨兵」同一把锁内原子完成——否则检查通过
-            # 后 shutdown 先置位放哨兵、本任务再入队落在哨兵之后无人消费，
-            # wait() 永久挂死。
-            with self._enqueue_lock:
-                if self._shutdown.is_set():
-                    self._persist_delete(task_id)
-                    with self._results_cv:
-                        self._tasks.pop(task_id, None)
-                    raise VerificationQueueShutdownError(
-                        "verification queue is shut down"
-                    )
-                with self._results_cv:
-                    if catalog_agent_id in self._uncertain_agents:
-                        self._results[task_id] = self._unknown_outcome(task, 0,
-                            "admission blocked by same-agent unknown outcome; reconciliation required")
-                        self._results_cv.notify_all()
-                        raise VerificationQueueOutcomeUnknownError(
-                            f"verification task {task_id} blocked by unknown outcome; reconciliation required")
-                self._pending.put_nowait(task)
-        except queue.Full as exc:
-            self._persist_delete(task_id)
-            with self._results_cv:
-                self._tasks.pop(task_id, None)
-            self._update_depth()
-            raise VerificationQueueFullError(
-                f"verification queue is full (max_pending={self._config.max_pending})"
-            ) from exc
-        self._update_depth()
-        if not wait:
-            return VerificationTaskResult(
-                task_id=task_id,
-                catalog_agent_id=catalog_agent_id,
-                kind=kind,
-                status="enqueued",
-                verification_status="",
-                enqueued_at=enqueued_at,
-                finished_at=self._now(),
-            )
-        return self.wait(task_id, timeout=timeout)
-
-    def wait(self, task_id: str, timeout: float | None = None) -> VerificationTaskResult:
-        """Block until the task with *task_id* produces a result.
-
-        Returns a ``VerificationTaskResult`` with ``status == "timeout"`` when
-        *timeout* seconds elapse before the task finishes.
-        """
-        deadline: float | None = None if timeout is None else time.monotonic() + timeout
-        with self._results_cv:
-            while task_id not in self._results:
-                if deadline is None:
-                    self._results_cv.wait(0.5)
-                    continue
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    # Not finished in this process — a restarted queue may
-                    # still hold the outcome in the v15 ledger.
-                    from_ledger = self._ledger_result(task_id)
-                    if from_ledger is not None:
-                        return from_ledger
-                    task = self._tasks.get(task_id)
-                    return VerificationTaskResult(
-                        task_id=task_id,
-                        catalog_agent_id=task.catalog_agent_id if task else "",
-                        kind=task.kind if task else "",
-                        status="timeout",
-                        verification_status="",
-                        error="timed out waiting for verification result",
-                        enqueued_at=task.enqueued_at if task else 0.0,
-                        finished_at=self._now(),
-                    )
-                self._results_cv.wait(remaining)
-            return self._results[task_id]
-
-    def drain(self, timeout: float | None = None) -> list[VerificationTaskResult]:
-        """Wait for each admitted task to have a recorded outcome.
-
-        A commit still in progress may return unknown while its durable
-        running fence remains. This does not imply all business I/O stopped.
-        *timeout* only bounds this wait for recorded outcomes.
-        """
-        with self._results_cv:
-            pending_ids = [tid for tid in self._tasks if tid not in self._results]
-        deadline: float | None = None if timeout is None else time.monotonic() + timeout
-        with self._results_cv:
-            for tid in pending_ids:
-                while tid not in self._results:
-                    if deadline is None:
-                        self._results_cv.wait(0.2)
-                    else:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        self._results_cv.wait(remaining)
-            return [self._results[tid] for tid in self._tasks if tid in self._results]
-
-    def shutdown(self, wait: bool = True, timeout: float | None = None) -> None:
-        """Stop accepting new tasks and (optionally) wait for workers to exit.
-
-        正常关闭合同（review 2-31 F2）：已接纳的任务（pending / deferred /
-        preclaimed）不随关闭丢弃——worker 在全部已接纳任务都有记录结果
-        （completed / failed / timeout / unknown）后才退出。unknown仍持久
-        保留running围栏，不表示业务I/O已停止；不靠重启重驱补完本轮工作。
-        显式 timeout 仍只限制 join 等待，可能在排干前返回。
-        """
-        if self._shutdown.is_set():
-            return
-        # 关闭置位与 enqueue 的「检查+put」互斥；worker 排干已接纳任务后退出。
-        with self._enqueue_lock:
-            self._shutdown.set()
-            # Workers poll for shutdown independently of pending capacity.
-            # Blocking sentinel puts can deadlock after drained workers exit.
-        if wait:
-            for worker in self._workers:
-                worker.join(timeout=timeout)
-            # 审查 P3：仅在所有 worker 退出后关 ledger 连接（此前连接随进程
-            # 泄漏；wait=False 时不 close——在途任务仍要写 ledger）。close 与
-            # enqueue 清理路径互斥（_enqueue_lock），避免撞已关闭连接。
-            with self._enqueue_lock:
-                if self._db_conn is not None:
-                    try:
-                        self._db_conn.close()
-                    except sqlite3.Error:
-                        pass
-                    self._db_conn = None
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.shutdown(wait=True)
-
-    def __del__(self) -> None:
-        """GC 兜底：wait=False 的调用方负责最终 shutdown，但若对象被丢弃
-        前未关 ledger 连接（测试/短期嵌入场景），随 GC 关闭防泄漏
-        （审查附录 A ResourceWarning）。worker/runner 是绑定方法引用，
-        对象能被 GC 即说明无线程持有在途写，此时关闭安全。
-
-        审查 P3-09：不再以 ``not self._shutdown.is_set()`` 为关闭前提——
-        shutdown(wait=False) 后 _shutdown 已置位，该守卫会让 ledger 连接
-        永远无法关闭（shutdown 幂等早退，__del__ 又跳过）→ ResourceWarning。
-        """
-        try:
-            conn = self._db_conn
-            if conn is not None:
-                conn.close()
-                self._db_conn = None
-        except Exception:  # noqa: BLE001 —— GC 路径绝不抛
-            pass
-
-    # ── Internals ────────────────────────────────────────────────────────
-
-    def _admitted_drained(self) -> bool:
-        """正常关闭排干条件：所有已接纳任务（_tasks 登记）均已有结果。
-
-        pending / deferred / preclaimed 任务同样登记在 _tasks 且尚无结果，
-        故本条件覆盖全部接纳形态；unknown也有记录结果，但其业务后果
-        仍未决，持久running围栏继续阻断重驱。
-        """
-        with self._results_cv:
-            return all(task_id in self._results for task_id in self._tasks)
-
-    def _worker_loop(self) -> None:
-        # review 2-31（A327 返修）：同 agent 串行化收口为**单一互斥临界区**——
-        # A317 v9 实证旧实现的两个同形屏障：①busy 检查与 running.add 分属两个
-        # cv 块，双 worker 均 busyFalse 后同 agent 双执行；②defer 决定/append 与
-        # 完成 owner 的 discard/pop 分锁，deferred 任务可能永久滞留（无后续
-        # completion 可触发 drain）。现协议：
-        #   出队（同一 cv 块内）：busy 且非 preclaim → defer；否则 running.add。
-        #   完成（同一 cv 块内）：discard；deferred 队首**原子移交 preclaim**
-        #   （agent 保持 running 归属）并经 _pending 重投，其余保持 deferred。
-        #   preclaim 任务出队时凭 task_id 身份绕过 busy 检查直接执行。
-        # 新到达的同 agent 任务一律 defer（无重叠窗口）；所有真实任务最终
-        # 恰执行一次、结果恰记录一次。
-        # review 2-31 F2（A332 返修）：正常关闭合同——shutdown 的哨兵只表示
-        # 「不再接纳新任务」，不是立即退出信号。完成方的 preclaim 重投经
-        # _pending 落在哨兵之后，哨兵即 break 会让已接纳的 deferred/preclaimed
-        # 任务静默无结果（db_path=None 不可恢复；临时 ledger 场景则把本轮该
-        # 完成的工作推给 shutdown 之后另进程恢复）。worker 必须在所有已接纳
-        # 任务都有记录结果后才退出（unknown保持围栏）：关闭置位时用带超时的 get 周期复核排干
-        # 条件。A343 不向有界工作队列放哨兵；空闲 get 亦周期检查关闭，
-        # 避免 drained worker 先退使 shutdown 阻塞于放哨兵。
-        handoff_task: VerificationTask | None = None
-        task: VerificationTask | None
-        while True:
-            if self._shutdown.is_set() and self._admitted_drained():
-                break
-            from_pending = handoff_task is None
-            if handoff_task is not None:
-                # A full pending queue cannot make its only available consumer
-                # wait to put. This already-admitted deferred task keeps its
-                # atomic preclaim and is consumed by this worker locally.
-                task, handoff_task = handoff_task, None
-            else:
-                try:
-                    task = self._pending.get(timeout=self._SHUTDOWN_POLL_SECONDS)
-                except queue.Empty:
-                    continue
-            try:
-                if task is None:
-                    continue
-                with self._results_cv:
-                    agent = task.catalog_agent_id
-                    preclaimed = self._agent_preclaimed.get(agent) is task
-                    if preclaimed:
-                        # review 2-31 F1：preclaim 移交在出队时消费完毕，清掉
-                        # 残留元数据（此前最后完成的 preclaimed 任务残留一条）。
-                        self._agent_preclaimed.pop(agent, None)
-                    uncertain = agent in self._uncertain_agents
-                    if agent in self._agent_running and not preclaimed and not uncertain:
-                        self._agent_deferred.setdefault(agent, []).append(task)
-                        self._results_cv.notify_all()
-                        continue
-                    if not preclaimed:
-                        self._agent_running.add(agent)
-                    # preclaim 任务：归属已在完成方转移（running 未移除）
-                try:
-                    if uncertain:
-                        result = self._unknown_outcome(task, 0,
-                            "queued task blocked by same-agent unknown outcome; reconciliation required")
-                    else:
-                        result = self._run_task_with_timeout(task)
-                except Exception as exc:  # noqa: BLE001 —— 单任务失败不得杀 worker
-                    #（并发预算减一且无恢复）；报告 failed 结果并继续循环。
-                    result = VerificationTaskResult(
-                        task_id=task.task_id,
-                        catalog_agent_id=task.catalog_agent_id,
-                        kind=task.kind,
-                        status="failed",
-                        verification_status="",
-                        error=f"worker error: {type(exc).__name__}: {exc}",
-                        enqueued_at=task.enqueued_at,
-                        started_at=0.0,
-                        finished_at=self._now(),
-                    )
-                    try:
-                        self._persist_finish(
-                            task.task_id, status="failed", error=result.error
-                        )
-                    except Exception:  # noqa: BLE001 —— ledger 写失败不杀 worker
-                        pass
-                    # review 3-57：异常可能发生在 _persist_running 之前（ledger 行
-                    # 仍是 pending）——finish 的 running 守卫会静默 no-op，留下
-                    # pending 僵尸行被重启后当任务重跑。此处无条件删除该任务行，
-                    # 与内存里已报 failed 的结果保持一致（幂等性兜底正确性）。
-                    if self._db_conn is not None:
-                        try:
-                            with self._results_cv:
-                                self._db_conn.execute(
-                                    "delete from verification_queue_tasks where task_id = ?"
-                                    " and status = 'pending'",
-                                    (task.task_id,),
-                                )
-                                self._db_conn.commit()
-                        except Exception:  # noqa: BLE001
-                            pass
-                with self._results_cv:
-                    self._results[task.task_id] = result
-                    self._results_cv.notify_all()
-                # review 2-31（A327）：完成收尾在同一 cv 块内——释放或**原子
-                # 移交**串行槽给 deferred 队首（preclaim），消除 discard→pop
-                # 分锁窗口；cv 外 put_nowait，满队列时本 worker 有界携带同一
-                # task，不重建身份/期限；期间 agent 保持 running 归属。
-                with self._results_cv:
-                    self._results_cv.notify_all()
-                    self._agent_running.discard(task.catalog_agent_id)
-                    waiting = self._agent_deferred.pop(task.catalog_agent_id, [])
-                    requeue = []
-                    if waiting:
-                        nxt = waiting.pop(0)
-                        self._agent_running.add(task.catalog_agent_id)
-                        self._agent_preclaimed[task.catalog_agent_id] = nxt
-                        requeue.append(nxt)
-                        self._agent_deferred[task.catalog_agent_id] = waiting
-                        self._results_cv.notify_all()
-                for d in requeue:
-                    try:
-                        self._pending.put_nowait(d)
-                    except queue.Full:
-                        handoff_task = d
-                self._update_depth()
-            finally:
-                if from_pending:
-                    self._pending.task_done()
-
-    def _run_task_with_timeout(self, task: VerificationTask) -> VerificationTaskResult:
-        started_at = self._now()
-        deadline = time.monotonic() + self._config.task_timeout_seconds
-        self._persist_running(task.task_id, started_at)
-        cancelled = threading.Event()
-        permission = _CommitPermission(deadline, cancelled)
-        box: dict[str, Any] = {"started_at": started_at, "cancelled": cancelled,
-                               "permission": permission}
-        if self._runner_slots.acquire(timeout=max(0, deadline - time.monotonic())):
-            def execute_and_release() -> None:
-                try:
-                    self._execute_task(task, box)
-                finally:
-                    self._runner_slots.release()
-            runner = threading.Thread(target=execute_and_release,
-                name=f"verification-task-{task.task_id}", daemon=True)
-            try:
-                runner.start()
-            except Exception:
-                self._runner_slots.release()
-                raise
-            runner.join(max(0, deadline - time.monotonic()))
-            if not runner.is_alive() and permission.state == "running":
-                # An injected/broken runner returned without a result before
-                # claiming commit; it cannot start a later commit now.
-                permission.finish(VerificationTaskResult(task_id=task.task_id,
-                    catalog_agent_id=task.catalog_agent_id, kind=task.kind,
-                    status="failed", verification_status="",
-                    error="task ended without a result (persistence/execution error)",
-                    enqueued_at=task.enqueued_at, started_at=started_at,
-                    finished_at=self._now()))
-        state, result = permission.decide_deadline()
-        if state == "unknown":
-            return self._unknown_outcome(task, started_at,
-                str(box.get("commit_error") or "service commit outcome unknown after deadline; reconciliation required"))
-        if result is None:
-            result = VerificationTaskResult(task_id=task.task_id,
-                catalog_agent_id=task.catalog_agent_id, kind=task.kind, status="timeout",
-                verification_status="", error="deadline won before service commit permission",
-                enqueued_at=task.enqueued_at, started_at=started_at, finished_at=self._now())
-        # Only the supervisor publishes ledger outcomes. Late runners never
-        # overwrite a timeout/unknown, even if their commit later returns.
-        try:
-            self._persist_finish(task.task_id, status=result.status,
-                verification_status=result.verification_status, error=result.error, result=result.result)
-        except Exception as exc:
-            if result.status == "completed":
-                return self._unknown_outcome(task, started_at,
-                    f"commit confirmed but outcome persistence unknown: {type(exc).__name__}: {exc}")
-            raise
-        return result
-
-    def _execute_task(self, task: VerificationTask, box: dict[str, Any]) -> None:
-        started_at = float(box["started_at"])
-        cancelled: threading.Event = box["cancelled"]
-        permission: _CommitPermission = box["permission"]
-        service = None
-        factory_finished = False
-        commit_started = False
-        try:
-            service = self._service_factory()
-            factory_finished = True
-            if cancelled.is_set():
-                return
-            if task.kind == "refresh":
-                res = service.refresh(task.catalog_agent_id, actor=task.actor)
-            elif task.kind == "mark_stale":
-                res = service.mark_stale(task.catalog_agent_id, actor=task.actor)
-            elif task.kind == "suspend":
-                res = service.suspend(task.catalog_agent_id, actor=task.actor)
-            else:
-                res = service.verify(task.catalog_agent_id, actor=task.actor)
-            # Independent profile snapshot/index short commits keep their
-            # documented semantics. This permission governs the final service
-            # transaction, atomically against the supervisor deadline decision.
-            if not permission.claim_commit():
-                return
-            commit_started = True
-            commit = getattr(service, "commit", None)
-            if commit is not None:
-                commit()
-            permission.finish(VerificationTaskResult(task_id=task.task_id,
-                catalog_agent_id=task.catalog_agent_id, kind=task.kind, status="completed",
-                verification_status=res.status, enqueued_at=task.enqueued_at,
-                started_at=started_at, finished_at=self._now(), result=res))
-        except Exception as exc:
-            if commit_started:
-                box["commit_error"] = f"service commit outcome unknown: {type(exc).__name__}: {exc}"
-                permission.uncertain()
-            else:
-                permission.finish(VerificationTaskResult(task_id=task.task_id,
-                    catalog_agent_id=task.catalog_agent_id, kind=task.kind, status="failed",
-                    verification_status="", error=(f"service factory failed: {exc}" if not factory_finished
-                        else f"{type(exc).__name__}: {exc}"),
-                    enqueued_at=task.enqueued_at, started_at=started_at, finished_at=self._now()))
-        finally:
-            close = getattr(service, "close", None)
-            if close is not None:
-                try:
-                    # Never perform an unpermitted second implicit commit,
-                    # including on successful and uncertain commit paths.
-                    close(commit=False)
-                except Exception:
-                    pass
-
-
 def make_verification_worker(
     db_path: str | Path,
     *,
@@ -1984,8 +1149,6 @@ def make_verification_worker(
     connection is ever shared across threads.  The returned queue is ready to
     use — call :meth:`VerificationQueue.enqueue` to drive verification.
     """
-    from kiwi_catalog.db.session import open_connection
-
     def _service_factory() -> VerificationService:
         conn = open_connection(db_path)
         return VerificationService(conn, policy=policy)
@@ -2015,4 +1178,5 @@ __all__ = [
     "VerificationTask",
     "VerificationTaskResult",
     "make_verification_worker",
+    "reconcile_verification_unknown",
 ]

@@ -25,6 +25,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -40,8 +41,55 @@ from kiwi_catalog.db.migrations import (
     run_migrations,
     schema_user_version,
 )
+from kiwi_catalog.db.session import open_connection
 
 _TS = "2026-01-01T00:00:00+00:00"
+
+
+class SchemaCompletenessTest(unittest.TestCase):
+    def test_v57_missing_receipts_is_rejected_without_recreating_table(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            db = Path(root) / "catalog.sqlite"
+            with closing(open_connection(db)) as conn, conn:
+                conn.execute("drop table commerce_receipts")
+                _set_schema_user_version(conn, 57)
+            with self.assertRaisesRegex(RuntimeError, "v57.*table commerce_receipts"):
+                open_connection(db)
+            with closing(sqlite3.connect(db)) as conn:
+                self.assertEqual(schema_user_version(conn), 57)
+                self.assertIsNone(conn.execute(
+                    "select 1 from sqlite_schema where name='commerce_receipts'"
+                ).fetchone())
+
+    def test_current_schema_checks_previously_unchecked_table_columns_and_constraints(self) -> None:
+        cases = (
+            ("drop table merchant_tokens", r"table merchant_tokens"),
+            ("alter table merchant_tokens rename column token_hash to omitted_hash", r"column merchant_tokens\.token_hash"),
+            ("drop index idx_agent_endpoints_agent_kind_unique", r"index idx_agent_endpoints_agent_kind_unique"),
+            ("drop trigger revoke_sessions_on_account_status_change", r"trigger revoke_sessions_on_account_status_change"),
+        )
+        for statement, expected in cases:
+            with self.subTest(object=expected), tempfile.TemporaryDirectory() as root:
+                db = Path(root) / "catalog.sqlite"
+                with closing(open_connection(db)) as conn, conn:
+                    conn.execute(statement)
+                for migrate in (True, False):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        open_connection(db, migrate=migrate)
+
+    def test_valid_old_schema_upgrades_without_requiring_future_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            db = Path(root) / "catalog.sqlite"
+            with closing(sqlite3.connect(db)) as conn, conn:
+                conn.row_factory = sqlite3.Row
+                for migration in MIGRATIONS:
+                    if migration.version > 53:
+                        break
+                    migration.apply(conn)
+                _set_schema_user_version(conn, 53)
+            with closing(open_connection(db)) as conn:
+                self.assertEqual(schema_user_version(conn), migrations_mod.CURRENT_SCHEMA_VERSION)
+                self.assertIsNotNone(conn.execute("select 1 from commerce_receipts limit 1").description)
 
 
 def _legacy_db() -> tuple[Path, sqlite3.Connection]:

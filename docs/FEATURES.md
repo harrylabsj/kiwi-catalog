@@ -170,6 +170,16 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 - 队列满 → fail-closed（注册仍成功但显式标注未入队，可稍后 verify）；
 - 单任务异常不杀 worker（并发预算不丢失）。
 
+<a id="verification-queue-operations"></a>
+
+**队列运维。** 同一数据库只运行一个调度器。异常退出后，可用
+`kiwi-catalog --db /path/to/catalog.sqlite catalog verification-queue list` 列出未决任务。
+确认业务写入是否已经提交，并在调度器与执行线程都退出后，用
+`catalog verification-queue resolve --task-id <id> --outcome completed|discarded`
+记录结果，然后启动服务。队列在数据库目录中以 `<db>.verification-worker.sqlite`
+持有进程锁。服务账号需要写入该目录，运行时应保留锁文件。进程退出或被
+SIGKILL 终止后，内核释放数据库锁；锁文件仍可能留在目录中。
+
 ### 3.4 profile 抓取（SSRF-safe fetcher）
 
 - socket 级防护：先解析全部 IP 逐一校验（含 IPv4-mapped IPv6、CGNAT、
@@ -186,12 +196,15 @@ unreachable > stale > level），legacy 消费方与指标继续读它。任何�
 verified 级别是**自证语义**，消费方须按证据强度理解（审查 P2 明确化）：
 
 - **domain_verified**：证明「canonical 域上两个 well-known 路径返回
-  200/304」**且**域名发布了一份回指**本 catalog_agent 行**的一次性
+  200/304」**且**域名发布了一份回指**本 catalog_agent 行**的
   challenge（`https://{domain}/.well-known/kiwi-catalog-agent.json`，
   含 `catalog_agent_id` 与 `challenge`）。签发/读取：
   `GET /v1/agent-catalog/agents/{id}/domain-challenge` 或
-  `kiwi-catalog catalog challenge <id>`。每次验证都会重新读取比对，文件
-  撤掉/换 token 即降级。
+  `kiwi-catalog catalog challenge <id>`。站点发布后的 challenge 可公开读取，
+  签发后 90 天到期。到期前用 `kiwi-catalog catalog challenge <id> --rotate` 或
+  管理员 `POST /v1/agent-catalog/agents/{id}/domain-challenge/rotate` 签发新值，
+  替换域名上的文件后重新验证。文件撤下、凭据失效或到期会在复验时反映到状态；
+  域名移交或怀疑泄漏时应立即轮换。
   存量说明：升级前已通过 domain 阶段的非 hosted 行标记为 `legacy`，保持旧
   语义且不阻止新规则；**新注册行**没有 challenge 一律不能通过 domain 阶段。
   未绑定的 `legacy` 行在 owner 读取 challenge 或发起 claim 时会自动轮换签发
@@ -212,6 +225,13 @@ rank 0 均按此语义解读。后续版本计划在 commerce 阶增加对 UCP e
 的存活探测以提升证据强度。
 
 ## 4. 治理与安全
+
+### 时间戳约定
+
+业务状态和迁移使用秒级带时区 UTC ISO 文本。限流的窗口和清理字段使用
+不带后缀的 UTC ISO 文本，保持历史比较口径。商家公开动态使用带时区的
+微秒级 UTC ISO 文本，并在同一商家内严格递增，以推进订阅水位。
+写入或比较同一字段时沿用该字段的格式。
 
 ### 4.1 认证
 
@@ -282,7 +302,8 @@ kiwi-catalog catalog search|get|register|verify|refresh|claim|suspend|reinstate|
 
 - **容器**：`Dockerfile`（SQLite 落持久卷）；
 - **VM**：`deploy/systemd/kiwi-catalog.service`（systemd 守护 + 环境文件）；
-- **多实例**：PG + Redis 限流是 P3/P5 接缝（未实现，单实例 SQLite 为当前形态）；
+- **存储**：SQLite 是当前服务支持的后端。PostgreSQL 与 Redis 接缝保留为单独工作；
+  当前 SQL 和历史迁移面向 SQLite。
 - 目标形态是 VM/容器（fetcher 需要真实网络栈），**不要在无网络栈的
   serverless（如 Cloudflare Workers）上部署**。
 

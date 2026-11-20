@@ -17,7 +17,7 @@ class SmallCapacityShutdownTest(unittest.TestCase):
         q._pending.maxsize = 1
         for agent in ("a", "b"):
             q.enqueue(agent)
-            self.assertTrue(_wait_until(lambda: bool(_starts(h.events, agent, "verify"))))
+            self.assertTrue(_wait_until(lambda agent=agent: bool(_starts(h.events, agent, "verify"))))
         entered, resume, done = threading.Event(), threading.Event(), threading.Event()
         real_set = q._shutdown.set
 

@@ -39,7 +39,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from kiwi_catalog.core.errors import NotFoundError, ValidationError
+from kiwi_catalog.core.errors import ConflictError, NotFoundError, ValidationError
 from kiwi_catalog.db.session import decode_json, encode_json, now_iso
 from kiwi_catalog.services import merchant_public_events as events_service
 
@@ -250,18 +250,32 @@ def validate_shop_url(raw: str) -> str:
         return ""
     if len(url) > _MAX_SHOP_URL:
         raise ValidationError("shop_url too long")
-    parsed = urllib.parse.urlparse(url)
+    if "\\" in url or any(ord(char) <= 32 or ord(char) == 127 for char in url):
+        raise ValidationError("shop_url contains ambiguous URL characters")
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").encode("idna").decode("ascii").rstrip(".").lower()
+        _ = parsed.port
+    except (ValueError, UnicodeError) as exc:
+        raise ValidationError("shop_url contains an invalid host or port") from exc
     if parsed.scheme not in ("http", "https"):
         raise ValidationError("shop_url must be an http or https URL")
-    host = parsed.hostname or ""
-    if not host:
+    if not host or "%" in host:
         raise ValidationError("shop_url must include a host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValidationError("shop_url must not contain user credentials")
     try:
         ip = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
-        ip = None
-    if ip is not None and not ip.is_global:
-        raise ValidationError("shop_url must not point to a private or internal address")
+        # Browsers interpret numeric final labels as IPv4, including
+        # shortened, hexadecimal and integer forms. Require canonical IPs.
+        if re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]*)", host.rsplit(".", 1)[-1]):
+            raise ValidationError("shop_url must use canonical IP notation") from None
+        if host == "localhost" or host.endswith(".localhost"):
+            raise ValidationError("shop_url must not point to a private or internal address") from None
+    else:
+        if not ip.is_global or ip.is_multicast:
+            raise ValidationError("shop_url must not point to a private or internal address")
     return url
 
 
@@ -831,6 +845,8 @@ def upsert_publication(
     同一商家同名商品的重复发布更新既有 published 行；draft 使用独立行，避免
     未确认内容污染公开快照。``publish`` 动作置 published + published_at 并递增版本。
     """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     now = now_iso()
     # 草稿必须是独立行；保存草稿不能改变当前 published 快照。
     existing = _find_by_merchant_title(
@@ -841,12 +857,13 @@ def upsert_publication(
         publication_id = new_publication_id()
         status = "published" if action == "publish" else "draft"
         published_at = now if action == "publish" else ""
-        conn.execute(
+        inserted = conn.execute(
             "insert into merchant_publications("
             " publication_id, merchant_id, status, source_kind,"
             " merchant_display_name, shop_platform, shop_url, title, category,"
             " summary, faq_json, published_at, expires_at, version, created_at, updated_at)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)"
+            " on conflict do nothing",
             (
                 publication_id,
                 merchant_id,
@@ -865,6 +882,8 @@ def upsert_publication(
                 now,
             ),
         )
+        if inserted.rowcount != 1:
+            raise ConflictError("a publication with this title already exists")
         row = get_publication(conn, publication_id)
         assert row is not None
         if action == "publish":

@@ -26,8 +26,8 @@ stacks continue to share the wrappers in ``api.route_table``.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +39,17 @@ from kiwi_catalog.api.handlers import runtime_keepalive as runtime_keepalive_han
 from kiwi_catalog.api.handlers import public_merchant as public_merchant_handlers
 from kiwi_catalog.api.handlers import service_status as service_status_handlers
 from kiwi_catalog.api.handlers import trade_platforms as trade_platforms_handlers
-from kiwi_catalog.api.limits import JSON_DEPTH_ERROR, max_request_body_bytes, validate_payload
-from kiwi_catalog.api.ip_trust import resolve_client_ip
+from kiwi_catalog.api.limits import decode_request_body, max_request_body_bytes
+from kiwi_catalog.api.transport import (
+    BODY_METHODS,
+    RESPONSE_META_FIELDS,
+    SECURITY_HEADERS,
+    redirect_location,
+    strip_transport_fields,
+)
+from kiwi_catalog.api.ip_trust import resolve_asgi_client_ip
 from kiwi_catalog.api.extensions import run_fastapi_hooks
+from kiwi_catalog.api.route_matching import route_shape
 from kiwi_catalog.services.buyer_origin import derive_buyer_source
 from kiwi_catalog.api.route_table import (
     _activate_card_publication,
@@ -102,6 +110,7 @@ from kiwi_catalog.api.route_table import (
     _v1_withdraw_listing,
     _v1_withdraw_merchant_publication,
     _verify_catalog_agent,
+    extension_routes,
     resolve_route,
 )
 from kiwi_catalog.core.errors import PayloadTooLargeError, ValidationError
@@ -117,7 +126,7 @@ try:
     from fastapi import Request as _FastAPIRequest
 except ImportError:
     FastAPI = None  # type: ignore[assignment,misc]
-    _Header = None  # type: ignore[assignment,misc]
+    _Header = None  # type: ignore[assignment]
     _FastAPIRequest = None  # type: ignore[assignment,misc]
 
 
@@ -155,9 +164,50 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     400) so both stacks behave identically on the wire.
     """
     from fastapi.responses import JSONResponse, Response
+    from starlette.routing import Match
 
     from kiwi_catalog.api import auth as api_auth
     from kiwi_catalog.discovery.cache import compute_etag, etag_matches
+
+    class CatalogResponse(JSONResponse):
+        """Render transport markers on both shared and native extension routes."""
+
+        def __init__(
+            self, content: Any, status_code: int = 200, headers: Mapping[str, str] | None = None,
+            media_type: str | None = None, background: Any = None,
+        ) -> None:
+            cookies: Iterable[str] = ()
+            redirect = None
+            self._raw_transport_body = False
+            outgoing = dict(headers or {})
+            if isinstance(content, dict) and RESPONSE_META_FIELDS.intersection(content):
+                status_code = int(content.get("__status__", status_code))
+                redirect = content.get("__redirect__")
+                html = content.get("__html__")
+                cookies = content.get("__cookies__") or ()
+                if content.get("__no_store__") or cookies or redirect is not None or html is not None:
+                    outgoing["cache-control"] = "no-store"
+                if redirect is not None:
+                    outgoing["location"] = redirect_location(redirect)
+                    self._raw_transport_body = True
+                    status_code, content = 302, b""
+                elif html is not None:
+                    self._raw_transport_body = True
+                    media_type, content = "text/html", str(html)
+                else:
+                    content = {key: value for key, value in content.items() if key not in RESPONSE_META_FIELDS}
+            super().__init__(content, status_code, outgoing, media_type, background)
+            if redirect is not None and "content-type" in self.headers:
+                del self.headers["content-type"]
+            for cookie in cookies:
+                self.headers.append("set-cookie", str(cookie))
+
+        def render(self, content: Any) -> bytes:
+            if self._raw_transport_body:
+                return bytes(Response.render(self, content))
+            return super().render(content)
+
+    app.router.default_response_class = CatalogResponse
 
     @app.middleware("http")
     async def _parity_middleware(request: _FastAPIRequest, call_next: Any) -> Any:
@@ -187,11 +237,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             # 与 fallback 栈同一 IP 语义：仅可信代理(默认回环)采信 XFF——
             # 生产在 Caddy 同机反代后,直连对端恒为 127.0.0.1,不解析 XFF
             # 会让 ip_prefix 全部退化为 127.0.0.0。
-            client = getattr(request, "client", None)
-            direct_peer = str(client.host or "") if client is not None else None
-            client_ip = resolve_client_ip(
-                request.headers.get("x-forwarded-for", ""), direct_peer
-            )
+            client_ip = resolve_asgi_client_ip(request.scope)
             access_log_service.record_http_access(
                 db_path,
                 method=request.method,
@@ -204,78 +250,55 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
                 result_count=final_result_count,
             )
 
+        def _request_error(status: int, error: str) -> Any:
+            nonlocal final_status
+            final_status = status
+            return JSONResponse({"ok": False, "error": error}, status_code=status, headers=SECURITY_HEADERS)
+
         try:
-            # Match fallback routing order: unknown paths and disallowed methods
-            # must resolve to 404/405 before attempting to parse an untrusted body.
-            # Otherwise a malformed body can mask the route error on only one stack.
-            path_known, method_allowed = resolve_route(request.method, request.url.path)
-            if request.method in ("POST", "PUT", "PATCH") and path_known and method_allowed:
+            # Resolve routing before parsing, including native extension hooks
+            # whose paths are not declared in the shared route table.
+            _, method_allowed = resolve_route(request.method, request.url.path)
+            if not method_allowed:
+                method_allowed = any(
+                    route.matches(request.scope)[0] == Match.FULL
+                    for route in app.router.routes
+                )
+            if request.method in BODY_METHODS and method_allowed:
                 maximum = max_request_body_bytes()
-                content_length = request.headers.get("content-length")
-                if content_length:
-                    try:
-                        if int(content_length) > maximum:
-                            final_status = 413
-                            return JSONResponse(
-                                {"ok": False, "error": "request body is too large"},
-                                status_code=413,
-                            )
-                    except ValueError:
-                        pass
+                try:
+                    content_length = int(request.headers.get("content-length", "") or 0)
+                except ValueError:
+                    content_length = 0
+                if content_length > maximum:
+                    return _request_error(413, "request body is too large")
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in request.stream():
                     total += len(chunk)
                     if total > maximum:
-                        final_status = 413
-                        return JSONResponse(
-                            {"ok": False, "error": "request body is too large"},
-                            status_code=413,
-                        )
+                        return _request_error(413, "request body is too large")
                     chunks.append(chunk)
                 body = b"".join(chunks) or b"{}"
                 try:
-                    parsed = json.loads(body.decode("utf-8"))
-                except RecursionError:
-                    # 超深嵌套在解析阶段触发 RecursionError：返回 400，不能
-                    # 逃逸成 500（fallback 同口径、同文案）。
-                    final_status = 400
-                    return JSONResponse(
-                        {"ok": False, "error": JSON_DEPTH_ERROR}, status_code=400
-                    )
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    final_status = 400
-                    return JSONResponse(
-                        {"ok": False, "error": "invalid JSON request body"}, status_code=400
-                    )
-                if not isinstance(parsed, dict):
-                    final_status = 400
-                    return JSONResponse(
-                        {"ok": False, "error": "JSON request body must be an object"},
-                        status_code=400,
-                    )
-                try:
-                    validate_payload(parsed)
+                    request.state.catalog_payload = decode_request_body(body)
                 except PayloadTooLargeError as exc:
-                    final_status = 413
-                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=413)
+                    return _request_error(413, str(exc))
                 except ValidationError as exc:
-                    final_status = 400
-                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+                    return _request_error(400, str(exc))
                 # stream() 已消费——把缓存 body 塞回 receive，让 FastAPI 依赖正常解析
                 async def _receive() -> dict[str, Any]:
                     return {"type": "http.request", "body": body, "more_body": False}
 
-                request._receive = _receive  # type: ignore[attr-defined]
-                request._stream_consumed = False  # type: ignore[attr-defined]
+                request._receive = _receive
+                request._stream_consumed = False
 
             response = await call_next(request)
             final_status = response.status_code
 
-            # 安全响应头（KC-SEC-01 硬化，与 fallback _send_json 对齐）
-            response.headers["x-content-type-options"] = "nosniff"
-            response.headers["referrer-policy"] = "no-referrer"
-            response.headers["content-security-policy"] = "frame-ancestors 'none'"
+            response.headers.update(SECURITY_HEADERS)
+            if response.headers.get("content-type", "").startswith("text/html"):
+                response.headers["cache-control"] = "no-store"
 
             # GET 条件请求（fallback §18：仅成功表示 + 显式 If-None-Match）；
             # no-store 路由（受控凭据分发）不参与缓存与条件请求。
@@ -293,15 +316,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
                     ):
                         body = b"".join([chunk async for chunk in response.body_iterator])
                         final_result_count = access_log_service.result_count_from_body(body)
-                        return Response(
-                            content=body,
-                            status_code=200,
-                            headers=dict(response.headers),
-                            media_type=response.media_type,
-                        )
+                        reconstructed = Response(content=body, status_code=200)
+                        reconstructed.raw_headers = list(response.raw_headers)
+                        return reconstructed
                     return response
                 body = b"".join([chunk async for chunk in response.body_iterator])
                 etag = compute_etag(body)
+                if response.headers.getlist("set-cookie"):
+                    reconstructed = Response(content=body, status_code=200)
+                    reconstructed.raw_headers = list(response.raw_headers)
+                    final_result_count = access_log_service.result_count_from_body(body)
+                    return reconstructed
                 headers = dict(response.headers)
                 headers["etag"] = etag
                 if_none_match = request.headers.get("if-none-match", "")
@@ -366,10 +391,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         payload["_buyer_source"] = derive_buyer_source(
             {str(key).lower(): str(value) for key, value in request.headers.items()}
         )
-        client = getattr(request, "client", None)
-        payload["_client_ip"] = resolve_client_ip(
-            request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None
-        )
+        payload["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return payload
 
     @app.get("/health")
@@ -450,12 +472,20 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.post("/v1/agent-catalog/agents/register")
     def register_catalog_agent(
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
+        # 审查 P1-1：公开 register 的未认证调用按传输层 IP 分桶，FastAPI 栈必须
+        # 和 fallback 一样先剥客户端伪造的 _client_ip 再注入 server 侧解析值，
+        # 否则 payload 里没有 _client_ip → 全体落到共享常量桶（轮换 junk token
+        # 仍被 IP 桶约束，但没有 per-IP 预算）。
         return _register_catalog_agent(
-            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path,
+            api_auth.payload_with_auth(
+                _rate_limit_ip_payload(request, payload), authorization, idempotency_key
+            ),
         )
 
     @app.post("/v1/agent-catalog/agents/{catalog_agent_id}/heartbeat")
@@ -587,12 +617,17 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.post("/v1/agents/register")
     def v1_register_agent(
+        request: _FastAPIRequest,
         payload: dict[str, Any],
         authorization: str = AUTHORIZATION_HEADER,
         idempotency_key: str = IDEMPOTENCY_KEY_HEADER,
     ) -> dict[str, Any]:
+        # 审查 P1-1：与 /v1/agent-catalog/agents/register 同口径注入可信 IP。
         return _v1_register_agent(
-            db_path, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+            db_path,
+            api_auth.payload_with_auth(
+                _rate_limit_ip_payload(request, payload), authorization, idempotency_key
+            ),
         )
 
     @app.post("/v1/agents/{catalog_agent_id}/refresh")
@@ -633,13 +668,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     # 对语义字段签名）。两栈的共同口径在 api_auth.payload_with_auth 第 4 参。
     def _client_payload(request: _FastAPIRequest) -> dict[str, Any]:
         """公开读的 payload：只带客户端 IP（限流分桶用，与 parity 中间件同一解析规则）。"""
-        client = getattr(request, "client", None)
-        direct_peer = str(client.host or "") if client is not None else None
-        return {
-            "_client_ip": resolve_client_ip(
-                request.headers.get("x-forwarded-for", ""), direct_peer
-            )
-        }
+        return {"_client_ip": resolve_asgi_client_ip(request.scope)}
 
     def _cloud_payload(payload: dict[str, Any], request: _FastAPIRequest) -> dict[str, Any]:
         merged = api_auth.payload_with_auth(
@@ -652,11 +681,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         # 直连对端）。与 fallback 栈及账号限流同口径：先剥除客户端可伪造值
         # 再注入 server 侧解析结果。
         merged.pop("_client_ip", None)
-        client = getattr(request, "client", None)
-        merged["_client_ip"] = resolve_client_ip(
-            request.headers.get("x-forwarded-for", ""),
-            str(client.host or "") if client is not None else None,
-        )
+        merged["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return merged
 
     @app.get("/v1/agents/{catalog_agent_id}/agent-card.json")
@@ -781,7 +806,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, payload: dict[str, Any], request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.update_consent(
-            db_path, catalog_agent_id, _merchant_payload(request, payload)
+            db_path, catalog_agent_id, _account_payload(request, payload)
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})
@@ -791,7 +816,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         catalog_agent_id: str, request: _FastAPIRequest
     ) -> _JSONResponse:
         result = runtime_keepalive_handlers.read_consent(
-            db_path, catalog_agent_id, _merchant_payload(request, {})
+            db_path, catalog_agent_id, _account_payload(request, {})
         )
         result.pop("__no_store__", None)
         return _JSONResponse(result, headers={"cache-control": "no-store"})
@@ -942,7 +967,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         return _v1_submit_application(
             db_path,
             _account_payload(
-                request, api_auth.payload_with_auth(payload, authorization, idempotency_key)
+                request, payload
             ),
         )
 
@@ -976,11 +1001,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
             request.headers.get("idempotency-key", ""),
         )
         merged.pop("_client_ip", None)
-        client = getattr(request, "client", None)
-        merged["_client_ip"] = resolve_client_ip(
-            request.headers.get("x-forwarded-for", ""),
-            str(client.host or "") if client is not None else None,
-        )
+        merged["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return merged
 
     @app.post("/v1/commerce/receipts")
@@ -1005,43 +1026,29 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     from fastapi.responses import JSONResponse as _JSONResponse
 
     def _account_response(result: dict[str, Any]) -> _JSONResponse:
-        """账号 handler 结果 → JSONResponse；__cookies__ 下发 Set-Cookie。"""
-        cookies = result.pop("__cookies__", None) or []
-        headers = {"set-cookie": str(cookies[0])} if cookies else None
-        return _JSONResponse(result, headers=headers)
+        return CatalogResponse(result)
 
     def _account_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
-        cookie = request.headers.get("cookie", "")
-        body = dict(body or {})
-        for reserved in ("_cookie", "_origin", "_referer"):
-            body.pop(reserved, None)
-        if cookie:
-            body["_cookie"] = cookie
-        body["_origin"] = request.headers.get("origin", "")
-        body["_referer"] = request.headers.get("referer", "")
-        return body
-
-    def _merchant_payload(request: _FastAPIRequest, body: dict[str, Any]) -> dict[str, Any]:
-        """商家侧载荷：cookie 会话 + Authorization 头（商家连接器凭据 cmt_…）。
-
-        与 fallback 栈的头合并对齐——否则 FastAPI 栈下凭据类请求取不到
-        ``_auth_token``，只有浏览器会话能通过。
-        """
-        return api_auth.payload_with_auth(
-            _account_payload(request, body), request.headers.get("authorization", ""), ""
+        payload = api_auth.payload_with_auth(
+            strip_transport_fields(body or {}),
+            request.headers.get("authorization", ""),
+            request.headers.get("idempotency-key", ""),
+            request.headers.get(BINDING_JWS_HEADER_NAME, ""),
         )
+        cookie = request.headers.get("cookie", "")
+        if cookie:
+            payload["_cookie"] = cookie
+        payload["_origin"] = request.headers.get("origin", "")
+        payload["_referer"] = request.headers.get("referer", "")
+        payload["_client_ip"] = resolve_asgi_client_ip(request.scope)
+        return payload
 
     def _rate_limit_ip_payload(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         """review 2-30（返修）：限流分桶 IP 只信 server 侧解析（trusted XFF +
         直连 peer）——payload 携带的 _client_ip 是客户端可伪造值，先剥除再注入，
         否则轮换伪造 IP 即可跨桶打穿 per-IP 限流。"""
-        body = dict(payload or {})
-        body.pop("_client_ip", None)
-        client = getattr(request, "client", None)
-        body["_client_ip"] = resolve_client_ip(
-            request.headers.get("x-forwarded-for", ""),
-            str(client.host or "") if client is not None else None,
-        )
+        body = strip_transport_fields(payload or {}, path=request.url.path)
+        body["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return body
 
     @app.post("/v1/accounts/register/code")
@@ -1096,7 +1103,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
 
     @app.get("/v1/accounts/me/service-status")
     def v1_account_service_status(request: _FastAPIRequest) -> dict[str, Any]:
-        return service_status_handlers.service_status(db_path, _merchant_payload(request, {}))
+        return service_status_handlers.service_status(db_path, _account_payload(request, {}))
 
     @app.post("/v1/accounts/token-request")
     def v1_account_token_request(
@@ -1131,16 +1138,14 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_create_device_enrollment(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload or {})
         body.pop("_client_ip", None)
-        client = getattr(request, "client", None)
-        body["_client_ip"] = resolve_client_ip(request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None)
+        body["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return _v1_create_device_enrollment(db_path, api_auth.payload_with_auth(body, "", "", request.headers.get(BINDING_JWS_HEADER_NAME, "")))
 
     @app.post("/v1/enrollments/device/token")
     def v1_device_enrollment_token(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(payload or {})
         body.pop("_client_ip", None)
-        client = getattr(request, "client", None)
-        body["_client_ip"] = resolve_client_ip(request.headers.get("x-forwarded-for", ""), str(client.host or "") if client else None)
+        body["_client_ip"] = resolve_asgi_client_ip(request.scope)
         return _v1_device_enrollment_token(db_path, api_auth.payload_with_auth(body, "", "", request.headers.get(BINDING_JWS_HEADER_NAME, "")))
 
     @app.get("/v1/issuer-keys")
@@ -1219,7 +1224,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_create_merchant_publication(
         request: _FastAPIRequest, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        return _v1_create_merchant_publication(db_path, _merchant_payload(request, payload))
+        return _v1_create_merchant_publication(db_path, _account_payload(request, payload))
 
     @app.get("/v1/merchant-publications/search")
     def v1_search_merchant_publications(request: _FastAPIRequest) -> dict[str, Any]:
@@ -1232,7 +1237,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     @app.get("/v1/merchant-publications/stats")
     def v1_merchant_publication_stats(request: _FastAPIRequest) -> dict[str, Any]:
         # 商家本人匿名汇总（会话鉴权；不返回任何买家身份）
-        return _v1_merchant_publication_stats(db_path, _merchant_payload(request, {}))
+        return _v1_merchant_publication_stats(db_path, _account_payload(request, {}))
 
     @app.get("/v1/merchant-publications/{publication_id}")
     def v1_get_merchant_publication(
@@ -1240,7 +1245,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     ) -> dict[str, Any]:
         # 可选会话：商家本人可见自己的 draft/withdrawn（匿名仅 published）
         return _v1_get_merchant_publication(
-            db_path, publication_id, _merchant_payload(request, {})
+            db_path, publication_id, _account_payload(request, {})
         )
 
     @app.post("/v1/merchant-publications/{publication_id}/withdraw")
@@ -1250,7 +1255,7 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         return _v1_withdraw_merchant_publication(
-            db_path, publication_id, _merchant_payload(request, payload)
+            db_path, publication_id, _account_payload(request, payload)
         )
 
     # ── 公开商家主页（匿名 HTML；与 fallback 路由表同一 handler）──────────
@@ -1378,6 +1383,24 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
         headers = {"cache-control": "no-store"} if no_store else None
         return _JSONResponse(result, headers=headers)
 
-    # 扩展路由挂钩（docs/extensions.md）：基表注册完再让扩展包挂自己的
-    # FastAPI 路由；fail-soft 由 run_fastapi_hooks 负责。
-    run_fastapi_hooks(app, db_path)
+    # Native hooks can override their own shared declaration.
+    shared_routes = extension_routes()
+    overridden = run_fastapi_hooks(app, db_path, shared_routes)
+
+    def _extension_endpoint(handler: Any) -> Any:
+        def endpoint(request: _FastAPIRequest) -> Any:
+            payload = _account_payload(request, getattr(request.state, "catalog_payload", {}))
+            buyer_id = request.headers.get("x-buyer-id")
+            if buyer_id:
+                payload["_buyer_id"] = buyer_id
+            payload["_buyer_source"] = derive_buyer_source(dict(request.headers))
+            result = handler(db_path, payload, _query_params_from_request(request), **request.path_params)
+            return CatalogResponse(result)
+
+        return endpoint
+
+    for route in shared_routes:
+        shape = route_shape(route.path_template)
+        methods = sorted(method for method in route.methods if (shape, method) not in overridden)
+        if methods:
+            app.add_api_route(route.path_template, _extension_endpoint(route.handler), methods=methods)

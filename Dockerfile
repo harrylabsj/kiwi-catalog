@@ -11,14 +11,15 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY uv.lock ./
-COPY README.md LICENSE ./
-COPY kiwi_catalog ./kiwi_catalog
 
 RUN python -m pip install --no-cache-dir "uv==0.10.6" \
     && uv export --locked --no-dev --extra api --no-emit-project --format requirements.txt > /tmp/requirements.txt \
     && python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
-    && python -m pip install --no-cache-dir --no-deps . \
     && rm -f /tmp/requirements.txt
+
+COPY README.md LICENSE ./
+COPY kiwi_catalog ./kiwi_catalog
+RUN python -m pip install --no-cache-dir --no-deps .
 
 # Keep the SQLite volume writable after dropping privileges.
 RUN mkdir -p /data && chown kiwi:kiwi /data

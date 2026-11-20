@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from kiwi_catalog.agent_catalog.state_domains import REJECTED, STALE, UNREACHABLE
+from kiwi_catalog.db.session import iso_from_epoch as iso_from_epoch
 
 
 def outcome_for(target_status: str) -> str:
@@ -14,8 +13,3 @@ def outcome_for(target_status: str) -> str:
         UNREACHABLE: "unreachable",
         STALE: "stale",
     }.get(target_status, "failed")
-
-
-def iso_from_epoch(timestamp: float) -> str:
-    """Format epoch seconds as the pipeline's second-precision UTC timestamp."""
-    return datetime.fromtimestamp(timestamp, tz=UTC).replace(microsecond=0).isoformat()

@@ -112,7 +112,7 @@ class WallDeadlineTest(unittest.TestCase):
             return real_resolver(*args, **kwargs)
 
         try:
-            with mock.patch.object(fetcher_mod.socket, "getaddrinfo", side_effect=counting_resolver):
+            with mock.patch.object(fetcher_mod, "lookup_address_infos", side_effect=counting_resolver):
                 started = time.monotonic()
                 with self.assertRaises(FetchError):
                     self._permissive().fetch(f"{srv.base}/profile.json")
@@ -140,7 +140,7 @@ class WallDeadlineTest(unittest.TestCase):
             # 上界是 caller 预算本身，不是队列位置。
             self.assertLess(elapsed, 0.7, "admission 拒绝未受 caller 预算约束")
         finally:
-            for slot in slots:
+            for _slot in slots:
                 fetcher_mod._DNS_ADMISSION.release()
         # 释放后恢复可解析（真实 resolver，127.0.0.1 字面量即时返回）
         ip = _resolve_and_validate("127.0.0.1", 443, deadline=time.monotonic() + 1.0)

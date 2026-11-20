@@ -43,6 +43,7 @@ from typing import Any
 import jsonschema
 from jsonschema import ValidationError as SchemaValidationError
 
+from kiwi_catalog.api.transport import COMMON_TRANSPORT_FIELDS
 from kiwi_catalog.core.errors import ValidationError
 
 # 认证/幂等字段在校验前剥离（与 listings contracts.py 的 _AUTH_FIELDS 同模式）。
@@ -59,14 +60,7 @@ _REGISTER_AUTH_FIELDS = {
 # 客户端自带的同名键已在 api_auth.payload_with_auth 与 fallback 注入前剥除，
 # 因此这里剔除的是**服务端注入值**——schema 仍是 additionalProperties:false，
 # 客户端伪造未知字段照旧 422/400；双栈也就不会因为可信注入而误判注册载荷。
-_REGISTER_TRANSPORT_FIELDS = {
-    "_cookie",
-    "_origin",
-    "_referer",
-    "_buyer_id",
-    "_buyer_source",
-    "_client_ip",
-}
+_REGISTER_TRANSPORT_FIELDS = COMMON_TRANSPORT_FIELDS
 
 _REGISTER_INPUT_SCHEMA: jsonschema.Draft7Validator | None = None
 

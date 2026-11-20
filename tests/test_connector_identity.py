@@ -41,7 +41,7 @@ from kiwi_catalog.core.errors import PermissionDenied
 from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services import connector_identity as identity_service
 
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 CONNECTOR_TOKEN = "test-connector-token"
 RETURN_URL = "https://connector.kiwi.example/connect/callback"
 

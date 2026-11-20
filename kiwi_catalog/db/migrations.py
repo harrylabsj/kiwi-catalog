@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 57
+CURRENT_SCHEMA_VERSION = 59
 
 
 @dataclass(frozen=True)
@@ -292,6 +292,14 @@ def migration_007_merchant_single_agent(conn: sqlite3.Connection) -> None:
         "create unique index if not exists idx_catalog_agents_merchant_unique"
         " on catalog_agents(merchant_id) where merchant_id != ''"
     )
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """SQLite 表存在性检查（索引迁移的前提；部分 schema 夹具可能缺表）。"""
+    row = conn.execute(
+        "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+    ).fetchone()
+    return row is not None
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -1985,6 +1993,72 @@ def migration_056_listing_permanent(conn: sqlite3.Connection) -> None:
     )
 
 
+_AGENT_ENDPOINT_INDEX_DDL: tuple[tuple[str, str], ...] = (
+    (
+        "agent_endpoints",
+        """
+create unique index if not exists idx_agent_endpoints_agent_kind_unique
+        on agent_endpoints(catalog_agent_id, kind)
+    """,
+    ),
+    (
+        "agent_verifications",
+        """
+create index if not exists idx_agent_verifications_agent_checked
+        on agent_verifications(catalog_agent_id, checked_at)
+    """,
+    ),
+    (
+        "agent_profile_snapshots",
+        """
+create index if not exists idx_agent_profile_snapshots_agent
+        on agent_profile_snapshots(catalog_agent_id, snapshot_id)
+    """,
+    ),
+    (
+        "agent_trust_observations",
+        """
+create index if not exists idx_agent_trust_observations_agent
+        on agent_trust_observations(catalog_agent_id, observed_at)
+    """,
+    ),
+)
+
+
+def migration_058_agent_endpoint_uniqueness(conn: sqlite3.Connection) -> None:
+    """审查 P1-3：agent_endpoints 的 (catalog_agent_id, kind) 唯一约束 + 证据表索引。
+
+    三处 upsert（sqlite_repository.upsert_profile_endpoints、
+    services/agent_endpoints._upsert_a2a_endpoint、验证服务的端点写回）此前都是
+    "先 select 后 insert"，而表上只有 endpoint_id 主键：HTTP handler
+    （sync_cloud_endpoints）与验证服务并发时两个连接都 select 到空 → 双 insert →
+    同一 agent 出现两条 agent_card/a2a 行。此后 update 分支只改首行（无 ORDER BY，
+    rowid 顺序即首次插入行），重复行永不自愈——list_endpoints 返回两行，公开投影
+    的 endpoint 可能是旧值。
+
+    修法（与 v7/v11 的 fail-closed 检测不同——重复行不是运营数据冲突，而是竞态
+    产物，合并是确定性的）：先合并历史重复行（按 rowid 保留首行，即历史 update
+    分支一直在改的那行），再建唯一索引；upsert 改为 ON CONFLICT 原子写。
+
+    顺带补齐三张 append-only 证据表的 (catalog_agent_id, 时间/序号) 索引：
+    agent_verifications/agent_profile_snapshots/agent_trust_observations 此前只有
+    自增主键，按 agent 的读取是全表扫。
+
+    新库也经过本迁移。唯一索引必须在这里去重后创建，因为 SCHEMA 中的 DDL
+    会在新库和旧库上先于迁移执行。
+    """
+    conn.execute(
+        "delete from agent_endpoints where endpoint_id not in ("
+        " select min(endpoint_id) from agent_endpoints"
+        " group by catalog_agent_id, kind)"
+    )
+    for table, statement in _AGENT_ENDPOINT_INDEX_DDL:
+        # 唯一索引是正确性约束，必须建；证据表索引只是性能补偿——部分/裁剪
+        # schema（测试夹具、单迁移复现）里没有那些表时跳过，不让整条迁移链失败。
+        if table == "agent_endpoints" or _table_exists(conn, table):
+            conn.execute(statement)
+
+
 def migration_057_commerce_receipts(conn: sqlite3.Connection) -> None:
     """买家识别与交易回执 · C1：独立回执存储。
 
@@ -2042,6 +2116,24 @@ create index if not exists idx_commerce_receipts_agreement
         on commerce_receipts(merchant_id, merchant_agreement_id)
     """,
 ]
+
+
+def migration_059_operational_indexes(conn: sqlite3.Connection) -> None:
+    """Indexes for session expiry, retention, application status and domain lookups."""
+    for statement in (
+        "create index if not exists idx_account_sessions_account on account_sessions(account_id)",
+        "create index if not exists idx_account_sessions_expiry on account_sessions(expires_at)",
+        "create index if not exists idx_catalog_write_idempotency_status_updated"
+        " on agent_catalog_write_idempotency(status, updated_at)",
+        "create index if not exists idx_commerce_receipts_received on commerce_receipts(received_at)",
+        "create index if not exists idx_merchant_applications_status"
+        " on merchant_applications(status, application_id)",
+        "create trigger if not exists revoke_sessions_on_account_status_change"
+        " after update of status on merchant_accounts"
+        " when new.status != old.status"
+        " begin delete from account_sessions where account_id = new.account_id; end",
+    ):
+        conn.execute(statement)
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -2102,6 +2194,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(55, "listing_plan_tiers", migration_055_listing_plan_tiers),
     Migration(56, "listing_permanent", migration_056_listing_permanent),
     Migration(57, "commerce_receipts", migration_057_commerce_receipts),
+    Migration(58, "agent_endpoint_uniqueness", migration_058_agent_endpoint_uniqueness),
+    Migration(59, "operational_indexes", migration_059_operational_indexes),
 )
 
 

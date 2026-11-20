@@ -61,7 +61,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from kiwi_catalog.discovery._bounded_dns import BoundedResolver
+from kiwi_catalog.discovery._bounded_dns import BoundedResolver, DNS_LOOKUP_TIMEOUT_SECONDS, lookup_address_infos
 from kiwi_catalog.discovery.trust import TrustPolicy
 from kiwi_catalog.services.catalog_runtime_metrics import record_profile_fetch
 
@@ -77,6 +77,8 @@ _EXTRA_BLOCKED_V4 = [
     ipaddress.IPv4Network("0.0.0.0/8"),  # "This host on this network"
     ipaddress.IPv4Network("100.64.0.0/10"),  # CGNAT (RFC 6598)
     ipaddress.IPv4Network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
+    ipaddress.IPv4Network("192.0.0.0/24"),  # IETF protocol assignments
+    ipaddress.IPv4Network("224.0.0.0/4"),  # Multicast
     ipaddress.IPv4Network("240.0.0.0/4"),  # Class E reserved
     ipaddress.IPv4Network("198.51.100.0/24"),  # TEST-NET-2 (RFC 5737)
     ipaddress.IPv4Network("203.0.113.0/24"),  # TEST-NET-3 (RFC 5737)
@@ -284,41 +286,36 @@ def _port_of(parsed: Any, scheme: str) -> int:
 def _resolve_hostname(hostname: str, port: int, *, deadline: float | None = None) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     """Resolve *hostname* and return all IP addresses.
 
-    review 2-36（A316 收窄）：getaddrinfo 本身无超时——有 deadline 时在
-    worker 线程解析并以剩余预算等待，超时即 FetchError（总 deadline 贯穿
-    初始 DNS 阶段，DNS 挂起不再绕过 30s 上限）。
+    The caller's deadline bounds queueing/waiting. Each physical DNS
+    resolution has its own hard process timeout, even with multiple callers.
 
     Raises SSRFBlockError when the hostname cannot be resolved.
     """
     try:
-        if deadline is not None:
+        if deadline is None:
+            deadline = _time.monotonic() + DNS_LOOKUP_TIMEOUT_SECONDS
+        lookup_key = (hostname.lower(), port)
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            raise FetchError("total fetch duration exceeded before DNS resolution")
+        try:
+            future = _DNS_EXECUTOR.submit(
+                lookup_key, lookup_address_infos, hostname, port, admission_timeout=remaining,
+            )
+        except concurrent.futures.TimeoutError as exc:
+            raise FetchError("total fetch duration exceeded waiting for DNS admission") from exc
+        except Exception as exc:
+            raise FetchError(f"DNS submission failed: {exc}") from exc
+        try:
+            # Admission itself may have consumed the budget.
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
-                raise FetchError("total fetch duration exceeded before DNS resolution")
-            try:
-                future = _DNS_EXECUTOR.submit(
-                    socket.getaddrinfo, hostname, port, proto=socket.IPPROTO_TCP,
-                    admission_timeout=remaining,
-                )
-            except concurrent.futures.TimeoutError as exc:
-                raise FetchError("total fetch duration exceeded waiting for DNS admission") from exc
-            except Exception as exc:
-                raise FetchError(f"DNS submission failed: {exc}") from exc
-            try:
-                # Admission itself may have consumed the budget.
-                remaining = deadline - _time.monotonic()
-                if remaining <= 0:
-                    raise concurrent.futures.TimeoutError()
-                infos = future.result(timeout=remaining)
-            except concurrent.futures.TimeoutError as exc:
-                cancelled = future.cancel()
-                kind = "cancelled queued" if cancelled else "abandoned running"
-                raise FetchError(
-                    f"total fetch duration exceeded during DNS resolution ({kind}; "
-                    "running getaddrinfo finishes in background)"
-                ) from exc
-        else:
-            infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+                raise concurrent.futures.TimeoutError()
+            infos = future.result(timeout=remaining)
+        except concurrent.futures.TimeoutError as exc:
+            raise FetchError("total fetch duration exceeded during DNS resolution") from exc
+        finally:
+            _DNS_EXECUTOR.release(lookup_key, future)
     except socket.gaierror as exc:
         raise SSRFBlockError(f"Cannot resolve hostname '{hostname}': {exc}") from exc
 

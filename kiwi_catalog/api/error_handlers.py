@@ -32,12 +32,15 @@ import json
 import logging
 from typing import Any
 
+from kiwi_catalog.api.transport import SECURITY_HEADERS
 from kiwi_catalog.core.errors import (
     AuthError,
     ConflictError,
     GoneError,
     IdempotencyConflict,
+    MethodNotAllowedError,
     NotFoundError,
+    PayloadTooLargeError,
     PermissionDenied,
     RateLimitError,
     ShoppingCliError,
@@ -67,7 +70,7 @@ def register_exception_handlers(
     """
 
     def _error_response(status: int, exc: Exception) -> Any:
-        return json_response({"ok": False, "error": str(exc)}, status_code=status)
+        return json_response({"ok": False, "error": str(exc)}, status_code=status, headers=SECURITY_HEADERS)
 
     @app.exception_handler(AuthError)
     def _auth_error(_request: Any, exc: AuthError) -> Any:
@@ -100,6 +103,14 @@ def register_exception_handlers(
     @app.exception_handler(ValidationError)
     def _validation_error(_request: Any, exc: ValidationError) -> Any:
         return _error_response(400, exc)
+
+    @app.exception_handler(MethodNotAllowedError)
+    def _method_error(_request: Any, exc: MethodNotAllowedError) -> Any:
+        return _error_response(405, exc)
+
+    @app.exception_handler(PayloadTooLargeError)
+    def _payload_size_error(_request: Any, exc: PayloadTooLargeError) -> Any:
+        return _error_response(413, exc)
 
     @app.exception_handler(ShoppingCliError)
     def _shopping_error(_request: Any, exc: ShoppingCliError) -> Any:
@@ -150,5 +161,5 @@ def register_exception_handlers(
             "unhandled request error: %r", exc
         )
         return json_response(
-            {"ok": False, "error": "internal server error"}, status_code=500
+            {"ok": False, "error": "internal server error"}, status_code=500, headers=SECURITY_HEADERS
         )

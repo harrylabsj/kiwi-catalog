@@ -202,7 +202,7 @@ def validate_publish_payload(payload: dict[str, Any]) -> dict[str, Any]:
         canonical["source_product_ref"] = source_product_ref
     if publisher_listing_key is not None:
         canonical["publisher_listing_key"] = publisher_listing_key
-    for key, default in (
+    for key, _default in (
         ("summary", ""),
         ("brand", ""),
         ("source_revision", ""),

@@ -206,8 +206,7 @@ def _require_owner_token_for_merchant(
     """owner token 双路径校验（admin 可豁免）；返回 actor 串。
 
     随机 token 落库校验（docs §5）需要连接：调用点在 db_session 块内传
-    conn=；在块外传 db_path=（helper 自开短连接）；两者都缺省时退化为
-    HMAC 派生路径（行为同旧版）。
+    conn=；在块外传 db_path=（helper 自开短连接）。
     """
     try:
         api_auth.require_admin_token(payload, conn if conn is not None else db_path)
@@ -220,7 +219,7 @@ def _require_owner_token_for_merchant(
         with db_session(db_path) as token_conn:
             api_auth.require_merchant_token(payload, merchant_id, token_conn)
     else:
-        api_auth.require_merchant_token(payload, merchant_id, None)
+        raise AuthError("invalid owner token")
     return f"merchant:{merchant_id}"
 
 
@@ -492,7 +491,8 @@ def v1_publish_listing(db_path: str | Path, payload: dict[str, Any]) -> dict[str
                 payload, str(canonical.get("merchant_id") or ""), conn=conn
             )
             _reject_account_owner_token_listing(conn, str(canonical.get("merchant_id") or ""), actor)
-            actor_key = api_idempotency.catalog_write_actor_key(payload)
+            # 审查 P1-1：按验证后的 actor（owner/admin/runtime）分桶。
+            actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, PUBLISH_ENDPOINT, actor_key, idempotency_key, request_hash,
             compatible_request_hash=_listing_request_hash(legacy_canonical) if legacy_canonical is not None else None,
@@ -589,7 +589,8 @@ def v1_withdraw_listing(db_path: str | Path, listing_id: str, payload: dict[str,
             # Admin or explicitly enabled accountless migration only.
             actor = _require_owner_token_for_merchant(payload, merchant_id, conn=conn)
             _reject_account_owner_token_listing(conn, merchant_id, actor)
-            actor_key = api_idempotency.catalog_write_actor_key(payload)
+            # 审查 P1-1：按验证后的 actor（owner/admin/runtime）分桶。
+            actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
         replayed = api_idempotency.replay_catalog_write_idempotency(
             conn, WITHDRAW_ENDPOINT, actor_key, idempotency_key, request_hash
         )
@@ -644,7 +645,8 @@ def v1_reinstate_listing(db_path: str | Path, listing_id: str, payload: dict[str
         _reject_account_owner_token_listing(conn, merchant_id, actor)
 
     idempotency_key = api_idempotency.idempotency_key_from_payload(payload)
-    actor_key = api_idempotency.catalog_write_actor_key(payload)
+    # 审查 P1-1：按验证后的 actor（owner/admin）分桶。
+    actor_key = api_idempotency.catalog_write_actor_key(payload, actor=actor)
     request_hash = _listing_request_hash({"listing_id": listing_id, "action": "reinstate"})
 
     response: dict[str, Any] = {}

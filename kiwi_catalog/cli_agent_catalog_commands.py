@@ -40,7 +40,9 @@ from kiwi_catalog.services.agent_catalog_metrics import (
 from kiwi_catalog.services.agent_verification import (
     InvalidStateTransitionError,
     VerificationService,
+    reconcile_verification_unknown,
 )
+from kiwi_catalog.services.verification_queue import list_verification_fences
 
 
 def _format_verification(agent: dict[str, Any]) -> str:
@@ -219,7 +221,7 @@ def cmd_agent_catalog_verify(args: argparse.Namespace) -> None:
                 force=bool(getattr(args, "force", False)),
             )
         except InvalidStateTransitionError as exc:
-            raise SystemExit(str(exc))
+            raise SystemExit(str(exc)) from None
     if args.format == "text":
         print(_format_verification_result(result))
         return
@@ -234,7 +236,7 @@ def cmd_agent_catalog_refresh(args: argparse.Namespace) -> None:
         try:
             result = service.refresh(catalog_agent_id, actor=_cli_actor(args))
         except InvalidStateTransitionError as exc:
-            raise SystemExit(str(exc))
+            raise SystemExit(str(exc)) from None
     if args.format == "text":
         print(_format_verification_result(result))
         return
@@ -325,7 +327,7 @@ def cmd_agent_catalog_suspend(args: argparse.Namespace) -> None:
         try:
             result = service.suspend(catalog_agent_id, actor=_cli_actor(args), reason=reason)
         except InvalidStateTransitionError as exc:
-            raise SystemExit(str(exc))
+            raise SystemExit(str(exc)) from None
     if args.format == "text":
         print(_format_verification_result(result))
         return
@@ -345,7 +347,7 @@ def cmd_agent_catalog_reinstate(args: argparse.Namespace) -> None:
         try:
             result = service.reinstate(catalog_agent_id, actor=_cli_actor(args), reason=reason)
         except InvalidStateTransitionError as exc:
-            raise SystemExit(str(exc))
+            raise SystemExit(str(exc)) from None
     if args.format == "text":
         print(_format_verification_result(result))
         print("Re-verification required: run `kiwi-catalog agent catalog verify <id>`")
@@ -370,7 +372,7 @@ def cmd_agent_catalog_get(args: argparse.Namespace) -> None:
         try:
             agent = get_catalog_agent(conn, catalog_agent_id)
         except NotFoundError:
-            raise SystemExit(f"Unknown catalog agent: {catalog_agent_id}")
+            raise SystemExit(f"Unknown catalog agent: {catalog_agent_id}") from None
 
     if args.format == "text":
         print(f"Catalog Agent: {agent.get('catalog_agent_id', '')}")
@@ -529,6 +531,17 @@ def _print_doctor_text(report: dict[str, Any]) -> None:
         print(f"  [ISSUE] {issue}")
     for warning in report.get("warnings", []):
         print(f"  [WARN]  {warning}")
+    fenced = report.get("unknown_outcome_tasks", []) or []
+    if fenced:
+        print()
+        print(f"Fenced verification tasks ({len(fenced)})")
+        for item in fenced:
+            print(
+                f"  {item['task_id']}  agent={item['catalog_agent_id']}"
+                f"  updated={item['updated_at']}"
+            )
+            if item.get("error"):
+                print(f"    {item['error']}")
     if report["healthy"]:
         print("\nHealth: OK")
     else:
@@ -538,13 +551,72 @@ def _print_doctor_text(report: dict[str, Any]) -> None:
 def cmd_agent_catalog_doctor(args: argparse.Namespace) -> None:
     """Local catalog health check (§24): stale/unverified/expired-snapshot counts.
 
+    审查 P1-2：未知结果围栏是运营者必须手工对账的故障态，因此 doctor 报告
+    额外暴露 ``unknown_outcome_tasks`` 清单（保持既有键与 healthy 语义不变）。
     Exits with status 1 when any issue is found so scripts/CI can react.
     """
-    with db_session(db_path_from_args(args)) as conn:
+    db_path = db_path_from_args(args)
+    with db_session(db_path) as conn:
         report = catalog_doctor_report(conn)
+        fenced = [_fenced_task_json(row) for row in list_verification_fences(conn, db_path)]
+    report["unknown_outcome_tasks"] = fenced
+    report["unknown_outcome_task_count"] = len(fenced)
+    if fenced:
+        report.setdefault("warnings", []).append(
+            f"{len(fenced)} verification task(s) fenced by an unknown outcome"
+            " (run 'catalog verification-queue list')"
+        )
     if args.format == "text":
         _print_doctor_text(report)
     else:
         emit(report, args.format)
     if not report["healthy"]:
         raise SystemExit(1)
+
+
+def _fenced_task_json(row: Any) -> dict[str, Any]:
+    """Serialize one ledger fence row for the verification-queue CLI."""
+    return {
+        "task_id": str(row["task_id"]),
+        "catalog_agent_id": str(row["catalog_agent_id"]),
+        "updated_at": str(row["updated_at"]),
+        "error": str(row["error"]),
+    }
+
+
+def cmd_agent_catalog_verification_queue_list(args: argparse.Namespace) -> None:
+    """List verification tasks fenced by an unknown outcome (审查 P1-2)."""
+    db_path = db_path_from_args(args)
+    with db_session(db_path) as conn:
+        tasks = [_fenced_task_json(row) for row in list_verification_fences(conn, db_path)]
+    if args.format == "json":
+        emit({"ok": True, "tasks": tasks, "count": len(tasks)}, args.format)
+        return
+    if not tasks:
+        print("No verification tasks are fenced by an unknown outcome.")
+        return
+    print(f"Fenced verification tasks ({len(tasks)})")
+    print("================================")
+    for task in tasks:
+        print(f"  {task['task_id']}  agent={task['catalog_agent_id']}  updated={task['updated_at']}")
+        if task["error"]:
+            print(f"    error: {task['error']}")
+
+
+def cmd_agent_catalog_verification_queue_resolve(args: argparse.Namespace) -> None:
+    """Resolve one fenced verification task with an operator outcome (审查 P1-2)."""
+    summary = reconcile_verification_unknown(
+        db_path_from_args(args),
+        args.task_id,
+        outcome=args.outcome,
+        reason=args.reason,
+    )
+    if args.format == "json":
+        emit({"ok": True, "reconciliation": summary}, args.format)
+        return
+    print(f"Reconciled verification task {summary['task_id']}")
+    print(f"  agent:      {summary['catalog_agent_id']}")
+    print(f"  outcome:    {summary['outcome']}")
+    print(f"  ledger:     {summary['status']} ({summary['verification_status']})")
+    if summary["error"]:
+        print(f"  error:      {summary['error']}")

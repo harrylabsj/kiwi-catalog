@@ -224,7 +224,7 @@ class FastApiDualStackTest(unittest.TestCase):
 
         from kiwi_catalog.api.auth import owner_token
 
-        owner_secret = "test-owner-secret"
+        owner_secret = "fixture-only-owner-key-example-2026"
         admin_token = "admin-tok"
         merchant_id = "mrc_fastapi"
         with mock.patch.dict(
@@ -622,7 +622,7 @@ class FastApiDualStackTest(unittest.TestCase):
             os.environ,
             {
                 "KIWI_CATALOG_ADMIN_TOKEN": "admin-tok",
-                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "test-owner-secret",
+                "KIWI_CATALOG_OWNER_TOKEN_SECRET": "fixture-only-owner-key-example-2026",
                 "KIWI_CATALOG_EMAIL_VERIFICATION_MODE": "console",
             },
             clear=False,

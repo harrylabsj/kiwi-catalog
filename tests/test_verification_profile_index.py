@@ -38,6 +38,7 @@ from kiwi_catalog.db.migrations import (
     migration_001_agent_catalog,
     migration_008_three_state_domains,
     migration_009_shadow_tables,
+    migration_058_agent_endpoint_uniqueness,
 )
 from kiwi_catalog.discovery.agent_card import AgentCardResult
 from kiwi_catalog.discovery.ucp import UcpProfileResult
@@ -232,6 +233,10 @@ def conn() -> Iterator[sqlite3.Connection]:
     # with the other verification facade tests.
     migration_008_three_state_domains(c)
     migration_009_shadow_tables(c)
+    # 审查 P1-3：upsert_profile_endpoints 改 ON CONFLICT 后必须存在
+    # (catalog_agent_id, kind) 唯一索引，否则 SQLite 报
+    # "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"。
+    migration_058_agent_endpoint_uniqueness(c)
     c.commit()
     yield c
     c.close()

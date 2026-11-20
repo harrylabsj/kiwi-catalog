@@ -34,6 +34,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from kiwi_catalog.core.errors import ConflictError
 from kiwi_catalog.db.session import decode_json, encode_json
 
 EVENT_TYPES = (
@@ -94,13 +95,16 @@ def emit_public_event(
     """写入一条公开事件（同库事务内随资料写一起提交/回滚）。"""
     if event_type not in EVENT_TYPES:
         raise ValueError(f"unknown event_type: {event_type}")
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     payload = _sanitize_payload(payload)
     version, created_at = _next_version_and_timestamp(conn, merchant_id)
     event_id = new_event_id()
-    conn.execute(
+    inserted = conn.execute(
         "insert into merchant_public_events("
         " event_id, merchant_id, publication_id, event_type, version, payload_json,"
-        " created_at) values (?, ?, ?, ?, ?, ?, ?)",
+        " created_at) values (?, ?, ?, ?, ?, ?, ?)"
+        " on conflict(merchant_id, version) do nothing",
         (
             event_id,
             merchant_id,
@@ -111,6 +115,8 @@ def emit_public_event(
             created_at,
         ),
     )
+    if inserted.rowcount != 1:
+        raise ConflictError("merchant public event version was allocated by another request")
     return {
         "event_id": event_id,
         "merchant_id": merchant_id,

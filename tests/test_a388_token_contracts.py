@@ -10,7 +10,7 @@ from kiwi_catalog.services import merchant_tokens
 
 @pytest.fixture
 def db(monkeypatch):
-    monkeypatch.setenv("KIWI_CATALOG_OWNER_TOKEN_SECRET", "synthetic-a388-owner-only")
+    monkeypatch.setenv("KIWI_CATALOG_OWNER_TOKEN_SECRET", "fixture-only-a388-owner-key-example")
     monkeypatch.setenv("KIWI_CATALOG_LEGACY_HMAC_AUTH", "on")
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -84,7 +84,7 @@ def test_real_issue_rotate_audit_fingerprints_no_raw_or_24_prefix_and_old_rows_u
         "select event,details_json from audit_events where event in ('merchant_token_issued','merchant_token_rotated') order by id"
     ).fetchall()
     assert len(rows) == 2
-    for row, result in zip(rows, [issued, rotated]):
+    for row, result in zip(rows, [issued, rotated], strict=True):
         details = json.loads(row["details_json"])
         assert "token_prefix" not in details
         fingerprint = details["token_fingerprint"]

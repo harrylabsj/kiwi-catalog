@@ -16,11 +16,10 @@ export KIWI_CATALOG_EXTENSIONS=kiwi_catalog_admin   # 逗号分隔多个 import 
 ```python
 # 你的扩展包顶层 __init__.py
 def register_kiwi_extension(reg) -> None:
-    # 1) fallback 栈：RouteEntry 约定 handler
-    #    handler(db_path, payload, query, **path_params) -> dict | {"__html__": ...}
+    # 1) 双栈共享：handler(db_path, payload, query, **path_params) -> dict
     reg.add_route({"GET"}, "/portal/dashboard", my_dashboard_handler)
 
-    # 2) FastAPI 栈：自行装饰注册（双栈都要注册，两边各自验证）
+    # 2) 可选：FastAPI 专用实现。同方法同路径时优先于共享实现。
     def _fastapi(app, db_path):
         @app.get("/portal/dashboard")
         def page() -> str: ...
@@ -53,14 +52,19 @@ API；未安装扩展时这些后台页面路由不存在。匿名只读的公�
 - **fail-soft**：扩展缺失、没有 `register_kiwi_extension`、注册或挂钩抛
   异常，都只记一条 `warning` 日志并跳过——服务照常启动，对应路由表现
   为普通 404，与从未注册不可区分。扩展永远不能拖垮 catalog 本身。
-- **基路由优先**：扩展路由追加在基表之后，路径模板冲突时基表路由先被
-  匹配（fallback 栈顺序匹配先到先得；FastAPI 栈基路由先注册同理）。
+- **HTTP 路由冲突**：同方法的匹配范围重叠时，优先保留基路由和先注册的共享路由。
+  后一条路由的冲突方法会被跳过，日志同时列出两个模板。其他方法可继续挂载。
+  例如，`GET /portal/{page}` 与 `GET /portal/history` 应使用互不重叠的路径。
+  FastAPI hook 只能替换同一扩展中匹配范围和方法相同的共享路由。
+  通过 `include_router` 挂载的子路由组会按实际前缀检查，组内有冲突时整组跳过。
+  无法精确比较的自定义转换器按其固定前缀保守判断。
 - **缓存**：装载结果进程级缓存，坏扩展不会每请求重试；测试用
   `kiwi_catalog.api.extensions.reset_extension_cache()` 重置。
-- **双栈**：kiwi-catalog 是 fallback ASGI + FastAPI 双栈，扩展若只注册
-  一边，另一栈上对应路由 404。FastAPI 栈的 parity 中间件经
-  `resolve_route` 默认表自动感知扩展路由（404/405 判定、访问日志、
-  413 上限一致生效）。
+- **双栈**：`add_route` 声明会自动挂在两栈。只用 FastAPI hook 的路由仅在
+  FastAPI 上提供。共享 handler 可按需返回 `__html__`、`__redirect__`、
+  `__status__`、`__no_store__` 和 `__cookies__` 元键。这些键在响应字典顶层保留给
+  HTTP 传输控制，业务数据请使用其他键。共享模板使用 `{name}` 参数，
+  `{id:int}` 等转换器须由 FastAPI hook 注册。
 
 ## 参考实现
 

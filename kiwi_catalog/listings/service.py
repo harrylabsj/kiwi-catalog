@@ -109,6 +109,8 @@ def publish_listing(
 
     Returns (row, created: bool)。
     """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     listing_type = canonical["listing_type"]
     owner_agent_id = canonical["owner_agent_id"]
     merchant_id = canonical["merchant_id"]
@@ -250,6 +252,8 @@ def reinstate_listing(
     前置：owner Agent 未 suspended/rejected（fail-closed）。WITHDRAWN 的
     listing 不能 reinstate——需重新 publish（同 key upsert 回到 ACTIVE）。
     """
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
     row = repo.get_listing(conn, listing_id)
     if row is None:
         raise NotFoundError(f"Unknown listing: {listing_id}")

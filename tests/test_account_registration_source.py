@@ -145,7 +145,8 @@ class RegistrationSourceTest(unittest.TestCase):
         init_db(conn)
         columns = {str(row[1]) for row in conn.execute("pragma table_info(merchant_accounts)")}
         self.assertIn("registration_source", columns)
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 57)
+        # 审查 P1-3 引入 v58（agent_endpoints 唯一索引 + 证据表索引），链尾随之推进。
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 58)
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
                 "insert into merchant_accounts"

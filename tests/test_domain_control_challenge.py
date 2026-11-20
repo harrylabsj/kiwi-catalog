@@ -44,6 +44,7 @@ from kiwi_catalog.services.domain_bindings import (
     STATE_VERIFIED,
     challenge_document,
     get_domain_binding,
+    rotate_domain_binding,
 )
 
 DOMAIN = "shop.example"
@@ -141,6 +142,32 @@ class DomainControlChallengeTest(unittest.TestCase):
         self.assertEqual(binding["state"], STATE_PENDING)
         self.assertEqual(binding["canonical_domain"], DOMAIN)
         self.assertTrue(binding["challenge"].startswith("kc1_"))
+
+    def test_expired_proof_is_rejected_on_reverify_and_rotation_restores_it(self) -> None:
+        cid = _register(self.conn)
+        binding = get_domain_binding(self.conn, cid)
+        assert binding is not None
+        fetcher = ChallengeFetcher()
+        fetcher.documents[CHALLENGE_URL] = challenge_document(cid, DOMAIN, binding["challenge"])
+        service = VerificationService(self.conn, fetcher=fetcher)
+        self.assertEqual(_domain_stage(_verify(service, self.conn, cid)).outcome, "passed")
+
+        self.conn.execute(
+            "update catalog_domain_bindings set challenge_issued_at = ? where catalog_agent_id = ?",
+            ("2020-01-01T00:00:00+00:00", cid),
+        )
+        self.conn.commit()
+        expired = service.verify(cid)
+        self.conn.commit()
+        self.assertEqual(_domain_stage(expired).outcome, "rejected")
+        self.assertIn("rotate", _domain_stage(expired).reason)
+
+        from kiwi_catalog.db.session import now_iso
+
+        rotated = rotate_domain_binding(self.conn, cid, DOMAIN, now=now_iso())
+        self.conn.commit()
+        fetcher.documents[CHALLENGE_URL] = challenge_document(cid, DOMAIN, rotated["challenge"])
+        self.assertEqual(_domain_stage(_verify(service, self.conn, cid)).outcome, "passed")
 
     def test_domain_stage_fails_until_challenge_is_published(self) -> None:
         cid = _register(self.conn)

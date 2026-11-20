@@ -39,6 +39,7 @@ import argparse
 import sys
 
 from kiwi_catalog.config import DEFAULT_DB_PATH
+from kiwi_catalog.core.tokens import configured_owner_secret
 
 
 def main() -> None:
@@ -54,6 +55,10 @@ def main() -> None:
         " exit 1 on failure; never serves.",
     )
     args = parser.parse_args()
+    try:
+        configured_owner_secret()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
 
     # 预检（A40-3）：只读受控配置，不触网、不碰 DB、不输出私钥材料。
     from kiwi_catalog.a2a.launch_preflight import (
@@ -85,8 +90,8 @@ def main() -> None:
     except ImportError:
         raise SystemExit(
             "uvicorn is required to serve the kiwi-catalog API. "
-            "Install shopping-cli[api] (or pip install uvicorn)."
-        )
+            "Install kiwi-catalog[api] (or pip install uvicorn)."
+        ) from None
 
     from kiwi_catalog.api.app import create_catalog_app
 

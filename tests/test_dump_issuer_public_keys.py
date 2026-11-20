@@ -85,7 +85,7 @@ class DumpIssuerPublicKeysTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         document = json.loads(result.stdout)
         self.assertEqual(sorted(document["keys"]), self.kids)
-        for kid, entry in document["keys"].items():
+        for entry in document["keys"].values():
             self.assertIn(entry["state"], ("ACTIVE", "RETIRED"))
             self.assertEqual(sorted(entry["jwk"]), ["crv", "kty", "x"])
             self.assertEqual(entry["jwk"]["crv"], "Ed25519")

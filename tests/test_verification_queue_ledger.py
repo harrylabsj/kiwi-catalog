@@ -157,7 +157,8 @@ def test_mark_task_running_sets_status_started_and_updated(conn) -> None:
     _seed(conn, task_id="vt-1")
     conn.commit()
 
-    mark_task_running(conn, task_id="vt-1", started_at=1234.5, updated_at="2026-08-09T00:01:00+00:00")
+    assert mark_task_running(conn, task_id="vt-1", started_at=1234.5, updated_at="2026-08-09T00:01:00+00:00")
+    assert not mark_task_running(conn, task_id="vt-1", started_at=9999, updated_at="duplicate claim")
     conn.commit()
 
     row = fetch_task_row(conn, "vt-1")
@@ -298,6 +299,9 @@ def test_ledger_module_exports_only_sql_helpers() -> None:
         "finish_task",
         "cleanup_terminal_tasks",
         "fetch_task_row",
+        # 审查 P1-2：对账原语同样是纯 SQL helper（受守卫 UPDATE + 围栏清单）。
+        "list_unknown_tasks",
+        "resolve_unknown_task",
     }
 
 

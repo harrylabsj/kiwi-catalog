@@ -48,7 +48,7 @@ from kiwi_catalog.db.session import open_connection
 from kiwi_catalog.services import accounts
 
 ADMIN_TOKEN = "admin-tok-123"
-OWNER_SECRET = "test-owner-secret"
+OWNER_SECRET = "fixture-only-owner-key-example-2026"
 
 REGISTER_BODY = {
     "merchant_name": "Acme 商贸",

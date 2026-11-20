@@ -148,7 +148,7 @@ class VerificationTransactionTest(unittest.TestCase):
                 fetch.release.set()
                 service = VerificationService(c, fetcher=fetch)
 
-                def acquire(domain, declared=None, **kwargs):
+                def acquire(domain, declared=None, *, c=c, mutation=mutation, other=other, **kwargs):
                     self.assertFalse(c.in_transaction)
                     if mutation == "endpoint":
                         other.execute(

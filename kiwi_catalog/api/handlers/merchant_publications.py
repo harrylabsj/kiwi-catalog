@@ -227,6 +227,12 @@ def search_publications(
     ``buyer_agent_search`` 与每日去重买家统计（不落原始身份）。
     """
     with db_session(db_path) as conn:
+        # 审查 P2-9：全仓匿名读面都按 IP 限流（agent search / listing search /
+        # merchant home / publication detail），唯独这里漏了。该端点匿名可达，
+        # 每次调用做四列 LIKE 全表扫并写 3 张统计表——缺限流即是无预算放大器。
+        from kiwi_catalog.a2a.public_read_limit import enforce_public_read_limit
+
+        enforce_public_read_limit(conn, auth_payload or {}, surface="publication search")
         usage_metrics.record_usage(conn, usage_metrics.METRIC_BUYER_AGENT_SEARCH)
         buyer_stats.record_buyer_search(
             conn,
