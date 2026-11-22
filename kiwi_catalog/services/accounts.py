@@ -43,6 +43,7 @@ import re
 import secrets
 import sqlite3
 import tomllib
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -283,7 +284,7 @@ def _send_fail_closed(to: str, subject: str, body: str) -> None:
 
 
 def send_verification_email(email: str, code: str) -> None:
-    """发送验证邮件。发送失败抛异常（注册事务回滚，fail-closed，语义不变）；
+    """发送验证邮件。发送失败抛异常（待发验证码保持不可用）；
     收件人被拒收 → ValidationError（400），不是 500。"""
     _send_fail_closed(
         email,
@@ -292,20 +293,57 @@ def send_verification_email(email: str, code: str) -> None:
     )
 
 
-def issue_verification(
-    conn: sqlite3.Connection, account_id: int, email: str
-) -> str:
-    """生成验证码、落库、按模式发送。console 模式返回验证码明文（开发用）；
-    smtp 模式返回空串（验证码只进邮箱）。"""
-    code = generate_verification_code()
-    store_verification_code(conn, account_id, code)
+@dataclass(frozen=True)
+class PendingCode:
+    kind: str
+    email: str
+    code: str = field(repr=False)
+    reservation: str = field(repr=False)
+
+
+def _reserve_code(kind: str, email: str) -> tuple[str, str | PendingCode]:
     mode = _verification_mode()
+    code = generate_verification_code()
     if mode == "console":
-        return code
-    if mode == "smtp":
-        send_verification_email(email, code)
-        return ""
-    raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
+        return token_digest(code), code
+    if mode != "smtp":
+        raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
+    reservation = "pending:" + secrets.token_urlsafe(24)
+    return reservation, PendingCode(kind, email, code, reservation)
+
+
+def deliver_code(db_path: str | Path, pending: str | PendingCode) -> str:
+    if isinstance(pending, str):
+        return pending
+    from kiwi_catalog.db.session import db_session
+
+    sender = send_password_reset_email if pending.kind == "reset" else send_verification_email
+    try:
+        sender(pending.email, pending.code)
+    except Exception:
+        if pending.kind == "registration":
+            with db_session(db_path) as conn:
+                conn.execute("delete from registration_verifications where email=? and code_hash=?",
+                             (pending.email, pending.reservation))
+        raise
+    targets = {
+        "registration": ("registration_verifications", "code_hash"),
+        "verification": ("merchant_accounts", "verification_code_hash"),
+        "reset": ("merchant_accounts", "reset_code_hash"),
+    }
+    table, column = targets[pending.kind]
+    with db_session(db_path) as conn:
+        # A resend or successfully consumed code wins over a delayed SMTP callback.
+        conn.execute(f"update {table} set {column}=? where email=? and {column}=?",
+                     (token_digest(pending.code), pending.email, pending.reservation))
+    return ""
+
+
+def issue_verification(conn: sqlite3.Connection, account_id: int, email: str) -> str | PendingCode:
+    digest, delivery = _reserve_code("verification", email)
+    conn.execute("update merchant_accounts set verification_code_hash=?, verification_expires_at=?,"
+                 " updated_at=? where account_id=?", (digest, _registration_expiry(), now_iso(), account_id))
+    return delivery
 
 
 def _registration_expiry(*, minutes: int = 15) -> str:
@@ -336,18 +374,18 @@ def purge_expired_registrations(
     return int(cursor.rowcount or 0)
 
 
-def start_registration(conn: sqlite3.Connection, email: str) -> str:
+def start_registration(conn: sqlite3.Connection, email: str) -> str | PendingCode:
     """邮箱先行注册第一步：为「尚未注册」的邮箱签发注册验证码。
 
     console 模式返回明文码（开发/演示，也是验收脚本的契约）；smtp 模式返回
     空串。**发信失败抛异常**（fail-closed，与 issue_verification 同款语义）：
-    发不出码就整事务回滚，不留半条记录。
+    SMTP 模式先保存不可用的预留标识，发送成功后按标识启用验证码。
 
     调用方必须先确认该邮箱未注册——这里不做存在性检查，重复注册由
     register_account 的 UNIQUE 约束兜底。
     """
     normalized = str(email or "").strip().lower()
-    code = generate_verification_code()
+    digest, delivery = _reserve_code("registration", normalized)
     now = now_iso()
     conn.execute(
         "insert into registration_verifications"
@@ -361,17 +399,9 @@ def start_registration(conn: sqlite3.Connection, email: str) -> str:
         " ticket_hash = '',"
         " ticket_expires_at = '',"
         " updated_at = excluded.updated_at",
-        (normalized, token_digest(code), _registration_expiry(), now, now),
+        (normalized, digest, _registration_expiry(), now, now),
     )
-    mode = _verification_mode()
-    if mode == "console":
-        return code
-    if mode == "smtp":
-        send_verification_email(normalized, code)
-        return ""
-    raise RuntimeError(
-        "email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)"
-    )
+    return delivery
 
 
 def verify_registration_code(
@@ -401,12 +431,12 @@ def verify_registration_code(
         return ""
     ticket = secrets.token_urlsafe(32)
     now = now_iso()
-    conn.execute(
+    consumed = conn.execute(
         "update registration_verifications set code_hash = '', code_expires_at = '',"
-        " ticket_hash = ?, ticket_expires_at = ?, updated_at = ? where email = ?",
-        (token_digest(ticket), _registration_expiry(), now, normalized),
+        " ticket_hash = ?, ticket_expires_at = ?, updated_at = ? where email = ? and code_hash = ? and code_expires_at >= ?",
+        (token_digest(ticket), _registration_expiry(), now, normalized, stored_hash, now),
     )
-    return ticket
+    return ticket if consumed.rowcount == 1 else ""
 
 
 def consume_registration_ticket(
@@ -451,13 +481,13 @@ def verify_email_code(
         return False
     if str(row["verification_expires_at"] or "") < now_iso():
         return False
-    conn.execute(
+    consumed = conn.execute(
         "update merchant_accounts set email_verified = 1,"
         " verification_code_hash = '', verification_expires_at = '', updated_at = ?"
-        " where account_id = ?",
-        (now_iso(), account_id),
+        " where account_id = ? and verification_code_hash=? and verification_expires_at>=?",
+        (now_iso(), account_id, stored_hash, now_iso()),
     )
-    return True
+    return consumed.rowcount == 1
 
 
 # ── 密码重置（忘记密码，与邮箱验证码同机制）──────────────────────────────
@@ -704,28 +734,22 @@ def notify_admin_token_rotated(
 
 def issue_password_reset(
     conn: sqlite3.Connection, account_id: int, email: str
-) -> str:
+) -> str | PendingCode:
     """生成重置码、落库（SHA-256 + 15 分钟过期）、按模式发送。
 
     console 模式返回重置码明文（开发用）；smtp 模式返回空串（重置码只进
     邮箱）；未配置 fail-closed（抛 RuntimeError）。
     """
-    code = generate_verification_code()
+    digest, delivery = _reserve_code("reset", email)
     expires_at = (
         datetime.now(UTC) + timedelta(minutes=15)
     ).replace(microsecond=0).isoformat()
     conn.execute(
         "update merchant_accounts set reset_code_hash = ?,"
         " reset_expires_at = ?, updated_at = ? where account_id = ?",
-        (token_digest(code), expires_at, now_iso(), account_id),
+        (digest, expires_at, now_iso(), account_id),
     )
-    mode = _verification_mode()
-    if mode == "console":
-        return code
-    if mode == "smtp":
-        send_password_reset_email(email, code)
-        return ""
-    raise RuntimeError("email verification is not configured (KIWI_CATALOG_EMAIL_VERIFICATION_MODE)")
+    return delivery
 
 
 def reset_password(
@@ -750,12 +774,14 @@ def reset_password(
         return False
     if str(row["reset_expires_at"] or "") < now_iso():
         return False
-    conn.execute(
+    consumed = conn.execute(
         "update merchant_accounts set password_hash = ?, email_verified = 1,"
         " reset_code_hash = '', reset_expires_at = '', updated_at = ?"
-        " where account_id = ?",
-        (hash_password(new_password), now_iso(), account_id),
+        " where account_id = ? and reset_code_hash=? and reset_expires_at>=?",
+        (hash_password(new_password), now_iso(), account_id, stored_hash, now_iso()),
     )
+    if consumed.rowcount != 1:
+        return False
     conn.execute(
         "delete from account_sessions where account_id = ?",
         (account_id,),

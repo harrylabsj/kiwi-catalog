@@ -97,6 +97,7 @@ def _insert_receipt(
             received_at,
         ),
     )
+    commerce_facts.refresh_receipt(conn, conn.execute("select last_insert_rowid()").fetchone()[0])
     conn.commit()
 
 

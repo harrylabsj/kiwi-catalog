@@ -189,7 +189,7 @@ def follow_updates(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
     """GET /v1/me/follows/updates（会话）——仅响应买家主动查询的增量拉取。
 
     按各活跃关注的 last_seen_at 返回商家已批准公开的事件（拉取式订阅，无
-    推送通道）；返回后推进水位（返回什么再推进，不丢不重）。不含商家内部
+    推送通道）；按客户端确认推进水位，重复 GET 可重放。不含商家内部
     信息——事件 payload 即 M0 公开投影。
     """
     with db_session(db_path) as conn:
@@ -198,6 +198,13 @@ def follow_updates(db_path: str | Path, payload: dict[str, Any]) -> dict[str, An
             "ok": True,
             "updates": follows_service.fetch_updates(conn, buyer_subject=buyer_subject),
         }
+
+
+def acknowledge_updates(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
+    with db_session(db_path) as conn:
+        _, subject = _require_buyer(conn, payload)
+        follows_service.acknowledge_updates(conn, subject, payload.get("watermarks"))
+    return {"ok": True}
 
 
 _MERCHANT_ACCESS_RATE_LIMIT_ENV = "KIWI_CATALOG_MERCHANT_ACCESS_RATE_LIMIT_PER_15MIN"

@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kiwi_catalog.services import commerce_facts
 from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.core.tokens import token_digest
 from kiwi_catalog.core.errors import AuthError, IdempotencyConflict, PermissionDenied, ValidationError
@@ -430,7 +431,7 @@ def submit(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                     receipt["event_type"],
                     reporter_role,
                     merchant_id,
-                    receipt.get("negotiation_id", ""),
+                    receipt.get("negotiation_id") or receipt.get("quote_ref", {}).get("negotiation_id", "").strip(),
                     receipt.get("merchant_agreement_id", ""),
                     receipt.get("accepted_offer_id", ""),
                     receipt.get("terms_digest", ""),
@@ -465,6 +466,7 @@ def submit(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
                 ) from None
             return {**_receipt_projection(row), "idempotent": True}
 
+        commerce_facts.refresh_receipt(conn, conn.execute("select last_insert_rowid()").fetchone()[0])
         return {
             "ok": True,
             "event_id": receipt["event_id"],
@@ -484,7 +486,6 @@ def query_facts(
     merchant token 只读本店事实；admin 全量（可按 merchant_id 过滤）。
     另一商家无法读取本店事实（B3 访问控制同逐笔回执）。
     """
-    from kiwi_catalog.services import commerce_facts
 
     bearer = str(payload.get("_auth_token") or "").strip()
     with db_session(db_path) as conn:

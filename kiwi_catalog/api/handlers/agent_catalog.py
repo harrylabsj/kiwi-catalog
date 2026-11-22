@@ -1210,6 +1210,7 @@ def v1_search_agents(
             capability=str(query.get("capability") or ""),
             protocol=str(query.get("protocol") or ""),
             hosting_mode=hosting_mode,
+            merchant_id=str(query.get("merchant_id") or "").strip(),
             verification_level=str(query.get("verification_level") or ""),
             freshness_state=str(query.get("freshness_state") or ""),
             administrative_state=str(query.get("administrative_state") or ""),

@@ -1345,6 +1345,11 @@ def register_fastapi_routes(app: Any, db_path: str | Path) -> None:
     def v1_follow_updates(request: _FastAPIRequest) -> dict[str, Any]:
         return _v1_follow_updates(db_path, _account_payload(request, {}))
 
+    @app.post("/v1/me/follows/updates/ack")
+    def v1_acknowledge_updates(request: _FastAPIRequest, payload: dict[str, Any]) -> dict[str, Any]:
+        from kiwi_catalog.api.handlers.buyer_follows import acknowledge_updates
+        return acknowledge_updates(db_path, _account_payload(request, payload))
+
     @app.put("/v1/me/follows/{merchant_id}")
     def v1_follow_merchant(
         merchant_id: str,

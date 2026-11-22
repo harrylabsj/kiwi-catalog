@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-CURRENT_SCHEMA_VERSION = 59
+CURRENT_SCHEMA_VERSION = 60
 
 
 @dataclass(frozen=True)
@@ -2136,6 +2136,44 @@ def migration_059_operational_indexes(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def migration_060_receipt_lookup(conn: sqlite3.Connection) -> None:
+    conn.execute("update commerce_receipts set negotiation_id=trim(json_extract(quote_ref_json, '$.negotiation_id'))"
+                 " where negotiation_id='' and event_type in ('merchant_entry_offered','buyer_handoff_generated')"
+                 " and json_type(quote_ref_json, '$.negotiation_id')='text'")
+
+    from kiwi_catalog.services.commerce_facts import refresh_receipt
+
+    conn.execute("create table if not exists commerce_fact_rows (fact_key text primary key, merchant_id text not null,"
+                 " kind text not null, group_key text not null, confirmed integer not null,"
+                 " verified integer not null, payload text not null)")
+    conn.execute("create index if not exists idx_fact_groups on commerce_fact_rows(merchant_id,kind,group_key)")
+    conn.execute("create index if not exists idx_fact_pages on commerce_fact_rows(merchant_id,fact_key)")
+    conn.execute("create index if not exists idx_order_agreement_ref on commerce_receipts"
+                 "(merchant_id,json_extract(order_evidence_json,'$.merchant_agreement_ref'))"
+                 " where event_type='merchant_order_created'")
+    conn.execute("create table if not exists commerce_fact_totals(merchant_id text not null, kind text not null,"
+                 " total integer not null, confirmed integer not null, verified integer not null,"
+                 " primary key(merchant_id,kind))")
+    conn.execute("""create trigger if not exists commerce_fact_count_insert after insert on commerce_fact_rows begin
+        insert into commerce_fact_totals values(new.merchant_id,new.kind,1,new.confirmed,new.verified)
+        on conflict(merchant_id,kind) do update set total=total+1, confirmed=confirmed+new.confirmed,
+        verified=verified+new.verified; end""")
+    conn.execute("""create trigger if not exists commerce_fact_count_delete after delete on commerce_fact_rows begin
+        update commerce_fact_totals set total=total-1, confirmed=confirmed-old.confirmed, verified=verified-old.verified
+        where merchant_id=old.merchant_id and kind=old.kind; end""")
+    original_factory = conn.row_factory
+    try:
+        conn.row_factory = sqlite3.Row
+        for (receipt_id,) in conn.execute("select min(receipt_id) from commerce_receipts group by merchant_id,"
+                                          " case when event_type in ('merchant_agreement_issued','buyer_agreement_accepted')"
+                                          " then json_array('intent',negotiation_id,merchant_agreement_id)"
+                                          " when event_type='merchant_order_created' then json_array('order',order_channel,order_ref)"
+                                          " else json_array('entry',receipt_id) end"):
+            refresh_receipt(conn, receipt_id)
+    finally:
+        conn.row_factory = original_factory
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "agent_catalog", migration_001_agent_catalog),
     Migration(2, "agent_catalog_register_limits", migration_002_agent_catalog_register_limits),
@@ -2196,6 +2234,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(57, "commerce_receipts", migration_057_commerce_receipts),
     Migration(58, "agent_endpoint_uniqueness", migration_058_agent_endpoint_uniqueness),
     Migration(59, "operational_indexes", migration_059_operational_indexes),
+    Migration(60, "receipt_lookup", migration_060_receipt_lookup),
 )
 
 

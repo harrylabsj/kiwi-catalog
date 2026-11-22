@@ -108,6 +108,7 @@ class SearchQueryError(ValueError):
 _SEARCH_QUERY_KEYS = frozenset({
     "q",
     "owner_agent_id",
+    "merchant_id",
     "listing_type",
     "category",
     "brand",
@@ -190,6 +191,11 @@ def search_listings(
     # publication_state / governance_hold 决定。
     where: list[str] = ["publication_state = ?", "coalesce(governance_hold, 0) = 0"]
     values: list[Any] = [ACTIVE]
+
+    merchant_id = str(query.get("merchant_id") or "").strip()
+    if merchant_id:
+        where.append("owner_agent_id in (select catalog_agent_id from catalog_agents where merchant_id = ?)")
+        values.append(merchant_id)
 
     owner_agent_id = str(query.get("owner_agent_id") or "").strip()
     if owner_agent_id:
