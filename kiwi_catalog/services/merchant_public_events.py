@@ -134,6 +134,7 @@ def list_events_after(
     merchant_id: str,
     last_seen_at: str,
     limit: int,
+    category: str = "",
 ) -> list[dict[str, Any]]:
     """按水位增量取事件：``created_at > last_seen_at``，按时间升序，至多 limit 条。
 
@@ -141,7 +142,8 @@ def list_events_after(
     """
     rows = conn.execute(
         "select * from merchant_public_events where merchant_id = ? and created_at > ?"
-        " order by created_at asc, version asc limit ?",
-        (merchant_id, str(last_seen_at or ""), int(limit)),
+        + (" and json_extract(payload_json, '$.category') = ?" if category else "")
+        + " order by created_at asc, version asc limit ?",
+        (merchant_id, str(last_seen_at or ""), *((category,) if category else ()), int(limit)),
     ).fetchall()
     return [_row_to_event(row) for row in rows]

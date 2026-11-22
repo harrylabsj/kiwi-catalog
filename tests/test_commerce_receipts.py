@@ -247,6 +247,27 @@ class CommerceReceiptsSubmitTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["event_type"], "merchant_entry_offered")
 
+    def test_entry_negotiation_lookup_and_fact_cursor_survive_upgrade(self) -> None:
+        from kiwi_catalog.db.migrations import run_migrations
+        for i in range(12):
+            self._submit({**ENTRY_RECEIPT_MERCHANT, "event_id": f"entry-{i}"}, token=MERCHANT_TOKEN_A)
+        conn = open_connection(self.db_path)
+        try:
+            conn.execute("update commerce_receipts set negotiation_id=''")
+            conn.execute("delete from commerce_fact_rows")
+            conn.execute("pragma user_version=59")
+            conn.commit()
+            run_migrations(conn)
+        finally:
+            conn.close()
+        auth = {"_auth_token": MERCHANT_TOKEN_A}
+        negotiation = ENTRY_RECEIPT_MERCHANT["quote_ref"]["negotiation_id"]
+        self.assertEqual(len(self.receipts.list_receipts(self.db_path, auth, {"negotiation_id": negotiation})["receipts"]), 12)
+        first = self.receipts.query_facts(self.db_path, auth, {"limit": 10})
+        second = self.receipts.query_facts(self.db_path, auth, {"limit": 10, "cursor": first["next_cursor"]})
+        self.assertEqual((len(first["facts"]), len(second["facts"]), first["summary"]["total"]), (10, 2, 12))
+        self.assertIsNone(second["next_cursor"])
+
     def test_out_of_order_receipts_both_persisted(self) -> None:
         # 乱序：先收订单（时间晚），再收意向（时间早）——都保留，接收时间各自记录。
         order = self._submit(ORDER_RECEIPT, token=MERCHANT_TOKEN_A)

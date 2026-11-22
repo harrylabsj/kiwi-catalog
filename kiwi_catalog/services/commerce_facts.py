@@ -75,20 +75,17 @@ def _is_self_signed(row: sqlite3.Row) -> bool:
     return str(row["assurance"]) == "self_signed"
 
 
-def compute_intents(conn: sqlite3.Connection, merchant_id: str | None = None) -> list[dict[str, Any]]:
-    """已确认意向 + 单方报告 + 待核对（同一查询投影，状态显式分列）。"""
+def compute_intents(conn: sqlite3.Connection, merchant_id: str | None = None,
+                   group: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    sql = """select r.* from commerce_receipts r where event_type in ('merchant_agreement_issued','buyer_agreement_accepted')"""
+    args: list[Any] = []
     if merchant_id is not None:
-        rows = conn.execute(
-            "select * from commerce_receipts where merchant_id = ? and event_type in (?, ?)"
-            " order by received_at asc",
-            (merchant_id, _INTENT_MERCHANT, _INTENT_BUYER),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "select * from commerce_receipts where event_type in (?, ?) order by received_at asc",
-            (_INTENT_MERCHANT, _INTENT_BUYER),
-        ).fetchall()
-
+        sql += " and r.merchant_id=?"
+        args.append(merchant_id)
+    if group:
+        sql += " and negotiation_id=? and merchant_agreement_id=?"
+        args.extend(group)
+    rows = conn.execute(sql + " order by received_at, receipt_id", args)
     merchant_side: dict[tuple[str, ...], sqlite3.Row] = {}
     buyer_side: dict[tuple[str, ...], sqlite3.Row] = {}
     soft_variants: dict[tuple[str, str, str], set[tuple[str, ...]]] = {}
@@ -195,19 +192,17 @@ def compute_intents(conn: sqlite3.Connection, merchant_id: str | None = None) ->
     return intents
 
 
-def compute_entries(conn: sqlite3.Connection, merchant_id: str | None = None) -> list[dict[str, Any]]:
-    """交易入口事实：商家发出与买方生成分列；报价引用关联（可早于协议）。"""
+def compute_entries(conn: sqlite3.Connection, merchant_id: str | None = None,
+                   group: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    sql = """select r.* from commerce_receipts r where event_type in ('merchant_entry_offered','buyer_handoff_generated')"""
+    args: list[Any] = []
     if merchant_id is not None:
-        rows = conn.execute(
-            "select * from commerce_receipts where merchant_id = ? and event_type in (?, ?)"
-            " order by received_at asc",
-            (merchant_id, "merchant_entry_offered", "buyer_handoff_generated"),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "select * from commerce_receipts where event_type in (?, ?) order by received_at asc",
-            ("merchant_entry_offered", "buyer_handoff_generated"),
-        ).fetchall()
+        sql += " and r.merchant_id=?"
+        args.append(merchant_id)
+    if group:
+        sql += " and receipt_id=?"
+        args.extend(group)
+    rows = conn.execute(sql + " order by received_at, receipt_id", args)
     entries: list[dict[str, Any]] = []
     for row in rows:
         quote_ref = json.loads(str(row["quote_ref_json"] or "{}"))
@@ -227,30 +222,20 @@ def compute_entries(conn: sqlite3.Connection, merchant_id: str | None = None) ->
     return entries
 
 
-def compute_orders(conn: sqlite3.Connection, merchant_id: str | None = None) -> list[dict[str, Any]]:
-    """实际订单事实：按（商家、渠道、渠道内订单引用）去重；来源可信且
-    关联可验证才确认。同一协议的第二笔有效订单独立计数。"""
+def compute_orders(conn: sqlite3.Connection, merchant_id: str | None = None,
+                   group: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    sql = """select r.*, exists (select 1 from commerce_receipts a where a.merchant_id=r.merchant_id
+        and a.merchant_agreement_id=json_extract(r.order_evidence_json,'$.merchant_agreement_ref')
+        and a.merchant_agreement_id<>'' and a.event_type='merchant_agreement_issued'
+        and a.reporter_role='merchant' and a.assurance='verified') as linked_agreement from commerce_receipts r where event_type in ('merchant_order_created')"""
+    args: list[Any] = []
     if merchant_id is not None:
-        rows = conn.execute(
-            "select * from commerce_receipts where merchant_id = ? and event_type = ?"
-            " order by received_at asc",
-            (merchant_id, "merchant_order_created"),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "select * from commerce_receipts where event_type = 'merchant_order_created'"
-            " order by received_at asc",
-        ).fetchall()
-    agreements = {
-        (str(row["merchant_id"]), str(row["merchant_agreement_id"]))
-        for row in conn.execute(
-            "select merchant_id, merchant_agreement_id from commerce_receipts"
-            " where event_type = 'merchant_agreement_issued' and reporter_role = 'merchant'"
-            " and assurance = 'verified' and merchant_agreement_id <> ''"
-            + (" and merchant_id = ?" if merchant_id is not None else ""),
-            (merchant_id,) if merchant_id is not None else (),
-        )
-    }
+        sql += " and r.merchant_id=?"
+        args.append(merchant_id)
+    if group:
+        sql += " and order_channel=? and order_ref=?"
+        args.extend(group)
+    rows = conn.execute(sql + " order by received_at, receipt_id", args)
     orders: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         dedup_key = (
@@ -259,10 +244,9 @@ def compute_orders(conn: sqlite3.Connection, merchant_id: str | None = None) -> 
             str(row["order_ref"]),
         )
         evidence = json.loads(str(row["order_evidence_json"] or "{}"))
-        agreement = evidence.get("merchant_agreement_ref")
         checkout = evidence.get("checkout_session_ref")
         channel_evidence = evidence.get("channel_evidence")
-        linked_agreement = isinstance(agreement, str) and (dedup_key[0], agreement) in agreements
+        linked_agreement = bool(row["linked_agreement"])
         # Scoped channel adapters attest the checkout association independently of intent.
         confirmed = (
             row["reporter_role"] == "merchant" and row["assurance"] == "verified" and linked_agreement
@@ -298,40 +282,78 @@ def compute_orders(conn: sqlite3.Connection, merchant_id: str | None = None) -> 
     return list(orders.values())
 
 
-_FACT_COMPUTERS = {
-    "intent": compute_intents,
-    "entry": compute_entries,
-    "order": compute_orders,
-}
+def _replace_group(conn: sqlite3.Connection, merchant: str, kind: str, key: tuple[Any, ...],
+                   facts: list[dict[str, Any]]) -> None:
+    group_key = json.dumps(key, separators=(",", ":"))
+    conn.execute("delete from commerce_fact_rows where merchant_id=? and kind=? and group_key=?",
+                 (merchant, kind, group_key))
+    for index, fact in enumerate(facts):
+        fact_key = json.dumps([merchant, kind, *key, index], separators=(",", ":"))
+        confirmed = kind == "intent" and fact["status"] == "confirmed"
+        conn.execute("insert into commerce_fact_rows(fact_key, merchant_id, kind, group_key, confirmed, verified, payload)"
+                     " values(?,?,?,?,?,?,?)",
+                     (fact_key, merchant, kind, group_key, int(confirmed),
+                      int(confirmed and fact["verified_enterprise"]), json.dumps(fact)))
 
 
-def query_facts(
-    conn: sqlite3.Connection,
-    query: dict[str, Any],
-    merchant_id: str | None,
-) -> dict[str, Any]:
-    """只读事实查询：merchant token 只读本店；admin 全量（merchant_id 可过滤）。"""
-    fact_type = str(query.get("fact_type") or "").strip()
-    if fact_type == "":
-        facts: list[dict[str, Any]] = []
-        for compute in _FACT_COMPUTERS.values():
-            facts.extend(compute(conn, merchant_id))
+def refresh_receipt(conn: sqlite3.Connection, receipt_id: int) -> None:
+    row = conn.execute("select event_type, merchant_id, negotiation_id, merchant_agreement_id, order_channel,"
+                       " order_ref from commerce_receipts where receipt_id=?", (receipt_id,)).fetchone()
+    kind, merchant, negotiation, agreement, channel, ref = row
+    if kind in (_INTENT_MERCHANT, _INTENT_BUYER):
+        group = (negotiation, agreement)
+        _replace_group(conn, merchant, "intent", group, compute_intents(conn, merchant, group))
+        if kind == _INTENT_MERCHANT:
+            # An agreement arriving after its orders may confirm those orders.
+            orders = conn.execute("select distinct order_channel, order_ref from commerce_receipts"
+                                  " where merchant_id=? and event_type='merchant_order_created'"
+                                  " and json_extract(order_evidence_json,'$.merchant_agreement_ref')=?",
+                                  (merchant, agreement))
+            for channel, ref in orders:
+                key = (channel, ref)
+                _replace_group(conn, merchant, "order", key, compute_orders(conn, merchant, key))
+    elif kind == "merchant_order_created":
+        key = (channel, ref)
+        _replace_group(conn, merchant, "order", key, compute_orders(conn, merchant, key))
     else:
-        if fact_type not in _FACT_COMPUTERS:
-            raise ValidationError(f"unknown fact_type: {fact_type}")
-        facts = list(_FACT_COMPUTERS[fact_type](conn, merchant_id))
-    confirmed_intents = sum(1 for item in facts if item["fact"] == "intent" and item["status"] == "confirmed")
-    verified_intents = sum(
-        1
-        for item in facts
-        if item["fact"] == "intent" and item["status"] == "confirmed" and item.get("verified_enterprise") is True
-    )
+        _replace_group(conn, merchant, "entry", (receipt_id,), compute_entries(conn, merchant, (receipt_id,)))
+
+
+def query_facts(conn: sqlite3.Connection, query: dict[str, Any], merchant_id: str | None) -> dict[str, Any]:
+    kind = str(query.get("fact_type") or "").strip()
+    if kind and kind not in ("intent", "entry", "order"):
+        raise ValidationError(f"unknown fact_type: {kind}")
+    try:
+        limit = int(str(query.get("limit", 50)))
+    except ValueError as exc:
+        raise ValidationError("limit must be an integer") from exc
+    if not 1 <= limit <= 200:
+        raise ValidationError("limit must be between 1 and 200")
+    where = " where 1=1"
+    args = []
+    if merchant_id is not None:
+        where += " and merchant_id=?"
+        args.append(merchant_id)
+    if kind:
+        where += " and kind=?"
+        args.append(kind)
+    cursor = str(query.get("cursor") or "")
+    if len(cursor) > 8192:
+        raise ValidationError("invalid fact cursor")
+    # One SQLite statement gives the page and its global counts a common snapshot.
+    rows = conn.execute(
+        "with totals as (select coalesce(sum(total),0) as n, coalesce(sum(confirmed),0) as intents,"
+        " coalesce(sum(verified),0) as enterprises from commerce_fact_totals" + where + "),"
+        " page as (select fact_key,payload from commerce_fact_rows" + where
+        + " and fact_key>? order by fact_key limit ?)"
+        " select totals.*,page.* from totals left join page on true order by fact_key",
+        (*args, *args, cursor, limit + 1),
+    ).fetchall()
+    counts = rows[0]
     return {
         "ok": True,
-        "facts": facts,
-        "summary": {
-            "confirmed_intents": confirmed_intents,
-            "verified_enterprise_intents": verified_intents,
-            "total": len(facts),
-        },
+        "facts": [json.loads(row["payload"]) for row in rows[:limit] if row["payload"] is not None],
+        "next_cursor": rows[limit - 1]["fact_key"] if len(rows) > limit else None,
+        "summary": {"total": counts["n"], "confirmed_intents": counts["intents"],
+                    "verified_enterprise_intents": counts["enterprises"]},
     }

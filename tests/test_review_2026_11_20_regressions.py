@@ -86,7 +86,7 @@ def test_current_schema_detects_missing_bootstrap_only_index(tmp_path, monkeypat
         schema_integrity._expected_schema.cache_clear()
         try:
             with pytest.raises(RuntimeError, match="missing index fixture_snapshot_only"):
-                schema_integrity.assert_catalog_schema(conn, 59)
+                schema_integrity.assert_catalog_schema(conn, schema_integrity.CURRENT_SCHEMA_VERSION)
         finally:
             schema_integrity._expected_schema.cache_clear()
 

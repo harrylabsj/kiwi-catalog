@@ -1786,6 +1786,27 @@ class UndeliverableRecipientTest(unittest.TestCase):
         self.addCleanup(env_patch.stop)
         self.app = create_catalog_app(self.db_path)
 
+    def test_delayed_mail_holds_no_write_lock_and_cannot_reactivate_an_older_code(self) -> None:
+        from kiwi_catalog.db.session import db_session
+        from kiwi_catalog.services import accounts
+
+        address = "resend@example.test"
+        with mock.patch.object(accounts, "generate_verification_code", side_effect=["111111", "222222"]):
+            with db_session(self.db_path) as conn:
+                first = accounts.start_registration(conn, address)
+            with db_session(self.db_path) as conn:
+                second = accounts.start_registration(conn, address)
+        def assert_unlocked(*_args):
+            with db_session(self.db_path) as other:
+                other.execute("pragma busy_timeout=0")
+                other.execute("begin immediate")
+        with mock.patch.object(accounts, "send_verification_email", side_effect=assert_unlocked):
+            accounts.deliver_code(self.db_path, second)
+            accounts.deliver_code(self.db_path, first)
+        with db_session(self.db_path) as conn:
+            self.assertEqual(accounts.verify_registration_code(conn, address, first.code), "")
+            self.assertTrue(accounts.verify_registration_code(conn, address, second.code))
+
     def test_register_code_with_rejected_recipient_is_400_not_500(self) -> None:
         import smtplib
 

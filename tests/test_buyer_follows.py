@@ -437,6 +437,11 @@ class BuyerFollowsApiTest(unittest.TestCase):
             ["增量商品一", "增量商品二", "增量商品三"],
         )
         self.assertEqual([e["version"] for e in block["events"]], [1, 2, 3])
+        self.assertEqual(self._updates(self.cookie_c)[1]["updates"], [block])
+        for _ in range(2):
+            status, _ = self._raw("POST", "/v1/me/follows/updates/ack",
+                                  {"watermarks": {self.merchant_a: block["last_seen_at"]}}, self.cookie_c)
+            self.assertEqual(status, 200)
         # 再拉：空（不重）
         status, payload = self._updates(self.cookie_c)
         self.assertEqual(payload["updates"], [])
@@ -459,7 +464,8 @@ class BuyerFollowsApiTest(unittest.TestCase):
         status, payload = self._updates(self.cookie_c)
         titles = [e["payload"]["title"] for m in payload["updates"] for e in m["events"]]
         self.assertEqual(titles, ["茶叶商品"])
-        # 不匹配的事件随水位越过：下次拉取不重复出现
+        self._raw("POST", "/v1/me/follows/updates/ack",
+                  {"watermarks": {self.merchant_a: payload["updates"][0]["last_seen_at"]}}, self.cookie_c)
         status, payload = self._updates(self.cookie_c)
         self.assertEqual(payload["updates"], [])
 

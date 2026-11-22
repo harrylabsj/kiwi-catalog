@@ -274,7 +274,8 @@ digest，提示商家用新内容重新发布。
 | `PUT /v1/me/follows/{merchant_id}` | 显式关注（幂等：重复关注不产生重复记录，可更新可选 body 的 `category`/`consent_version`）；首次关注水位从关注时刻起，取消后重新关注水位重置 |
 | `DELETE /v1/me/follows/{merchant_id}` | 取消关注（状态置 cancelled，幂等）；取消后不再出现在更新与关注列表里，商家汇总数字随之减一 |
 | `GET /v1/me/follows` | 我的活跃关注列表（买家管理面） |
-| `GET /v1/me/follows/updates` | 仅响应买家主动查询：按各关注的 `last_seen_at` 增量返回公开事件并推进水位（返回什么再推进，不丢不重）；`category` 非空的关注只投递该类目事件 |
+| `POST /v1/me/follows/updates/ack` | 保存收到的事件后，提交 `{"watermarks":{"商家ID":"该组的 last_seen_at"}}`。确认可重试，仅推进当前买家对应关注的水位。 |
+| `GET /v1/me/follows/updates` | 仅响应买家主动查询：按各关注的 `last_seen_at` 增量返回公开事件；确认前可以重读；`category` 非空的关注只投递该类目事件 |
 | `GET /v1/merchant-publications/stats` | 商家本人匿名汇总（仅本人 merchant_id，取自会话）：活跃关注者**总数** + 各公开资料浏览计数；**不返回任何买家身份**，无关注者列表 |
 
 - **买家身份**：任何已登录账号都可以作为买家；`buyer_subject` 一律取自

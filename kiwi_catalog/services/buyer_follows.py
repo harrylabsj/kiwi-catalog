@@ -19,9 +19,7 @@
   ``account:{account_id}``（不用邮箱等可变/私密字段），未来切换 WorkBuddy
   open_id 时只需换 ``buyer_subject_for_account`` 的取值；
 - 拉取语义：``GET /v1/me/follows/updates`` 仅响应买家主动查询——按各关注
-  的 ``last_seen_at`` 增量返回商家已批准公开的事件，**返回什么再推进水位**
-  （推进到本次实际取到的最后一条事件的 created_at，截断/类目过滤均不丢
-  不重）；无任何向关注者写消息或推送的通道；
+  的 ``last_seen_at`` 增量返回商家已批准公开的事件，客户端保存后显式确认水位；无任何向关注者写消息或推送的通道；
 - 商家侧只有匿名汇总（关注者总数），永远拿不到 buyer_subject / 关注列表。
 """
 
@@ -174,12 +172,7 @@ def list_follows(conn: sqlite3.Connection, *, buyer_subject: str) -> list[dict[s
 
 
 def fetch_updates(conn: sqlite3.Connection, *, buyer_subject: str) -> list[dict[str, Any]]:
-    """主动拉取更新：按各活跃关注的 last_seen_at 增量返回公开事件并推进水位。
-
-    水位推进到本次**实际取到**的最后一条事件的 created_at（created_at 按商家
-    严格递增）：条数截断时余量下次拉取不丢；类目过滤跳过的事件随水位越过、
-    不再重复扫描。只返回有新事件的商家。
-    """
+    """Return the unread page. Only an explicit acknowledgment advances the watermark."""
     rows = conn.execute(
         "select * from buyer_follows where buyer_subject = ? and status = 'active'"
         " order by created_at asc, merchant_id asc",
@@ -194,31 +187,28 @@ def fetch_updates(conn: sqlite3.Connection, *, buyer_subject: str) -> list[dict[
             merchant_id=merchant_id,
             last_seen_at=str(follow["last_seen_at"]),
             limit=UPDATES_PER_FOLLOW_CAP,
+            category=str(follow["category"] or ""),
         )
         if not events:
             continue
         new_seen_at = str(events[-1]["created_at"])
-        conn.execute(
-            "update buyer_follows set last_seen_at = ?, updated_at = ?"
-            " where buyer_subject = ? and merchant_id = ?",
-            (new_seen_at, now_iso(), buyer_subject, merchant_id),
-        )
-        category = str(follow["category"])
-        matching = [
-            event
-            for event in events
-            if not category or str((event["payload"] or {}).get("category") or "") == category
-        ]
-        if matching:
-            updates.append(
-                {
-                    "merchant_id": merchant_id,
-                    "merchant_name": _merchant_name(conn, merchant_id),
-                    "events": matching,
-                    "last_seen_at": new_seen_at,
-                }
-            )
+        updates.append({
+            "merchant_id": merchant_id, "merchant_name": _merchant_name(conn, merchant_id),
+            "events": events, "last_seen_at": new_seen_at,
+        })
     return updates
+
+
+def acknowledge_updates(conn: sqlite3.Connection, buyer_subject: str, watermarks: Any) -> None:
+    if not isinstance(watermarks, dict) or len(watermarks) > 500:
+        raise ValidationError("watermarks must be an object of up to 500 merchants")
+    for merchant_id, stamp in watermarks.items():
+        if not isinstance(merchant_id, str) or not isinstance(stamp, str) or len(stamp) > 64:
+            raise ValidationError("invalid follow watermark")
+        conn.execute("update buyer_follows set last_seen_at=?, updated_at=?"
+                     " where buyer_subject=? and merchant_id=? and status='active' and last_seen_at<?"
+                     " and exists (select 1 from merchant_public_events where merchant_id=? and created_at=?)",
+                     (stamp, now_iso(), buyer_subject, merchant_id, stamp, merchant_id, stamp))
 
 
 def follower_count(conn: sqlite3.Connection, merchant_id: str) -> int:

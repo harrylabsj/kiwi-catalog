@@ -678,6 +678,10 @@ RouteEntry(
         lambda db_path, payload, query, **kw: _v1_follow_updates(db_path, payload),
     ),
 RouteEntry(
+        {"POST"}, "/v1/me/follows/updates/ack",
+        lambda db_path, payload, query, **kw: buyer_follows_handlers.acknowledge_updates(db_path, payload),
+    ),
+RouteEntry(
         {"PUT"},
         "/v1/me/follows/{merchant_id}",
         lambda db_path, payload, query, merchant_id: _v1_follow_merchant(

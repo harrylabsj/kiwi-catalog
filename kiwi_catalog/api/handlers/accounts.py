@@ -254,7 +254,7 @@ def request_register_code(
         # 避免弃号邮箱永久占行。
         accounts_service.purge_expired_registrations(conn)
         code = accounts_service.start_registration(conn, email)
-    return {"ok": True, "email": email, "verification_code": code}
+    return {"ok": True, "email": email, "verification_code": accounts_service.deliver_code(db_path, code)}
 
 
 def verify_register_code(
@@ -515,11 +515,11 @@ def resend_code(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
         code = accounts_service.issue_verification(
             conn, int(account["account_id"]), email
         )
-        return {
-            "ok": True,
-            "email": email,
-            "verification_code": code,  # console 模式才有值
-        }
+    return {
+        "ok": True,
+        "email": email,
+        "verification_code": accounts_service.deliver_code(db_path, code),  # console 模式才有值
+    }
 
 
 def forgot_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -543,16 +543,16 @@ def forgot_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, A
             )
             _enforce_login_ip_limit(conn, db_path, payload, scope="forgot-password")
         account = accounts_service.account_by_email(conn, email)
-        code = ""
+        code: str | accounts_service.PendingCode = ""
         if account is not None:
             code = accounts_service.issue_password_reset(
                 conn, int(account["account_id"]), email
             )
-        return {
-            "ok": True,
-            "message": "如果该邮箱已注册，重置验证码已发送",
-            "reset_code": code,  # console 模式才有值
-        }
+    return {
+        "ok": True,
+        "message": "如果该邮箱已注册，重置验证码已发送",
+        "reset_code": accounts_service.deliver_code(db_path, code),  # console 模式才有值
+    }
 
 
 def reset_password(db_path: str | Path, payload: dict[str, Any]) -> dict[str, Any]:

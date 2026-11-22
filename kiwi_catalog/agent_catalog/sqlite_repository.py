@@ -480,6 +480,7 @@ def search_catalog_agents(
     handoff_destination_types: str = "",
     limit: int = 20,
     cursor: str = "",
+    merchant_id: str = "",
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Hard-filtered, deterministically-ordered catalog agent search.
 
@@ -501,6 +502,9 @@ def search_catalog_agents(
         clauses.append("ca.verification_status = ?")
         params.append(verification_status)
 
+    if merchant_id:
+        clauses.append("ca.merchant_id = ?")
+        params.append(merchant_id)
     if verification_level:
         clauses.append("ca.verification_level = ?")
         params.append(verification_level)
