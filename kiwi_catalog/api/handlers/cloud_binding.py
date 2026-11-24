@@ -380,6 +380,13 @@ def _current_active_binding(conn, catalog_agent_id: str):
     ).fetchone()
 
 
+def _next_binding_version(conn: sqlite3.Connection, catalog_agent_id: str) -> int:
+    return int(conn.execute(
+        "select coalesce(max(binding_version), 0) + 1 from runtime_bindings where catalog_agent_id = ?",
+        (catalog_agent_id,),
+    ).fetchone()[0])
+
+
 def _insert_active_binding(
     conn: Any,
     *,
@@ -391,9 +398,9 @@ def _insert_active_binding(
     existing: Any,
     actor: str,
 ) -> dict[str, Any]:
-    """落 active 绑定（首绑的 admin 兜底 / 轮换共用）：version 前进 + 旧绑定失效 + 审计。"""
+    """在写事务中创建绑定，版本号延续全部历史，只有当前 active 绑定需要撤销。"""
     agent_id = str(agent["catalog_agent_id"])
-    version = int(existing["binding_version"]) + 1 if existing is not None else 1
+    version = _next_binding_version(conn, agent_id)
     binding_id = str(binding.get("binding_id") or f"bind_{agent_id[-8:]}_{version}")
     if conn.execute(
         "select 1 from runtime_bindings where binding_id = ?", (binding_id,)
@@ -495,6 +502,8 @@ def create_runtime_binding(
     }
     notify_request: dict[str, Any] | None = None
     with db_session(db_path) as conn:
+        # 保证验签所用的当前绑定与写入时看到的历史版本来自同一事务。
+        conn.execute("BEGIN IMMEDIATE")
         agent = conn.execute(
             "select * from catalog_agents where catalog_agent_id = ?", (agent_id,)
         ).fetchone()
@@ -744,6 +753,7 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
         challenge_jws_payload = _read_jws_payload(str(response["signature"]))
         _check_enrollment_exp({**challenge_jws_payload, "exp": response["expires_at"]})
         with db_session(db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone()
             agent = conn.execute("select * from catalog_agents where catalog_agent_id=?", (agent_id,)).fetchone()
             if datetime.fromisoformat(str(challenge_request["expires_at"])) <= datetime.now(UTC):
@@ -760,7 +770,7 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
             except PermissionDenied:
                 _deny_logged(BIND_DIAG_POSSESSION_REPLAY, "challenge_commit", agent_id)
                 raise
-            version = int(conn.execute("select coalesce(max(binding_version),0)+1 from runtime_bindings where catalog_agent_id=?", (agent_id,)).fetchone()[0])
+            version = _next_binding_version(conn, agent_id)
             if version != int(row["expected_binding_version"]):
                 raise ConflictError("binding version changed since enrollment authorization")
             # 挑战已通过（持钥证明 + 授权校验 + nonce 消费都在上面），此刻才把随绑

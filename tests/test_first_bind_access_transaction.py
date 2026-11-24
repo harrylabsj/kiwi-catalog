@@ -27,7 +27,7 @@ from kiwi_catalog.discovery.fetcher import FetchResult, ProfileFetcher
 from kiwi_catalog.services import runtime_access as runtime_access_service
 
 from tests.test_cloud_binding import _b64url, _call, _jws
-from tests.test_enrollment_security import A2A_ENDPOINT, RUNTIME_ORIGIN, EnrollmentFixture
+from tests.test_enrollment_security import A2A_ENDPOINT, ADMIN_TOKEN, RUNTIME_ORIGIN, EnrollmentFixture
 
 ACCESS_CONFIG = {
     "provider": "workbuddy",
@@ -175,6 +175,56 @@ class FirstBindAccessTransactionTest(EnrollmentFixture):
         self.assertEqual(outcome["config_version"], rows[0]["config_version"])
         self.assertEqual(outcome["status"], rows[0]["status"])
         self.assertNotIn("tx-secret-alpha", json.dumps(result))
+
+    def test_reenrollment_advances_past_revoked_binding_history(self) -> None:
+        self._create_legacy_binding()
+        first_binding_id = self.binding_id
+        self._create_legacy_binding()
+        second_binding_id = self.binding_id
+        bind_path = f"/v1/agents/{self.agent_id}/runtime-bindings"
+        status, revoked = _call(
+            self.app, "POST", f"{bind_path}/{second_binding_id}/revoke", {"admin_token": ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 200, revoked)
+        self.assertEqual(revoked["status"], "revoked")
+
+        enrollment_id = "enr_tx_reconnect"
+        _, device_hash = self._insert_enrollment(status="ready_for_authorization", enrollment_id=enrollment_id)
+        user_code = "S" + hashlib.sha256(enrollment_id.encode()).hexdigest()[:7].upper()
+        authorized = self.client.post(
+            f"/v1/accounts/enrollments/{enrollment_id}/authorize",
+            json={"user_code": user_code}, headers={"Origin": "https://localhost"},
+        )
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+        self.assertEqual(authorized.json()["status"], "authorized")
+
+        grant = enrollment_service_grant(enrollment_id, device_hash)
+        body, signature = self._bind(enrollment_id, grant, with_config=False)
+        with mock.patch.object(ProfileFetcher, "post_json", side_effect=self._challenge_responder()):
+            status, result = _call(self.app, "POST", bind_path, body, signature=signature)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["status"], "bound")
+        self.assertEqual(result["binding_version"], 3)
+        self.assertIsNone(result["superseded_binding_id"])
+
+        with db_session(self.db_path) as conn:
+            bindings = conn.execute(
+                "select binding_id, binding_version, status from runtime_bindings"
+                " where catalog_agent_id=? order by binding_version", (self.agent_id,),
+            ).fetchall()
+            enrollment = conn.execute(
+                "select status, expected_binding_version, binding_id, consumed_at from enrollments"
+                " where enrollment_id=?", (enrollment_id,),
+            ).fetchone()
+        self.assertEqual([tuple(row) for row in bindings], [
+            (first_binding_id, 1, "revoked"),
+            (second_binding_id, 2, "revoked"),
+            (result["binding_id"], 3, "active"),
+        ])
+        self.assertEqual(enrollment["status"], "bound")
+        self.assertEqual(enrollment["expected_binding_version"], 3)
+        self.assertEqual(enrollment["binding_id"], result["binding_id"])
+        self.assertTrue(enrollment["consumed_at"])
 
     def test_commit_binding_version_cas_failure_rolls_back_everything(self) -> None:
         enrollment_id = "enr_tx_commit_rollback"
