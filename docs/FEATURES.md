@@ -71,7 +71,7 @@ fallback 共享同一 handler 层）；FastAPI 不可用时回退 **fallback ASG
 | GET | `/v1/merchant-publications/{id}` | 公开详情（匿名仅 published 未过期；商家本人可见自己的 draft/withdrawn） |
 | POST | `/v1/merchant-publications/{id}/withdraw` | 撤回（账号会话 + 归属校验，终态） |
 | GET | `/m/{merchant_id}` | 公开商家主页（匿名 HTML；别名 `/merchants/{merchant_id}`、`/merchant/{merchant_id}`；公开资料/商品，无私有数据） |
-| PUT | `/v1/agents/{id}/public-inquiry-consent` | 开放询价独立授权（当前活动绑定私钥签名；`granted` + `terms_version`） |
+| PUT | `/v1/agents/{id}/public-inquiry-consent` | 写入开放询价设置（当前活动绑定私钥签名；`granted` + `terms_version`） |
 | GET | `/v1/agents/{id}/public-inquiry-consent` | 开放询价授权状态（签名读；`granted` / `policy_active`，无凭据） |
 | GET | `/v1/agents/{id}/public-inquiry` | 开放询价可用性（未授权 404；仅 `{available, catalog_agent_id}`） |
 | POST | `/v1/agents/{id}/public-inquiry` | 开放询价签名中继（6 个 JSON-RPC 方法、原始 body ≤64KiB、30/min/IP） |
@@ -107,32 +107,29 @@ public-only 的商家/商品声明快照，买家按商品词公开检索：
 
 ### 2.5 开放询价中继（`/v1/agents/{id}/public-inquiry*`，0.5.13）
 
-开放询价是**独立于分享码代管授权**的商家 opt-in；仅有既有 custody consent
-不放行。成功响应与中继 502 均为 `Cache-Control: no-store`；未授权/参数错误
-走统一错误信封。
+WorkBuddy 新发布的接待服务默认开放询价，运行时使用已验证的活动绑定记录设置。商家可在工作台暂停。分享码代管由商家按需确认。成功响应与中继 502 均为 `Cache-Control: no-store`。
 
 - **授权**：`PUT .../public-inquiry-consent` 请求体固定为
   `{"binding":{"binding_id":...},"consent":{"granted":bool,"terms_version":"open-inquiry-v1"}}`，
   须由当前活动 binding 私钥签名（JWS claims 覆盖 method/path/audience/body_digest/
   catalog_agent_id/binding_id/key_id/runtime_origin/service_epoch）。`GET` 为同签名读，
   返回 `{"granted","policy_active","terms_version"}`。`granted:false` 幂等：从未授权
-  或重复撤销均返回成功，授权门禁仍由绑定/代管/发布复核 fail-closed。
-- **可用性**：`GET .../public-inquiry` 只在授权 + 当前绑定 + 代管 + 发布全部有效时
-  返回 `{"available":true,"catalog_agent_id":id}`；否则 404。
+  或重复撤销均返回成功。
+- **可用性**：`GET .../public-inquiry` 要求开放询价已开启、当前绑定和名片有效，并能解析到允许的接入路线。Auto 模式下从未配置分享码的 WorkBuddy 可由目录无码中继。
+  可用时返回 `{"available":true,"catalog_agent_id":id}`；否则 404。
 - **中继**：`POST .../public-inquiry` 仅接受带 `content-type` / `content-digest` /
   `signature` / `signature-input` 的 JSON-RPC 2.0（方法白名单 `SendMessage` /
   `GetTask` / `ListTasks` / `CancelTask` / `message/send` / `tasks/get`）；原始 body
   ≤64KiB（FastAPI 与 fallback 双栈一致），重复签名头 400。目录把原始字节与签名头
-  经 pinned DNS/TLS 转发到当前绑定的 `/a2a`（附分享码），不转发 cookie/authorization。
+  经 pinned DNS/TLS 转发到当前绑定的 `/a2a`，按接入方式附加有效分享码。转发头使用签名协议的白名单。
 - **失败**：上游非 200、响应形状不符或回显分享码统一 502 固定信封
   `{"jsonrpc":"2.0","id":...,"error":{"code":-32000,...}}`；不泄露 URL/门禁凭据，
   服务端只记录自有固定码与净化后的 agent 标识。
 - **限流**：中继按 IP 30/min（独立事务，拒绝也计数）；可用性面走公开读预算。
-- **撤销**：`granted:false` 立即写 `revoked_at`；换绑、暂停发布、撤销代管任一发生
-  即 `enabled()` fail-closed。
+- **撤销**：`granted:false` 立即写 `revoked_at`；换绑或暂停发布会关闭公开路线。撤销代管会关闭依赖该分享码的路线。
 - **定性（transport-only）**：这是相对「买家与商家直连」基线的**显式例外**。目录只
   转发已签名字节，不解析条款、不生成/修改报价、不裁决、不保存磋商状态；但报文（含
-  询价与报价）对目录可见，目录也持有并代填分享码。对外统一表述为「目录不裁决、
+  询价与报价）对目录可见；需要经过分享码门禁时，由目录代填分享码。对外统一表述为「目录不裁决、
   不存储」，不得表述为「目录看不到磋商内容」。方法与响应白名单、授权复核、残余风险
   与变更门槛见 harrylabsj/kiwi 的 `docs/open-inquiry-transport-contract.md`。
 

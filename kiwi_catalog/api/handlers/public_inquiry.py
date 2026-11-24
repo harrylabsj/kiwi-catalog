@@ -103,18 +103,14 @@ def forward(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict
     with db_session(db_path) as conn:
         enforce_public_read_limit(conn, payload, surface="open-inquiry", limit=30)
     with db_session(db_path) as conn:
-        if not public_inquiry_consent.enabled(conn, agent_id):
+        route = public_inquiry_consent.relay_route(conn, agent_id)
+        if route is None:
             raise NotFoundError("public inquiry is not available")
-        binding = conn.execute("select runtime_origin,a2a_endpoint from runtime_bindings "
-            "where catalog_agent_id=? and status='active' order by binding_version desc limit 1", (agent_id,)).fetchone()
-        config = runtime_access.active_runtime_access(conn, agent_id)
-        if binding is None or config is None:
-            raise NotFoundError("public inquiry is not available")
-        origin, endpoint = str(binding["runtime_origin"]), str(binding["a2a_endpoint"])
-        if endpoint != origin.rstrip("/") + "/a2a":
-            raise NotFoundError("public inquiry is not available")
-        secret = runtime_access.row_secret(config, statuses=frozenset({"active"}))
-        target = runtime_access.append_share_parameter(endpoint, secret)
+        target, config = route
+        secret = None
+        if config is not None:
+            secret = runtime_access.row_secret(config, statuses=frozenset({"active"}))
+            target = runtime_access.append_share_parameter(target, secret)
     try:
         result = ProfileFetcher(TrustPolicy.defaults(), timeout=15).post_signed_a2a(target, raw, headers)
     except Exception as exc:
@@ -137,7 +133,8 @@ def forward(db_path: str | Path, agent_id: str, payload: dict[str, Any]) -> dict
         response = None
     if not isinstance(response, dict) or response.get("jsonrpc") != "2.0" or response.get("id") != request_id \
             or set(response) - {"jsonrpc", "id", "result", "error"} \
-            or (("result" in response) == ("error" in response)) or _contains_gate_secret(response, secret):
+            or (("result" in response) == ("error" in response)) \
+            or (secret is not None and _contains_gate_secret(response, secret)):
         _LOG.warning(
             "public inquiry relay failed: code=%s agent=%s",
             PUBLIC_INQUIRY_UPSTREAM_INVALID, _log_safe_id(agent_id),
