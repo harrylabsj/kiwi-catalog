@@ -262,6 +262,45 @@ class PublicInquiryRelayHardeningTest(unittest.TestCase):
                         self.assertEqual(status, 400, payload)
                         self.assertEqual(self.calls, [])  # 超限请求绝不外发
 
+    def test_workbuddy_without_share_code_uses_signed_relay_and_stops_on_pause(self) -> None:
+        from kiwi_catalog.services import buyer_access
+
+        origin = "https://example.app.workbuddy.host"
+        with db_session(self.db_path) as conn:
+            conn.execute("update runtime_bindings set runtime_origin=?,a2a_endpoint=? where binding_id=?",
+                         (origin, origin + "/a2a", self.binding_id))
+            conn.execute("delete from runtime_access_configs where catalog_agent_id=?", (self.cagt,))
+            conn.execute("delete from public_inquiry_consents where catalog_agent_id=?", (self.cagt,))
+            policy.grant(conn, agent_id=self.cagt, merchant_id=self.merchant_id,
+                         binding_id=self.binding_id, terms_version=policy.TERMS_VERSION)
+            records = [{"catalog_agent_id": self.cagt, "administrative_state": "active"}]
+            self.assertEqual(buyer_access.public_projections(conn, records)[self.cagt]["state"], "relay")
+
+        for stack in ("fastapi", "fallback"):
+            with self.subTest(stack=stack):
+                status, payload, _headers = self._relay(stack, _inquiry_body())
+                self.assertEqual(status, 200, payload)
+                self.assertEqual(self.calls[-1][0], origin + "/a2a")
+
+        with db_session(self.db_path) as conn:
+            policy.revoke(conn, agent_id=self.cagt, merchant_id=self.merchant_id,
+                          binding_id=self.binding_id)
+            self.assertEqual(buyer_access.public_projections(conn, records)[self.cagt]["state"], "direct")
+        calls = len(self.calls)
+        status, payload, _headers = self._relay("fallback", _inquiry_body())
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(len(self.calls), calls)
+
+    def test_workbuddy_auto_mode_does_not_fall_back_after_revoking_share_code(self) -> None:
+        origin = "https://example.app.workbuddy.host"
+        with db_session(self.db_path) as conn:
+            conn.execute("update runtime_bindings set runtime_origin=?,a2a_endpoint=? where binding_id=?",
+                         (origin, origin + "/a2a", self.binding_id))
+            conn.execute("update runtime_access_configs set status='revoked' where catalog_agent_id=?", (self.cagt,))
+        status, payload, _headers = self._relay("fallback", _inquiry_body())
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(self.calls, [])
+
     def test_f1_client_forged_transport_keys_cannot_bypass(self) -> None:
         """伪造传输层同名键:超长键被客户端 JSON 限制拒绝;合法大小的伪造键是
         客户端 JSON 的惰性内容(原样转发、不被当作元数据)——中继的转发头、
