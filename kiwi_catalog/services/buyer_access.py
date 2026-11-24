@@ -33,7 +33,7 @@
 - 显式 `share_code` → `relay`（买家经目录中继传输，中继只传输不决定磋商）
 - 显式 `no_share_code` → `direct`（买家无码直连；失败由买家 fail-closed）
 - 显式/缺省 `auto` → 按目录既有公开事实保守回退：
-  active `runtime_access` → `relay`，否则 → `direct`（legacy 行为）。
+  active `runtime_access` 或无码 WorkBuddy 已开放询价 → `relay`，否则 → `direct`。
 - 无法确认（binding 撤销/轮换/过期、agent 非 active）→ `unknown`。
 """
 
@@ -170,6 +170,7 @@ def public_projection(
     runtime_access: dict[str, Any] | None,
     route: Any,
     binding: Any,
+    code_free_inquiry: bool = False,
 ) -> dict[str, Any]:
     """非凭据的 wire 投影。调用方负责批量取 route/binding。"""
     base: dict[str, Any] = {
@@ -201,6 +202,8 @@ def public_projection(
             return {**base, "state": "relay", "source": "merchant_setting"}
         if mode == "no_share_code":
             return {**base, "state": "direct", "source": "merchant_setting"}
+        if code_free_inquiry:
+            return {**base, "state": "relay", "source": "merchant_setting"}
         # auto：没有平台白名单 API，不能把"商家选择自动"解释成已加白；
         # 按目录既有事实保守回退（有 active 分享码 → 中继，否则无码）。
         if runtime_access is not None:
@@ -210,6 +213,8 @@ def public_projection(
     # 旧记录/旧客户端：没有显式行时沿用既有语义。旧记录不会因此被标成
     # "平台已验证直连"；`platform_verification` 仍是 unverified。
     base.pop("mode", None)
+    if code_free_inquiry:
+        return {**base, "state": "relay", "source": "merchant_setting"}
     if runtime_access is not None:
         return {**base, "state": "relay", "source": "legacy_runtime_access"}
     return {**base, "state": "direct", "source": "legacy_no_share_code"}
@@ -221,10 +226,13 @@ def public_projections(
     runtime_access_map: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """批量公开投影（list/search 用；每类一次 IN 查询）。"""
+    from kiwi_catalog.services.public_inquiry_consent import code_free_inquiry_bindings
+
     ids = [str(row.get("catalog_agent_id", "")) for row in rows]
     routes = route_rows(conn, ids)
     bindings = active_bindings(conn, ids)
     access = runtime_access_map or {}
+    inquiry = code_free_inquiry_bindings(conn, bindings)
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
         agent_id = str(row.get("catalog_agent_id", ""))
@@ -234,6 +242,7 @@ def public_projections(
             runtime_access=access.get(agent_id),
             route=routes.get(agent_id),
             binding=bindings.get(agent_id),
+            code_free_inquiry=agent_id in inquiry,
         )
     return result
 
@@ -255,6 +264,7 @@ def owner_state(conn: Any, catalog_agent_id: str) -> dict[str, Any]:
         (catalog_agent_id,),
     ).fetchone()
     binding = active_binding(conn, catalog_agent_id)
+    from kiwi_catalog.services.public_inquiry_consent import code_free_inquiry_bindings
     from kiwi_catalog.services.runtime_access import active_public_projections
 
     runtime_access = active_public_projections(conn, [catalog_agent_id]).get(catalog_agent_id)
@@ -264,6 +274,7 @@ def owner_state(conn: Any, catalog_agent_id: str) -> dict[str, Any]:
         runtime_access=runtime_access,
         route=row,
         binding=binding,
+        code_free_inquiry=binding is not None and bool(code_free_inquiry_bindings(conn, {catalog_agent_id: binding})),
     )
     return {
         "ok": True,
