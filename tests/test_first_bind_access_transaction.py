@@ -226,6 +226,112 @@ class FirstBindAccessTransactionTest(EnrollmentFixture):
         self.assertEqual(enrollment["binding_id"], result["binding_id"])
         self.assertTrue(enrollment["consumed_at"])
 
+    def test_reenrollment_binds_while_previous_card_stays_withdrawn(self) -> None:
+        """卸载后重新接入：旧名片撤回不能卡死新绑定。
+
+        卸载 = 撤销绑定 + 撤回名片（WITHDRAWN）。重新配对通过持钥证明与端点
+        挑战后，绑定回执只发给这台 Runtime，不是买家公开读：旧名片保持
+        WITHDRAWN 也必须完成绑定，否则卸载过的商家永远接不回来。回执如实给出
+        WITHDRAWN 与当前版本号（Runtime 重新发布时用它做 CAS 期望值），不引用
+        已撤回名片的 ETag；买家公开读在 Runtime 重新发布前仍拒签（SIG-02 不变）。
+        """
+        self._create_legacy_binding()
+        self._create_legacy_binding()
+        old_binding_id = self.binding_id
+        old_revision = self._publish()
+        bind_path = f"/v1/agents/{self.agent_id}/runtime-bindings"
+        status, revoked = _call(
+            self.app, "POST", f"{bind_path}/{old_binding_id}/revoke", {"admin_token": ADMIN_TOKEN},
+        )
+        self.assertEqual(status, 200, revoked)
+        with db_session(self.db_path) as conn:
+            publication = conn.execute(
+                "select publication_state, active_revision from card_publications"
+                " where catalog_agent_id=?",
+                (self.agent_id,),
+            ).fetchone()
+        self.assertEqual(
+            (publication["publication_state"], int(publication["active_revision"])),
+            ("WITHDRAWN", old_revision),
+        )
+
+        enrollment_id = "enr_tx_reconnect_withdrawn"
+        _, device_hash = self._insert_enrollment(
+            status="ready_for_authorization", enrollment_id=enrollment_id,
+        )
+        user_code = "S" + hashlib.sha256(enrollment_id.encode()).hexdigest()[:7].upper()
+        authorized = self.client.post(
+            f"/v1/accounts/enrollments/{enrollment_id}/authorize",
+            json={"user_code": user_code}, headers={"Origin": "https://localhost"},
+        )
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+
+        grant = enrollment_service_grant(enrollment_id, device_hash)
+        body, signature = self._bind(enrollment_id, grant)
+        with mock.patch.object(ProfileFetcher, "post_json", side_effect=self._challenge_responder()):
+            status, result = _call(self.app, "POST", bind_path, body, signature=signature)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["status"], "bound")
+        self.assertEqual(result["binding_version"], 3)
+        receipt = result["binding_claim"]
+        self.assertEqual(receipt["governance"]["publication_state"], "WITHDRAWN")
+        self.assertEqual(receipt["card_revision"], old_revision)
+        self.assertIsNone(receipt["card_etag"])
+        self.assertTrue(result["access_config_outcome"]["applied"])
+        with db_session(self.db_path) as conn:
+            enrollment = conn.execute(
+                "select status, binding_id from enrollments where enrollment_id=?", (enrollment_id,),
+            ).fetchone()
+        self.assertEqual(
+            (enrollment["status"], enrollment["binding_id"]), ("bound", result["binding_id"]),
+        )
+
+        # 买家公开读：Runtime 重新发布前，旧名片仍是 WITHDRAWN → 拒签不变。
+        status, _claims = _call(self.app, "GET", f"/v1/agents/{self.agent_id}/runtime-binding")
+        self.assertEqual(status, 403)
+
+        # Runtime 重新发布：以回执给出的版本号作为 CAS 期望值 → 新版本激活，恢复 ACTIVE。
+        # 与真实 Runtime 一致：发布的是商家批准的那份名片（摘要取授权时冻结的值）。
+        new_binding_id = result["binding_id"]
+        with db_session(self.db_path) as conn:
+            digest = conn.execute(
+                "select approved_card_digest from enrollments where enrollment_id=?", (enrollment_id,),
+            ).fetchone()["approved_card_digest"]
+        status, created = _call(
+            self.app, "POST", f"/v1/agents/{self.agent_id}/card-publications",
+            {"publication": {
+                "schema_version": "0.1.2", "agent_id": self.agent_id, "binding_id": new_binding_id,
+                "generation": 1, "expected_revision": old_revision, "wire_profile": "a2a-1.0",
+                "card_digest": digest,
+                "agent_card": {
+                    "name": "Security Merchant A", "version": "1.0.0", "url": RUNTIME_ORIGIN,
+                    "supportedInterfaces": [{
+                        "url": A2A_ENDPOINT, "protocolBinding": "JSONRPC", "protocolVersion": "1.0",
+                    }],
+                },
+            }},
+            signature=_jws(self.private_pem, RUNTIME_ORIGIN, {
+                "agent_id": self.agent_id, "binding_id": new_binding_id, "card_digest": digest,
+                "expected_revision": old_revision, "generation": 1,
+            }),
+        )
+        self.assertEqual(status, 200, created)
+        self.assertEqual(created["card_revision"], old_revision + 1)
+        activate = {
+            "binding_id": new_binding_id, "card_revision": created["card_revision"],
+            "expected_revision": old_revision,
+        }
+        status, activated = _call(
+            self.app, "POST", f"/v1/agents/{self.agent_id}/publish", activate,
+            signature=_jws(self.private_pem, RUNTIME_ORIGIN, {"agent_id": self.agent_id, **activate}),
+        )
+        self.assertEqual(status, 200, activated)
+        self.assertEqual(activated["publication_state"], "ACTIVE")
+        status, claims = _call(self.app, "GET", f"/v1/agents/{self.agent_id}/runtime-binding")
+        self.assertEqual(status, 200, claims)
+        self.assertEqual(claims["claims"]["binding_id"], new_binding_id)
+        self.assertEqual(claims["governance"]["publication_state"], "ACTIVE")
+
     def test_commit_binding_version_cas_failure_rolls_back_everything(self) -> None:
         enrollment_id = "enr_tx_commit_rollback"
         grant = self._enrollment(enrollment_id)

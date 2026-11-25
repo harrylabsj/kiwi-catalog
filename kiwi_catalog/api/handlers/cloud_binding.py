@@ -871,7 +871,11 @@ def _enrollment_binding_result(conn: Any, agent_id: str, row: Any, outcome: dict
     binding_id = str(row["binding_id"])
     binding = conn.execute("select * from runtime_bindings where binding_id=?", (binding_id,)).fetchone()
     from kiwi_catalog.a2a.binding_claims import read_runtime_binding
-    declaration = read_runtime_binding(conn, agent_id)
+    # 绑定回执只交给已通过持钥证明与端点挑战的 Runtime，不是买家公开读：卸载
+    # （绑定撤销 → 名片撤回）后重新接入时旧名片仍是 WITHDRAWN，此处若拒签，
+    # 提交事务整体回滚，新绑定永远完不成。回执如实带 WITHDRAWN 与当前版本号，
+    # Runtime 据此重新发布后名片才恢复可见；买家公开读的拒签语义不变。
+    declaration = read_runtime_binding(conn, agent_id, allow_withdrawn=True)
     return {"status": "bound", "enrollment_id": row["enrollment_id"], "binding_id": binding_id,
         "binding_version": int(binding["binding_version"]), "key_thumbprint": row["key_thumbprint"],
         "catalog_agent_id": agent_id, "binding_claim": declaration,

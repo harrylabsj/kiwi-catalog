@@ -161,8 +161,16 @@ def read_runtime_binding(
     ttl_seconds: int = DEFAULT_CLAIMS_TTL_SECONDS,
     env: Mapping[str, str] | None = None,
     public_origin: str | None = None,
+    allow_withdrawn: bool = False,
 ) -> dict[str, Any]:
-    """签发并返回绑定声明 + 治理状态（公开读；不含平台 appId/用户 ID）。"""
+    """签发并返回绑定声明 + 治理状态（公开读；不含平台 appId/用户 ID）。
+
+    ``allow_withdrawn`` 仅供**绑定回执**（已通过持钥证明与端点挑战、商家已授权的
+    Runtime）使用：旧名片处于 WITHDRAWN 时照常签发，而不是拒签 403。绑定撤销会
+    撤回名片，卸载过的商家重新配对时旧名片仍是撤回态——回执若在此拒签，提交
+    事务整体回滚，新绑定永远完不成，「重新发布即可恢复」也就无从谈起。买家公开
+    读保持默认 ``False``（§11.6 SIG-02 撤回拒签不变）。
+    """
     current = now or datetime.now(timezone.utc)
     if ttl_seconds <= 0 or ttl_seconds > MAX_CLAIMS_TTL_SECONDS:
         raise ValidationError(f"claims ttl must be within 1..{MAX_CLAIMS_TTL_SECONDS} seconds")
@@ -206,6 +214,10 @@ def read_runtime_binding(
     #   governance.publication_state 给诚实值 "UNPUBLISHED"，顶层
     #   card_revision/card_etag 为 None。买家侧无风险：发布激活前不会写
     #   agent_card 端点行（§4.5），买家根本发现不了这个 agent。
+    # - WITHDRAWN + ``allow_withdrawn``（仅绑定回执）→ 照常签发：治理态给诚实值
+    #   "WITHDRAWN"，card_revision 如实给当前版本号（Runtime 重新发布时以它做
+    #   CAS 期望值；给 None 会被当成 0 而撞 409），card_etag 为 None——回执不
+    #   引用已撤回内容。名片要等 Runtime 重新发布并激活后才恢复对外可见。
     try:
         _card, _etag, publication_state = read_active_card(conn, catalog_agent_id)
     except CardQuarantineError as exc:
@@ -213,7 +225,9 @@ def read_runtime_binding(
             "publication quarantined (share-code link); refusing to issue claims"
         ) from exc
     except GoneError as exc:
-        raise PermissionDenied("publication withdrawn; refusing to issue claims") from exc
+        if not allow_withdrawn:
+            raise PermissionDenied("publication withdrawn; refusing to issue claims") from exc
+        publication_state = "WITHDRAWN"
     except NotFoundError:
         publication_state = "UNPUBLISHED"
 
@@ -272,7 +286,10 @@ def read_runtime_binding(
         # 公开元数据（非敏感）：供 Buyer 按 (来源, card revision, binding_version, 端点)
         # 建立信任缓存（设计 §12.1）。
         "card_revision": int(publication["active_revision"]) if publication is not None else None,
-        "card_etag": str(publication["etag"]) if publication is not None else None,
+        "card_etag": (
+            None if publication is None or publication_state == "WITHDRAWN"
+            else str(publication["etag"])
+        ),
     }
 
 
