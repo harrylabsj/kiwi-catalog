@@ -69,6 +69,36 @@ class PublicInquiryConsentTest(unittest.TestCase):
         policy.revoke(self.conn, agent_id="agent", merchant_id="merchant", binding_id="binding")
         self.assertFalse(policy.enabled(self.conn, "agent"))
 
+    def test_code_free_projection_matches_relay_for_current_workbuddy_binding(self) -> None:
+        origin = 'https://fixture.app.workbuddy.host'
+        self.conn.execute("update runtime_bindings set runtime_origin=?, a2a_endpoint=? where binding_id='binding'",
+                          (origin, origin + '/a2a'))
+        self._grant()
+
+        def projected() -> set[str]:
+            bindings = {row['catalog_agent_id']: row for row in self.conn.execute(
+                "select * from runtime_bindings where status='active'"
+            )}
+            return policy.code_free_inquiry_bindings(self.conn, bindings)
+
+        self.assertEqual(projected(), {'agent'})
+        self.assertEqual(policy.relay_route(self.conn, 'agent'), (origin + '/a2a', None))
+        for endpoint, expires in (
+            (origin + '/wrong', ''),
+            (origin + '/a2a', '2000-01-01T00:00:00Z'),
+            (origin + '/a2a', '2999-01-01T00:00:00'),
+            (origin + '/a2a', 'invalid-expiry'),
+        ):
+            with self.subTest(endpoint=endpoint, expires=expires):
+                self.conn.execute("update runtime_bindings set a2a_endpoint=?, expires_at=? where binding_id='binding'",
+                                  (endpoint, expires))
+                self.assertEqual(projected(), set())
+                self.assertIsNone(policy.relay_route(self.conn, 'agent'))
+        self.conn.execute("update runtime_bindings set expires_at='' where binding_id='binding'")
+        self.conn.execute("update catalog_agents set freshness_state='unreachable' where catalog_agent_id='agent'")
+        self.assertEqual(projected(), set())
+        self.assertIsNone(policy.relay_route(self.conn, 'agent'))
+
     def test_revocation_and_custody_or_publication_stop_access(self) -> None:
         self._grant()
         with patch("kiwi_catalog.services.runtime_access.custody_enabled", return_value=False):

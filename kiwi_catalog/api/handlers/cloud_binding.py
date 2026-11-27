@@ -51,6 +51,7 @@ from kiwi_catalog.api import auth as api_auth
 from kiwi_catalog.api.auth import AuthError
 from kiwi_catalog.core.errors import (
     ConflictError,
+    GoneError,
     NotFoundError,
     PermissionDenied,
     ValidationError,
@@ -825,6 +826,7 @@ def _create_enrollment_binding(db_path: str | Path, agent_id: str, payload: dict
                     )
                 except ConflictError:
                     pass
+            _withdraw_quarantined_card_on_rebind(conn, agent_id, enrollment_id)
             # 独立变量名：本函数的 `result` 已在上方绑定为 FetchResult（挑战投递
             # 结果），复用同名会让 mypy 按首次赋值推断类型，运行语义不变但类型错误。
             binding_result: dict[str, Any] = _enrollment_binding_result(conn, agent_id, conn.execute("select * from enrollments where enrollment_id=?", (enrollment_id,)).fetchone(), outcome)
@@ -865,6 +867,34 @@ def _read_jws_payload(jws: str) -> dict[str, Any]:
         return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
     except Exception as exc:
         raise ValidationError("malformed possession JWS") from exc
+
+
+def _withdraw_quarantined_card_on_rebind(conn: sqlite3.Connection, agent_id: str, enrollment_id: str) -> None:
+    """Retire only a quarantined legacy revision during the authorized binding commit."""
+    from kiwi_catalog.a2a.card_store import (
+        CardQuarantineError,
+        read_active_card,
+        withdraw_publication_on_binding_revoke,
+    )
+
+    try:
+        read_active_card(conn, agent_id)
+    except CardQuarantineError:
+        # As in normal disconnect, stop advertising the old publication. Do not
+        # change its signed bytes or relax the public reader/issuer. The existing
+        # WITHDRAWN receipt lets the Runtime publish clean content against its revision.
+        actor = f"enrollment:{enrollment_id}"
+        withdrawn = withdraw_publication_on_binding_revoke(
+            conn, catalog_agent_id=agent_id, actor=actor, now=now_iso(),
+        )
+        if withdrawn is not None:
+            append_catalog_audit(conn, agent_id, actor, "card_publication_withdrawn", {
+                "active_revision": withdrawn["active_revision"],
+                "reason": "quarantined_card_rebind",
+            })
+    except (GoneError, NotFoundError):
+        # Already withdrawn or no card to retire.
+        pass
 
 
 def _enrollment_binding_result(conn: Any, agent_id: str, row: Any, outcome: dict[str, Any] | None = None) -> dict[str, Any]:
