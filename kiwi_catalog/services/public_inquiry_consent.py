@@ -15,6 +15,7 @@ from kiwi_catalog.db.session import now_iso
 from kiwi_catalog.services import buyer_access, runtime_access
 
 TERMS_VERSION = "open-inquiry-v1"
+_ACTIVE_AGENT = "a.administrative_state='active' and a.lifecycle_status='active' and a.freshness_state!='unreachable'"
 
 
 def _current_binding(conn: sqlite3.Connection, agent_id: str, merchant_id: str, binding_id: str) -> sqlite3.Row | None:
@@ -22,20 +23,25 @@ def _current_binding(conn: sqlite3.Connection, agent_id: str, merchant_id: str, 
         "select b.expires_at,b.runtime_origin,b.a2a_endpoint from runtime_bindings b "
         "join catalog_agents a on a.catalog_agent_id=b.catalog_agent_id "
         "where b.catalog_agent_id=? and b.merchant_id=? and b.binding_id=? "
-        "and b.status='active' and a.merchant_id=? and a.administrative_state='active' "
-        "and a.lifecycle_status='active' and a.freshness_state!='unreachable'",
+        f"and b.status='active' and a.merchant_id=? and {_ACTIVE_AGENT}",
         (agent_id, merchant_id, binding_id, merchant_id),
     ).fetchone()
-    if row is None:
-        return None
-    expires = str(row[0] or "")
+    return row if row is not None and _binding_is_live(row, datetime.now(timezone.utc)) else None
+
+
+def _binding_is_live(binding: sqlite3.Row, now: datetime) -> bool:
+    expires = str(binding["expires_at"] or "")
     if not expires:
-        return row
+        return True
     try:
         when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-        return row if when.tzinfo is not None and when > datetime.now(timezone.utc) else None
+        return when.tzinfo is not None and when > now
     except ValueError:
-        return None
+        return False
+
+
+def _matches_endpoint(binding: sqlite3.Row) -> bool:
+    return binding["a2a_endpoint"] == str(binding["runtime_origin"]).rstrip("/") + "/a2a"
 
 
 def _is_workbuddy(binding: sqlite3.Row) -> bool:
@@ -108,7 +114,7 @@ def relay_route(conn: sqlite3.Connection, agent_id: str) -> tuple[str, sqlite3.R
         "select publication_state from card_publications where catalog_agent_id=?", (agent_id,),
     ).fetchone()
     endpoint = str(binding["a2a_endpoint"])
-    if publication is None or publication[0] != "ACTIVE" or endpoint != str(binding["runtime_origin"]).rstrip("/") + "/a2a":
+    if publication is None or publication[0] != "ACTIVE" or not _matches_endpoint(binding):
         return None
 
     if _is_workbuddy(binding):
@@ -134,7 +140,11 @@ def code_free_inquiry_bindings(
     conn: sqlite3.Connection, bindings: dict[str, sqlite3.Row],
 ) -> set[str]:
     """Batch the directory's auto-route projection for WorkBuddy without a gate credential."""
-    candidates = {agent_id: binding for agent_id, binding in bindings.items() if _is_workbuddy(binding)}
+    now = datetime.now(timezone.utc)
+    candidates = {
+        agent_id: binding for agent_id, binding in bindings.items()
+        if _is_workbuddy(binding) and _binding_is_live(binding, now) and _matches_endpoint(binding)
+    }
     if not candidates:
         return set()
     placeholders = ",".join("?" for _ in candidates)
@@ -143,7 +153,7 @@ def code_free_inquiry_bindings(
         " join card_publications p on p.catalog_agent_id=c.catalog_agent_id"
         " join catalog_agents a on a.catalog_agent_id=c.catalog_agent_id and a.merchant_id=c.merchant_id"
         " where c.terms_version=? and c.revoked_at='' and p.publication_state='ACTIVE'"
-        " and a.administrative_state='active' and a.lifecycle_status='active' and a.freshness_state!='unreachable'"
+        f" and {_ACTIVE_AGENT}"
         " and not exists (select 1 from runtime_access_configs r where r.catalog_agent_id=c.catalog_agent_id)"
         f" and c.catalog_agent_id in ({placeholders})",
         (TERMS_VERSION, *candidates),

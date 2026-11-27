@@ -485,6 +485,8 @@ def query_facts(
 
     merchant token 只读本店事实；admin 全量（可按 merchant_id 过滤）。
     另一商家无法读取本店事实（B3 访问控制同逐笔回执）。
+    ``cursor`` 只定位当前页面，不固定跨页快照；并发回执可能在已扫游标之前
+    新增或替换事实。不要将跨页求和用于最终对账，须在写入静止时完整读取。
     """
 
     bearer = str(payload.get("_auth_token") or "").strip()

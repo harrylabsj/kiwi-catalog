@@ -290,9 +290,119 @@ class FirstBindAccessTransactionTest(EnrollmentFixture):
         status, _claims = _call(self.app, "GET", f"/v1/agents/{self.agent_id}/runtime-binding")
         self.assertEqual(status, 403)
 
-        # Runtime 重新发布：以回执给出的版本号作为 CAS 期望值 → 新版本激活，恢复 ACTIVE。
-        # 与真实 Runtime 一致：发布的是商家批准的那份名片（摘要取授权时冻结的值）。
+        self._assert_clean_republication(enrollment_id, result["binding_id"], old_revision)
+
+    def test_reenrollment_replaces_binding_when_legacy_card_is_quarantined(self) -> None:
+        self._create_legacy_binding()
+        old_binding_id = self.binding_id
+        old_revision = self._publish()
+        # 模拟隔离规则引入之前发布的存量名片；后续操作全部走真实授权、绑定和发布端点。
+        from kiwi_catalog.a2a.card_store import compute_etag
+        from kiwi_catalog.a2a.enrollment_canonical import canonical_digest
+
+        marker = "historical-fixture-value"
+        with db_session(self.db_path) as conn:
+            version = conn.execute(
+                "select canonical_bytes from agent_card_versions where catalog_agent_id=? and card_revision=?",
+                (self.agent_id, old_revision),
+            ).fetchone()
+            legacy = json.loads(version["canonical_bytes"])
+            legacy["description"] = f"https://fixture.example/app?sharecode={marker}"
+            conn.execute("update agent_card_versions set canonical_bytes=?, digest=? "
+                         "where catalog_agent_id=? and card_revision=?",
+                         (json.dumps(legacy), canonical_digest(legacy), self.agent_id, old_revision))
+            conn.execute("update card_publications set etag=? where catalog_agent_id=?",
+                         (compute_etag(legacy), self.agent_id))
+        base = f"/v1/agents/{self.agent_id}"
+        for path, expected in (("/agent-card.json", 410), ("/runtime-binding", 403)):
+            status, result = _call(self.app, "GET", base + path)
+            self.assertEqual(status, expected, result)
+            self.assertNotIn(marker, json.dumps(result))
+
+        enrollment_id = "enr_tx_replace_quarantined"
+        _, device_hash = self._insert_enrollment(status="ready_for_authorization", enrollment_id=enrollment_id)
+        user_code = "S" + hashlib.sha256(enrollment_id.encode()).hexdigest()[:7].upper()
+        authorized = self.client.post(
+            f"/v1/accounts/enrollments/{enrollment_id}/authorize",
+            json={"user_code": user_code}, headers={"Origin": "https://localhost"},
+        )
+        self.assertEqual(authorized.status_code, 200, authorized.text)
+        grant = enrollment_service_grant(enrollment_id, device_hash)
+        body, signature = self._bind(enrollment_id, grant, with_config=False)
+        # Even a failure after the endpoint challenge must leave the old binding
+        # and quarantine untouched; the already-authorized Runtime can retry.
+        from kiwi_catalog.core.errors import PermissionDenied
+
+        with (mock.patch.object(ProfileFetcher, "post_json", side_effect=self._challenge_responder()),
+              mock.patch("kiwi_catalog.a2a.binding_claims.load_issuer_key_set",
+                         side_effect=PermissionDenied("test issuer unavailable"))):
+            status, failure = _call(self.app, "POST", base + "/runtime-bindings", body, signature=signature)
+        self.assertEqual(status, 403, failure)
+        self.assertEqual(failure["error"], "test issuer unavailable")
+        self.assertEqual(self._binding_rows(), [{"binding_id": old_binding_id, "status": "active"}])
+        with db_session(self.db_path) as conn:
+            publication = conn.execute("select publication_state from card_publications where catalog_agent_id=?",
+                                       (self.agent_id,)).fetchone()
+            self.assertEqual(publication["publication_state"], "ACTIVE")
+            self.assertIsNone(conn.execute(
+                "select 1 from audit_events where event='card_publication_withdrawn' and actor=?",
+                (f"enrollment:{enrollment_id}",),
+            ).fetchone())
+
+        body, signature = self._bind(enrollment_id, grant, with_config=False)
+        with mock.patch.object(ProfileFetcher, "post_json", side_effect=self._challenge_responder()) as challenge:
+            status, result = _call(self.app, "POST", base + "/runtime-bindings", body, signature=signature)
+        challenge.assert_called_once()
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["status"], "bound")
+        self.assertEqual(result["binding_version"], 2)
+        self.assertEqual(result["superseded_binding_id"], old_binding_id)
+        self.assertNotIn(marker, json.dumps(result))
         new_binding_id = result["binding_id"]
+        self.assertEqual(self._binding_rows(), [
+            {"binding_id": old_binding_id, "status": "revoked"},
+            {"binding_id": new_binding_id, "status": "active"},
+        ])
+        # 丢失响应后的重试要复用绑定，不重新挑战、不再生成版本。
+        body, signature = self._bind(enrollment_id, grant, with_config=False)
+        with mock.patch.object(ProfileFetcher, "post_json") as challenge:
+            status, replay = _call(self.app, "POST", base + "/runtime-bindings", body, signature=signature)
+        challenge.assert_not_called()
+        self.assertEqual(status, 200, replay)
+        self.assertEqual(replay["binding_id"], new_binding_id)
+        for response in (result, replay):
+            receipt = response["binding_claim"]
+            self.assertEqual(receipt["governance"]["publication_state"], "WITHDRAWN")
+            self.assertEqual(receipt["card_revision"], old_revision)
+            self.assertIsNone(receipt["card_etag"])
+        with db_session(self.db_path) as conn:
+            version = conn.execute(
+                "select canonical_bytes, digest from agent_card_versions where catalog_agent_id=? and card_revision=?",
+                (self.agent_id, old_revision),
+            ).fetchone()
+            self.assertEqual(json.loads(version["canonical_bytes"]), legacy)
+            self.assertEqual(version["digest"], canonical_digest(legacy))
+            publication = conn.execute("select etag from card_publications where catalog_agent_id=?",
+                                       (self.agent_id,)).fetchone()
+            self.assertEqual(publication["etag"], compute_etag(legacy))
+            self.assertIsNone(conn.execute(
+                "select 1 from agent_endpoints where catalog_agent_id=? and kind in ('a2a', 'agent_card')",
+                (self.agent_id,),
+            ).fetchone())
+            audit = conn.execute(
+                "select details_json from audit_events where event='card_publication_withdrawn' and actor=?",
+                (f"enrollment:{enrollment_id}",),
+            ).fetchall()
+            self.assertEqual(len(audit), 1)
+            self.assertEqual(json.loads(audit[0]["details_json"])["reason"], "quarantined_card_rebind")
+        for path, expected in (("/agent-card.json", 410), ("/runtime-binding", 403)):
+            status, payload = _call(self.app, "GET", base + path)
+            self.assertEqual(status, expected, payload)
+            self.assertNotIn(marker, json.dumps(payload))
+        self._assert_clean_republication(enrollment_id, new_binding_id, old_revision)
+
+    def _assert_clean_republication(self, enrollment_id: str, new_binding_id: str, old_revision: int) -> None:
+        # Runtime 以回执给出的版本号作为 CAS 期望值，发布商家批准的干净版本。
         with db_session(self.db_path) as conn:
             digest = conn.execute(
                 "select approved_card_digest from enrollments where enrollment_id=?", (enrollment_id,),

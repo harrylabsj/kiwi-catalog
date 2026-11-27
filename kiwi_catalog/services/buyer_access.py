@@ -108,7 +108,7 @@ def active_binding(conn: Any, catalog_agent_id: str) -> Any:
     """当前 active 且未过期的 runtime binding；不返回任何密钥材料。"""
     now = datetime.now(UTC)
     rows = conn.execute(
-        "select binding_id, catalog_agent_id, merchant_id, key_id, runtime_origin,"
+        "select binding_id, catalog_agent_id, merchant_id, key_id, runtime_origin, a2a_endpoint,"
         " service_epoch, binding_version, expires_at, status"
         " from runtime_bindings where catalog_agent_id = ? and status = 'active'"
         " order by binding_version desc",
@@ -126,7 +126,7 @@ def active_bindings(conn: Any, catalog_agent_ids: list[str]) -> dict[str, Any]:
     now = datetime.now(UTC)
     placeholders = ",".join("?" for _ in catalog_agent_ids)
     rows = conn.execute(
-        "select binding_id, catalog_agent_id, merchant_id, key_id, runtime_origin,"
+        "select binding_id, catalog_agent_id, merchant_id, key_id, runtime_origin, a2a_endpoint,"
         " service_epoch, binding_version, expires_at, status"
         f" from runtime_bindings where catalog_agent_id in ({placeholders})"
         " and status = 'active' order by binding_version desc",
@@ -201,6 +201,7 @@ def public_projection(
         if mode == "share_code":
             return {**base, "state": "relay", "source": "merchant_setting"}
         if mode == "no_share_code":
+            # Direct remains the advertised preference; separately probe optional open-inquiry relay.
             return {**base, "state": "direct", "source": "merchant_setting"}
         if code_free_inquiry:
             return {**base, "state": "relay", "source": "merchant_setting"}
